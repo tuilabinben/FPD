@@ -39,26 +39,34 @@ serial reads, and heartbeats are never blocked by the LED.
 every ALIVE_INTERVAL_MS while idle, a live connection now shows
 itself as a slow, regular flicker; a dead one goes fully dark.
   
- * PROTOCOL — Python -> Board:
- *   PING                          heartbeat probe
- *   BYE                           graceful disconnect, IO0 off
- *   START:X0,Y0,Z0,X1,Y1,Z1       P2P absolute move
- *   STOP                          halt everything
- *   ROT_CW / ROT_CCW / ROT_STOP   jog rotation axis
- *   ARM_FWD / ARM_BACK / ARM_STOP jog arm-extension axis
- *   Z_UP / Z_DOWN / Z_STOP        jog Z axis
- *   HOME                          ramp ROT/ARM/Z back to 0
- *   ESTOP                         halt everything (panic)
- *
- * PROTOCOL — Board -> Python:
- *   PONG
- *   [CONNECTED] IO0 handshake success.
- *   [ALIVE] uptime: Xs
- *   [CLEARCORE POS] Vi tri hien tai -> X: F mm | Y: F mm | Z: F mm (P%)
- *   [JOG POS] ROT: F deg | ARM: F mm | Z: F mm
- *   DA DEN DIEM DICH THANH CONG      (P2P move complete)
- *   DUNG KHAN CAP                    (stop/estop acknowledged)
- *   [HOME] Homing started.
- *   [HOME] Homing complete. ROT=0 ARM=0 Z=0
- *   [WARN] ...   (an interlock auto-canceled a conflicting motion)
- *   [ERROR] ...  (malformed or out-of-sequence command)
+## Serial Communication Protocol
+
+The STCR4000S uses a custom, two-way ASCII string protocol over USB Serial (Baud: 115200). 
+
+### ➔ Python to ClearCore (Commands)
+| Command | Action |
+| :--- | :--- |
+| `PING` | Heartbeat probe to check hardware connection |
+| `BYE` | Graceful disconnect, turns off IO0 indicator |
+| `START:X0,Y0,Z0,X1,Y1,Z1` | Initiate absolute Point-to-Point (P2P) move |
+| `STOP` | Halt all active P2P or Jog motion |
+| `ROT_CW` / `ROT_CCW` / `ROT_STOP` | Jog rotation axis (Turntable) |
+| `ARM_FWD` / `ARM_BACK` / `ARM_STOP` | Jog arm-extension axis |
+| `Z_UP` / `Z_DOWN` / `Z_STOP` | Jog Z axis |
+| `HOME` | Ramp ROT/ARM/Z back to Absolute 0 |
+| `ESTOP` | Emergency stop (halts everything immediately) |
+
+### ⬅ ClearCore to Python (Feedback)
+| Response | Meaning |
+| :--- | :--- |
+| `PONG` | Heartbeat response to GUI |
+| `[CONNECTED]` | IO0 handshake success |
+| `[ALIVE] uptime: Xs` | Status ping with board uptime |
+| `[CLEARCORE POS] Vi tri hien tai -> X: F mm \| Y: F mm \| Z: F mm (P%)` | Live P2P telemetry and completion percentage |
+| `[JOG POS] ROT: F deg \| ARM: F mm \| Z: F mm` | Live jog coordinate telemetry |
+| `DA DEN DIEM DICH THANH CONG` | P2P move successfully completed |
+| `DUNG KHAN CAP` | Stop/ESTOP command acknowledged |
+| `[HOME] Homing started.` | Homing sequence initiated |
+| `[HOME] Homing complete. ROT=0 ARM=0 Z=0` | Homing sequence finished |
+| `[WARN] ...` | An interlock auto-canceled a conflicting motion |
+| `[ERROR] ...` | Malformed or out-of-sequence command received |
