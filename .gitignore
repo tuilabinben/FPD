@@ -9,11 +9,6 @@ robot_sim/keybinds.json
 robot_sim/appearance.json
 robot_sim/limit_presets.json
 
-# Test scratch space and compiled test binaries
-tests/_tmp/
-tests/firmware_check
-tests/firmware_check.exe
-
 # PyInstaller build output, once packaging is set up
 build/
 dist/
