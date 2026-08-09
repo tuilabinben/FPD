@@ -1,412 +1,307 @@
-Robot Motion Controller — P2P + Joystick
-=============================================================================
-
-    python robot_simulator_launcher.py
-
-**Optional but recommended: `pip install pillow`.** The custom controls
-are canvas-drawn, and the Tk canvas has no anti-aliasing — a rounded
-corner comes out as hard stair-steps. With Pillow installed, every rounded
-surface is instead rendered at 4× and downsampled with LANCZOS, which
-gives genuinely smooth edges. Without it the app still runs and falls back
-to arc-based corners (correct geometry, just aliased).
-
-**The app is DPI-aware.** Tk declares itself DPI-unaware by default, so on
-any Windows display above 100% scaling the OS renders the window at 96 DPI
-and then *bitmap-stretches* it to the real size — which is what made
-everything look low-resolution regardless of how carefully it was drawn.
-`robot_sim/hidpi.py` declares awareness before the first widget exists,
-sets Tk's font scaling, and scales the hard-coded pixel dimensions so the
-UI draws on the monitor's real pixel grid at its intended physical size.
-
-Merges two control modes on one shared connection layer:
-  - POINT TO POINT : absolute X/Y/Z target motion 
-  - JOYSTICK        : held-key jog on ROT/ARM/Z axes
-
-SHARED ACROSS BOTH MODES:
-  - One connection panel + 3-LED status (COM PORT / CLEARCORE IO0 / HEARTBEAT)
-  - PING/PONG heartbeat every HEARTBEAT_INTERVAL_MS with missed-beat tracking
-  - One unified Event Log (>> sent / << received, color-tagged)
-  - A software-only simulation fallback when no hardware is confirmed, so
-    both modes remain fully testable/demoable with nothing plugged in
-
-SAFETY DESIGN (defense in depth — enforced in BOTH layers independently):
-  - Switching mode in the GUI auto-stops any active jog axis + any P2P move
-  - Firmware also refuses to run a P2P move while a jog axis is held (and
-    vice versa) — a backstop in case the GUI and firmware ever desync
-  - There is exactly ONE emergency-stop code path (emergency_stop_all):
-    the P2P panel's button and the Space key both call it. One audited
-    function beats several similar ones — which is also why the jog
-    panel's duplicate button and the P2P panel's plain STOP were removed.
-  - PING always gets a PONG reply immediately, even mid-motion, so the
-    heartbeat never times out just because the board is busy
-
-LED ACTIVITY INDICATOR:
-    The board's status LED (LED_PIN / ClearCore IO0) is now a pure
-    ACTIVITY light instead of a steady "connected" light:
-    - Every command RECEIVED from Python triggers a very short,
-        fast flash (see LED_FLASH_RX_MS) — the faster the commands
-      arrive (e.g. held jog keys), the faster it flickers.
-    - Every feedback line SENT to Python triggers a slightly longer
-      flash (see LED_FLASH_TX_MS), so you can visually confirm the
-      board is actively reporting back.
-      
-  Both flashes are done with millis()-based timing (ledPulse() /
-the LED section of loop()) — never delay() — so motion stepping,
-serial reads, and heartbeats are never blocked by the LED.
-
-  A steady "connected" LED is no longer used: with feedback flowing
-every ALIVE_INTERVAL_MS while idle, a live connection now shows
-itself as a slow, regular flicker; a dead one goes fully dark.
-  
-## Speed: one fixed reference, one percentage per motor
-
-The reference speed is a **constant 150 motor RPM**. It is not editable —
-it used to be, which made two knobs doing the same job (raising the master
-and raising a percentage produced identical motion). There is now exactly
-one way to change a speed: that axis's percentage.
+# STCR4000S — Robot Motion Controller
 
 ```
-axisMotorRpm = 150 * (axisPercent / 100) * AXIS_RPM_SCALE
+python robot_simulator_launcher.py
 ```
 
-`AXIS_RPM_SCALE` is calibration, not a setting. The axes are geared very
-differently, so a raw percentage of one shared RPM would mean nothing:
+> **Optional:** `pip install pillow` — enables anti-aliased rounded corners via 4× supersampling. Without it the app still runs, just with aliased arc-based corners.
 
-| Axis | Drivetrain (from the MATLAB model) | Scale | Default | Real speed |
-| :--- | :--- | :--- | :--- | :--- |
-| A1M / A2M | ratio **unmeasured** | 1.000 | **125%** | 187.5 motor RPM |
-| RM  | `i_RM_total = 4.375 × 6.5 = 28.4375:1` | 1.000 | **75%** | 23.74 °/s |
-| ZM  | 20 mm per motor rev | 0.750 | **50%** | 18.75 mm/s |
+> **DPI-aware.** The app declares DPI awareness before the first widget, so it draws on your monitor's real pixel grid instead of being bitmap-stretched by Windows. See `robot_sim/hidpi.py`.
 
-Settings shows the real motor RPM beside each percentage as you type.
+---
 
-**Above the default, the field turns amber and warns.** The defaults are
-the fastest settings tested stable on this machine, so "above the default"
-and "past what has been validated" are the same statement. Higher values
-are still accepted after a confirmation — the warning is about lost steps,
-overshoot and vibration on an open-loop drive, not a hard block.
+## Table of Contents
 
-**There is no hard percentage cap.** Safe for a specific reason rather
-than by luck: a percentage is a multiplier, not a speed, and every axis it
-feeds still has a real backstop underneath — `ROT_VEL_MAX_DEG_S` and
-`Z_VEL_MAX_MM_S` for the two axes whose gearing is known,
-`ARM_MOTOR_RPM_MAX` for the one whose gearing isn't. Set RM to 900% and it
-still stops at 120 °/s. The 1% floor stays, because 0% freezes an axis and
-a negative value would reverse it.
+1. [Overview](#overview)  
+2. [Control Modes](#control-modes)  
+3. [Speed System](#speed-system)  
+4. [Arm Angle Convention](#arm-angle-convention)  
+5. [Boundaries & Coordinate Reference](#boundaries--coordinate-reference)  
+6. [Calibration](#calibration)  
+7. [Jog Keys & Gamepad](#jog-keys--gamepad)  
+8. [Appearance](#appearance)  
+9. [Settings](#settings)  
+10. [Serial Protocol Reference](#serial-protocol-reference)  
+11. [Safety Design](#safety-design)  
+12. [Tests](#tests)  
 
-> **`ARM_GEAR_RATIO` is still a placeholder and should be measured.**
-> It no longer affects arm *speed* — the ratio cancels between the °/s
-> conversion and the pulses-per-degree conversion, so the pulse rate
-> depends only on the RPM asked for. But it still controls every **angle**
-> the board reports and every **absolute position** it drives to, so
-> `MOVE_A1`/`MOVE_A2`, the reported elbow angle, the reach figures and IK
-> targets are wrong by exactly this factor until it is measured. Jog is
-> unaffected. To measure: mark the elbow, command a known number of motor
-> revolutions, divide by the joint angle actually swept.
+---
 
-## The arm angle: rotation from home
+## Overview
 
-**`A1M_POS` / `A2M_POS` read 0° at home and count up as the elbow turns
-out.** Fully retracted is 0°, straight out is 120°, and the reach that
-corresponds to each is unchanged: 133.2 mm at 0°, 613.2 mm at 120°.
+A desktop control application for the STCR4000S frog-leg robot, built on Python/Tkinter with a ClearCore firmware backend. It merges two control modes on one shared connection:
 
-This replaces `th3_cad`, the CAD elbow angle from `mophong_init.m`, where
-retracted was 60° and straight was 180°. The reason is not presentation:
+- **Point-to-Point (P2P):** Absolute X/Y/Z target motion with full inverse kinematics
+- **Joystick:** Held-key (or gamepad) jog on RM / A1M / A2M / ZM axes
 
-> **The board could never produce a real `th3_cad`.** It counts steps from
-> wherever it was last referenced and scales them by `ARM_GEAR_RATIO`, an
-> unmeasured placeholder. The `60°` it used to print at home was zero
-> rotation wearing a CAD label — a number that looked like a measured
-> angle and wasn't. Reporting rotation from home is the *same* number with
-> an honest name, and it reads the way an operator thinks: home is
-> nothing, and it counts up.
+Both modes share:
+- One serial connection panel with 3-LED status (COM Port / ClearCore IO0 / Heartbeat)
+- PING/PONG heartbeat with missed-beat tracking
+- Unified Event Log (`>>` sent / `<<` received, color-tagged)
+- Software-only simulation fallback when no hardware is connected — both modes remain fully testable
 
-`th3_cad` still exists, because the frog-leg geometry is genuinely written
-in it, but only inside `fold_angle_to_reach()` / `reach_to_fold_angle()`
-(and `reachFromFoldAngle()` / `foldAngleFromReach()` on the board), which
-add and remove `ARM_ZERO_CAD_DEG = 60`. No other code mentions it, and
-`tests/python_check.py` fails the build if it leaks out again.
+---
 
-Everything that was expressed in the old frame moved with it:
+## Control Modes
 
-| | old (`th3_cad`) | new (from home) |
-| :--- | ---: | ---: |
-| Home / retracted | 60° | **0°** |
+| Mode | What it does | How targets are specified |
+|:-----|:-------------|:------------------------|
+| **P2P** | Moves to an absolute position | X, Y, Z coordinates (Cartesian) or direct joint angles |
+| **Joystick** | Continuous jog while a key/button is held | Per-axis direction (CW/CCW, FWD/BACK, UP/DOWN) |
+
+Switching modes auto-stops any active motion. The firmware independently refuses conflicting commands as a backstop.
+
+---
+
+## Speed System
+
+The reference speed is a **fixed 150 motor RPM** (not editable). Each axis has one speed knob: its **percentage**.
+
+```
+axisMotorRpm = 150 × (axisPercent / 100) × AXIS_RPM_SCALE
+```
+
+`AXIS_RPM_SCALE` is a calibration constant that accounts for different gearing across axes:
+
+| Axis | Drivetrain | Scale | Default % | Resulting Speed |
+|:-----|:-----------|------:|----------:|:----------------|
+| A1M / A2M | Gear ratio unmeasured | 1.000 | 125% | 187.5 motor RPM |
+| RM | `i_RM = 4.375 × 6.5 = 28.4375:1` | 1.000 | 75% | 23.74 °/s |
+| ZM | 20 mm per motor rev | 0.750 | 50% | 18.75 mm/s |
+
+- Settings shows the real motor RPM beside each percentage as you type.
+- Above the tested default, the field turns **amber** with a warning about potential lost steps, overshoot, and vibration on an open-loop drive. Higher values are still accepted after confirmation.
+- There is no hard percentage cap. Each axis still has a real backstop underneath: `ROT_VEL_MAX_DEG_S`, `Z_VEL_MAX_MM_S`, or `ARM_MOTOR_RPM_MAX`.
+- The 1% floor stays — 0% would freeze an axis, and negatives would reverse it.
+
+---
+
+## Arm Angle Convention
+
+`A1M_POS` / `A2M_POS` read **0° at home** and count up as the elbow extends outward:
+
+| Pose | Old (`th3_cad`) | Current (from home) |
+|:-----|----------------:|--------------------:|
+| Home / fully retracted | 60° | **0°** |
 | Straight arm (singularity) | 180° | **120°** |
-| JEL drawing limit, 575 mm | 151.72° | **91.72°** |
+| JEL drawing limit (575 mm reach) | 151.72° | **91.72°** |
 | Singularity warning | 170° | **110°** |
-| Factory elbow band | 60°…180° | **0°…120°** |
+| Factory elbow band | 60°–180° | **0°–120°** |
 
-> **Saved settings are migrated, not converted.** `machine_settings.json`
-> now carries a `_schema`. A file written before this change has taught
-> elbow limits of `60…180` that would silently be read as *60–180 degrees
-> of rotation* — a band starting 60° away from home, so the arm couldn't
-> retract and you'd be hunting a mechanical fault that isn't there. Those
-> four values are dropped with a warning telling you to re-teach them.
-> They are not converted, because they were produced by the same
-> unmeasured ratio and were never real angles to convert. Speeds and the
-> ZM/RM boundaries are untouched — mm and RM degrees didn't change meaning.
+**Why the change:** The board counts motor steps from wherever it was referenced and scales them by `ARM_GEAR_RATIO`. It could never produce a real `th3_cad` — the `60°` it used to print at home was zero rotation wearing a CAD label. Reporting rotation-from-home is the same number with an honest name, and it reads the way an operator thinks: home is zero, and it counts up.
 
-## Boundaries and the coordinate reference
+The `th3_cad` frame still exists internally inside `fold_angle_to_reach()` / `reach_to_fold_angle()`, which add and remove `ARM_ZERO_CAD_DEG = 60`. No other code references it.
 
-The factory envelope is what the *structure* allows. What the machine may
-actually use is narrower and depends on what is installed around it, so
-those limits belong to the operator:
+> **Settings migration:** Saved files carry a `_schema` version. Old elbow limits (written in the `th3_cad` frame) are **dropped with a warning** — they cannot be safely converted because they were produced with an unmeasured gear ratio. Re-teaching them is two SET HERE presses per arm. Speed and ZM/RM boundaries are kept, since their units didn't change.
 
-- **Settings → Boundaries** has a min/max box for ZM and RM, and each one
-  has a **SET HERE** button that captures the machine's current position —
-  jog to the lowest point the lift may go, press it, done.
-- **The elbow rows are SET HERE only — their boxes cannot be typed in.**
-  The board's elbow angle is scaled by `ARM_GEAR_RATIO`, which has not
-  been measured, so a typed `90°` means nothing; *"wherever the arm is
-  standing right now"* is exact regardless.
-- **The elbows have no envelope at all.** Whatever `A1M_POS` / `A2M_POS`
-  reads is accepted — four figures included. Because the reported angle
-  rides on that unmeasured ratio, the arm really can read `1000°` at a
-  pose CAD calls `140°`, so any ceiling written here would be a guess, and
-  a guess that rejects a pose the arm is physically standing at stops the
-  operator teaching the machine at all. ZM and RM keep their real
-  envelopes, because for those two the scale **is** known and a number
-  outside it really is impossible.
-- **The elbow pair is unordered.** Jog to one stop, SET HERE; jog to the
-  other, SET HERE. Which you reached first does not matter — both numbers
-  are stored exactly as captured and sorted where they are *read*
-  (`armBand()` on the board, `_limit_pair()` in the GUI). Sorting on write
-  would fold your first taught position against whatever stale value sat
-  in the other box, so your second SET HERE would quietly overwrite your
-  first. The only arrangement refused is both ends landing on the *same*
-  position, which pins the axis where it stands.
-- **Each arm has its own pair.** Sharing one arm limit is how A2M used to
-  be driven past its stop while A1M's angle was the one being checked.
-- A ZM or RM pair can never invert or collapse; a MIN above its MAX would
-  make every position illegal and the axis couldn't be jogged back out.
+---
 
-- **RESET COORDINATES** zeroes every axis counter at the current position and
-  is what turns the soft limits on. It measures nothing — it trusts that
-  you jogged the machine to the reference pose — so it asks first and is
-  refused while anything is moving.
+## Boundaries & Coordinate Reference
 
-> **Firmware note.** An unbounded elbow range means a taught band can span
-> past the straight-arm point, and reach is a cosine of
-> `θ + ARM_ZERO_CAD_DEG` — monotonic only across half a period. Taking the
-> min/max of the two *endpoints* is therefore wrong once the band crosses
-> an extreme: with a band of −260°…480° both ends land on the same part of
-> the curve, so the endpoint-only version reported a reachable radius of
-> 593.9–613.2 mm and refused every ordinary target. `reachBandFor()`
-> checks the angles where `θ + 60` is a multiple of 180 (θ = 120, 300,
-> −60, …), which is where the cosine actually reaches its extremes.
+The factory envelope is what the structure allows. The operator's installed environment is usually narrower, so those limits are yours to set:
 
-The board holds limits in **RAM only**, so the GUI is the system of
-record: it saves them to `robot_sim/machine_settings.json` and re-sends
-everything the moment the PING/PONG handshake succeeds.
+- **Settings → Boundaries** has min/max boxes for ZM and RM, plus a **SET HERE** button that captures the machine's current position — jog to the physical limit, press it, done.
+- **Elbow rows are SET HERE only.** Because the reported angle depends on `ARM_GEAR_RATIO` (unmeasured), typing `90°` means nothing. *"Wherever the arm is standing right now"* is exact regardless.
+- **The elbow pair is unordered.** Jog to one stop, SET HERE; jog to the other, SET HERE. The software sorts them where they are read, not where they are stored.
+- **Each arm has its own pair.** Sharing one limit is how A2M used to be driven past its stop while A1M's angle was checked.
+- ZM and RM pairs cannot invert or collapse — that would make every position illegal with no way to jog back out.
 
-### Saved limit sets
+**RESET COORDINATES** zeroes every axis counter at the current position and activates soft limits. It does not measure anything — it trusts that you jogged to the reference pose. It asks for confirmation and is refused while anything is moving.
 
-One machine often needs more than one envelope — a tight one for running
-against a cassette, a wider one for maintenance. The **SAVED LIMIT SETS**
-row stores them by name in `robot_sim/limit_presets.json`:
+### Saved Limit Sets
 
-| Button | Does |
-| :--- | :--- |
-| **SAVE** | Saves the boxes as currently shown, under the name in the box |
-| **LOAD** | Fills the form from a saved set — you still press APPLY |
-| **DELETE** | Deletes the saved set only; the machine's live limits are untouched |
+One machine often needs multiple envelopes (tight for production, wide for maintenance). **Settings → Boundaries → SAVED LIMIT SETS** stores named presets in `robot_sim/limit_presets.json`:
 
-The name field is an editable dropdown: type a new name to create a set,
-pick an existing one to target it. A few deliberate behaviours:
+| Button | Action |
+|:-------|:-------|
+| **SAVE** | Stores the current boundary values under the entered name. Validates first — an invalid set is refused. |
+| **LOAD** | Fills the form from a saved set. You still press APPLY to send it to the machine. |
+| **DELETE** | Removes the saved preset only. The machine's live limits are untouched. |
 
-- **SAVE validates first.** A preset is something you'll recall later and
-  trust without re-reading, so an invalid or inverted set is refused
-  rather than stored as a fault waiting to be found.
-- **A preset must carry every boundary.** A partial one would load some
-  axes and silently leave others on whatever was in the boxes.
-- Overwriting and deleting both ask first, and a corrupt presets file
-  degrades to "no presets" instead of taking the app down.
+---
 
-## Jog keys
+## Calibration
 
-The default layout is `A/D` = RM · `I/K` = A1M · `O/L` = A2M · `W/S` = ZM.
+The software ships with theoretical constants from the MATLAB/Simscape CAD model. **These are placeholders — they must be measured on your physical machine.** If the robot over-shoots or under-shoots its target, this is almost certainly why.
 
-Bindings are editable in **Settings → Controls** and saved to
-`robot_sim/keybinds.json`. Click a key box, press the key you want; Escape
-cancels. If the key is already in use the two rows **swap**, rather than
-leaving an axis unbound. `SPACE` (e-stop), `ESC` (settings) and `H` (home)
-are reserved and cannot be taken.
+### Z-Axis (Height) — Ball Screw Lead
+- **Default assumption:** 20 mm per motor revolution
+- **How to measure:** Put a ruler on the carriage, command a known distance, measure actual travel.
+- **To apply:** Send `SET_Z_LEAD:<mm_per_rev>` over serial. No re-flash needed.
 
-There are **no preset layouts and no advice about which keys sit near
-which**. What is comfortable depends on the hands using it, and a
-controller that argues with the operator over their own keyboard is noise
-between them and the machine. Only three things are refused, all of them
-conditions that would leave the app broken rather than merely unusual:
+### RM (Rotation) — Gear Ratio
+- **Default assumption:** 28.4375 (from `4.375 × 6.5` in the Simscape model)
+- **How to measure:** Command a 90° rotation, measure actual angle swept. True ratio = `28.4375 × (actual / 90)`.
+- **To apply:** Send `SET_ROT_RATIO:<ratio>` over serial. No re-flash needed.
 
-- an action with no key at all — that axis silently becomes unreachable
-  from the keyboard, with nothing on screen to explain why;
-- one key driving two actions, for the same reason;
-- taking `SPACE`, `ESC` or `H` — losing the emergency stop, the settings
-  window or HOME to a rebinding is not a trade worth offering.
+### AM (Elbows) — Gear Ratio
+- **Default assumption:** 2.0 (motor degrees per frog-leg degree, from the Simscape linkage model)
+- **How to measure:** Mark the elbow, command a known number of motor revolutions, divide by the joint angle actually swept.
+- **To apply:** Update `ARM_GEAR_RATIO` in `robot_sim/config.py` **and** send `SET_ARM_RATIO:<ratio>` to the firmware.
 
-Everything else applies without a question being asked.
+> **What the arm ratio affects:** It does NOT affect jog speed (the ratio cancels out in the pulse-rate math). But it controls every **angle** the board reports and every **absolute position** it drives to — so all IK targets, reach figures, and `MOVE_A1`/`MOVE_A2` commands are wrong by exactly this factor until measured.
 
-**Your layout is remembered.** APPLY writes it to `keybinds.json` and the
-app reads it back at startup, so a custom layout survives restarts;
-DEFAULTS is the way back to `A/D · I/K · O/L · W/S`. A file that is corrupt
-or missing an action is discarded **whole** rather than merged — a
-half-loaded keymap would leave some axes on your keys and others on the
-defaults, which is much harder to notice than a clean revert.
+---
 
-Applying a layout takes effect immediately: the binder clears its old
-bindings first, and every on-screen key name is live, so the pads and the
-hint strip never advertise a key that no longer does anything.
+## Jog Keys & Gamepad
+
+### Keyboard
+Default layout: `A/D` = RM · `I/K` = A1M · `O/L` = A2M · `W/S` = ZM.
+
+- Fully customizable in **Settings → Controls**. Click a key box, press the new key. If it's already in use, the two rows **swap** (no axis is ever left unbound).
+- Reserved keys: `SPACE` (E-STOP), `ESC` (Settings), `H` (Home) — cannot be reassigned.
+- Saved to `robot_sim/keybinds.json` and restored on startup.
+- A corrupt or incomplete keybinds file is discarded whole rather than half-merged.
+
+### Xbox Gamepad
+| Input | Axis |
+|:------|:-----|
+| RT / RB | A1M forward / backward |
+| LT / LB | A2M forward / backward |
+| X / B | RM CW / CCW |
+| A / Y | ZM up / down |
+
+Both arms can be driven simultaneously and independently. The gamepad goes through the same `jog_start()`/`jog_stop()` path as the keyboard — it never talks to the board directly.
+
+---
 
 ## Appearance
 
-Seven colour schemes ship with the app, picked in **Settings →
-Appearance**. The default is **Graphite** — near-monochrome dark, with
-colour used only where it carries meaning.
+Seven color schemes, selectable in **Settings → Appearance**:
 
-| # | Scheme | |
-| :-- | :--- | :--- |
+| # | Scheme | Description |
+|:--|:-------|:------------|
 | 1 | **Graphite** *(default)* | Near-monochrome dark, near-white accent |
-| 2 | Pure Mono | Greyscale chrome; axes separated by lightness only |
-| 3 | Slate Blue | Cool greys, one restrained steel blue |
+| 2 | Pure Mono | Greyscale chrome |
+| 3 | Slate Blue | Cool greys, steel blue accent |
 | 4 | Nordic Light | Light theme, muted blue — for bright rooms |
 | 5 | Warm Paper | Warm off-white, muted clay accent |
 | 6 | Carbon Orange | Very dark, industrial orange |
-| 7 | Mint | The previous scheme, kept so the change is reversible |
+| 7 | Mint | Previous default scheme, kept for reversibility |
 
-The choice is saved to `robot_sim/appearance.json` and **applies
-immediately** — the window is rebuilt in place, keeping the serial
-connection, your settings, every field value and the event log.
+- Saved to `robot_sim/appearance.json` and applies **immediately** — the window rebuilds in place, keeping the serial connection, all field values, and the event log.
+- **Refused while the machine is moving.** The rebuild briefly destroys and recreates the jog pads and E-STOP button, which would remove the operator's ability to stop the machine.
 
-It is refused while the machine is moving. The rebuild destroys and
-recreates the jog pads and the E-STOP button, and doing that with an axis
-under power — even for the few milliseconds it takes — would remove your
-ability to stop the machine.
-
-Under the hood: every widget module does `from ..theme import PANEL_BG`,
-which copies the *value* at import time, so rebinding `theme.PANEL_BG`
-alone is not enough. `apply_palette()` walks every imported `robot_sim.*`
-module and rebinds any name that still holds the **old** value —
-comparing against the old value rather than matching by name is what
-makes that sweep safe, since a module with its own unrelated `BORDER`
-simply will not match.
-
-Schemes are not free-form. `palettes.py` documents five rules every one
-must satisfy, and they are enforced by a test rather than by eye:
-
-- Surface levels must be separable from their neighbours (flat design has
-  no shadows, so those steps do the work shadows used to).
-- Fields must read as recessed and read-only wells deeper still — that is
-  the operator's only cue for what is editable.
-- **Red means stop and amber means warning in every scheme.** No palette
-  may use amber as its primary accent, or a warning stops standing out.
-- **Motor colours come in two groups, not four hues.** `A1M` and `A2M`
-  share the primary accent; `RM` and `ZM` share the secondary. The arms
-  are a pair and the base axes are a pair, so the colour answers "which
-  kind of axis" and the label answers "which one" — which is how a row of
-  readouts actually gets scanned. They were red / purple / blue / teal,
-  which made that row look like a different application.
-
-  The two tones are solved for target luminances ~45 apart, not blended
-  by a fixed ratio: a fixed 30% blend moves brightness by an amount that
-  depends on where the accent started, which collapsed some schemes to a
-  2-unit separation — invisible, and worse than the clashing hues it
-  replaced. Separation by lightness also means they survive red-green
-  colour blindness.
-- Body text needs ≥ 110 luminance contrast against its card.
+---
 
 ## Settings
 
-Five tabs — **Speed**, **Boundaries**, **Controls**, **PID**,
-**Appearance** — each with its own APPLY and DEFAULTS that act **only on
-that tab**. A global reset that also wiped your boundaries because you
-wanted to undo a speed change is the failure this avoids. `Esc` opens and
-closes the window; it is refused while a program is running.
+Five tabs — **Speed**, **Boundaries**, **Controls**, **PID**, **Appearance** — each with its own APPLY and DEFAULTS that act **only on that tab**. A global reset that wiped your boundaries because you wanted to undo a speed change is the failure this avoids.
 
-Each tab body **scrolls on its own** when its content is taller than the
-window, and the scrollbar only appears when it is actually needed. The
-action bar is packed against the bottom *before* the body, so APPLY is
-never the thing that scrolls out of reach.
+- `ESC` opens and closes the window (refused while a program is running).
+- Each tab scrolls independently. The action bar is always visible at the bottom.
+- PID gains are **individually lockable** — locking Kd freezes just Kd; the other terms stay editable, and DEFAULTS skips locked gains.
 
-## Restart
+**RESTART** (in the connection row) relaunches the application in-place via `os.execv`. It sends `BYE`, closes the port cleanly, asks for confirmation, and is **refused while anything is moving**.
 
-`RESTART`, between PING and SETTINGS in the connection row, relaunches the
-application in place (`os.execv` — the same process, not a second instance
-fighting for the COM port). It sends `BYE` and closes the port on the way
-out so the board sees a clean disconnect, asks for confirmation, and is
-**refused while anything is moving**: the process is about to be replaced,
-and an axis under power with no controller attached is a runaway nothing
-in the app can stop.
+---
 
-PID gains are **individually lockable**. Locking Kd freezes just Kd — the
-other terms stay editable and keep being sent, and DEFAULTS skips anything
-locked rather than silently overriding it.
+## Serial Protocol Reference
 
-## Serial Communication Protocol
+USB Serial, **115200 baud**, custom two-way ASCII string protocol.
 
-The STCR4000S uses a custom, two-way ASCII string protocol over USB Serial (Baud: 115200).
+### Commands (Python → ClearCore)
 
-### ➔ Python to ClearCore (Commands)
-| Command | Action |
-| :--- | :--- |
-| `PING` / `BYE` | Heartbeat probe / graceful disconnect |
-| `STATUS` / `PROFILE` / `LIMITS` | Report state, speed profile, active limits |
-| `SET_SPEED:rpm,acc,rotPct,armPct,zPct` | Universal RPM + per-motor percentages |
-| `SET_PID:kp,ki,kd[,N]` | Store the PID gains (one preset, no form field) |
-| `PID_ON` / `PID_OFF` / `PID_RESET` | Enable / disable / restore the preset |
-| `SET_LIMIT:axis,MIN\|MAX,value` | Set a travel limit; axis = `Z`/`ROT`/`A1`/`A2` |
-| `SET_LIMIT_HERE:axis,MIN\|MAX` | Take the **current position** as that limit |
-| `RESET_LIMITS` | Restore the factory envelope |
-| `SET_LIMIT_ENFORCE:axis,0\|1` | Switch **one** axis's boundary off / on; values kept |
-| `SET_LIMITS_ENABLED:0\|1` | The same for every axis at once (ANDs with the above) |
-| `RESET_COORD` (alias `SET_REF`) | Zero every axis counter here; enables soft limits |
+| Command | Description |
+|:--------|:------------|
+| **Connection** | |
+| `PING` | Heartbeat probe |
+| `BYE` | Graceful disconnect |
+| **Status & Reporting** | |
+| `STATUS` | Report current state |
+| `PROFILE` | Report active speed profile |
+| `LIMITS` | Report active soft limits |
+| **Speed & PID** | |
+| `SET_SPEED:rpm,acc,rotPct,armPct,zPct` | Set master RPM + per-axis percentages |
+| `SET_PID:kp,ki,kd[,N]` | Store PID gains |
+| `PID_ON` / `PID_OFF` / `PID_RESET` | Enable / disable / restore PID preset |
+| **Boundaries** | |
+| `SET_LIMIT:axis,MIN\|MAX,value` | Set a travel limit (`axis` = Z / ROT / A1 / A2) |
+| `SET_LIMIT_HERE:axis,MIN\|MAX` | Capture current position as that limit |
+| `RESET_LIMITS` | Restore factory envelope |
+| `SET_LIMIT_ENFORCE:axis,0\|1` | Enable/disable one axis's boundary check |
+| `SET_LIMITS_ENABLED:0\|1` | Master on/off for all boundaries |
+| **Coordinate Reference** | |
+| `RESET_COORD` (alias `SET_REF`) | Zero all axis counters; activates soft limits |
 | `CLEAR_REF` | Drop the reference, suspend soft limits |
-| `LOAD:...` / `LOAD_BOTH:...` | Load a joint-space program (A→B, or dual-arm) |
-| `MOVE_XYZ:arm,X,Y,Z` / `LOAD_XYZ:...` | Cartesian targets — the board runs the IK. **HOME is X 0, Y 0, Z 0**: X/Y from the turntable axis and signed, Z above HOME and never negative |
-| `LOAD_XYZ_BOTH:Xa,Ya,Za,Xb,Yb,Zb` | Simultaneous dual-arm. One carriage, so **Za must equal Zb** — the 9 mm deck offset is the board's job |
-| `IK:arm,X,Y,Z` / `FK:d1,rot,a1,a2,arm` | Compute and report only, no motion |
-| `RUN` / `STOP` / `HOME` / `ESTOP` | Run loaded program / halt / PLC home / e-stop. HOME drives ClearCore's **IO-0 terminal into the PLC's X0 input** — a wire; the Ethernet link is read-only and cannot start a home |
-| `ROT_CW` / `ROT_CCW` / `ROT_STOP` | Jog the turntable |
-| `A1_FWD` / `A1_BACK` / `A1_STOP` | Jog arm 1's elbow alone |
-| `A2_FWD` / `A2_BACK` / `A2_STOP` | Jog arm 2's elbow alone |
-| `ARM_FWD` / `ARM_BACK` / `ARM_STOP` | Both elbows together (what LINK sends) |
-| `Z_UP` / `Z_DOWN` / `Z_STOP` | Jog the lift |
-| `MOVE_A1:th3` / `MOVE_R1:mm` | One elbow to an absolute angle / radial reach |
-| `JOG_HB` | Jog dead-man keep-alive (host must send every ~150 ms) |
+| **Motion — P2P** | |
+| `LOAD:...` / `LOAD_BOTH:...` | Load a joint-space program (single or dual-arm) |
+| `MOVE_XYZ:arm,X,Y,Z` / `LOAD_XYZ:...` | Cartesian target — board runs IK. **HOME = X 0, Y 0, Z 0** |
+| `LOAD_XYZ_BOTH:Xa,Ya,Za,Xb,Yb,Zb` | Dual-arm Cartesian. **Za must equal Zb** (one carriage; 9 mm deck offset handled internally) |
+| `IK:arm,X,Y,Z` / `FK:d1,rot,a1,a2,arm` | Compute-only queries, no motion |
+| `RUN` | Execute loaded program |
+| `STOP` / `ESTOP` | Halt motion / emergency stop |
+| `HOME` | PLC homing via IO-0 → X0 wire (Ethernet link is read-only) |
+| **Motion — Jog** | |
+| `ROT_CW` / `ROT_CCW` / `ROT_STOP` | Jog turntable |
+| `A1_FWD` / `A1_BACK` / `A1_STOP` | Jog arm 1 elbow |
+| `A2_FWD` / `A2_BACK` / `A2_STOP` | Jog arm 2 elbow |
+| `ARM_FWD` / `ARM_BACK` / `ARM_STOP` | Both elbows together |
+| `Z_UP` / `Z_DOWN` / `Z_STOP` | Jog lift |
+| `JOG_HB` | Jog dead-man keep-alive (~150 ms interval) |
+| `MOVE_A1:th3` / `MOVE_R1:mm` | Absolute elbow angle / radial reach |
+| **Calibration** | |
+| `SET_Z_LEAD:<mm>` | Set ZM ball screw lead (no re-flash) |
+| `SET_ROT_RATIO:<ratio>` | Set RM gear ratio (no re-flash) |
+| `SET_ARM_RATIO:<ratio>` | Set AM gear ratio (no re-flash) |
 | `SET_BOOST:multiplier` | Temporary jog speed multiplier |
 
-### ⬅ ClearCore to Python (Feedback)
+### Feedback (ClearCore → Python)
+
 | Response | Meaning |
-| :--- | :--- |
-| `PONG` / `[CONNECTED]` | Heartbeat response / IO0 handshake success |
-| `[ALIVE] uptime: Xs` | Status ping with board uptime |
-| `[CLEARCORE POS] D1: F mm \| ROT: F deg \| A1M: F deg \| A2M: F deg (P%)` | Live P2P telemetry and completion percentage |
-| `[JOG POS] ROT: F deg \| A1M: F deg \| A2M: F deg \| Z: F mm` | Live jog telemetry, both elbows |
-| `[SPEED] master F RPM, F RPM/s \| RM F% \| ARM F% \| ZM F%` | Active universal speed and percentages |
-| `[PROFILE] RM F deg/s ... (CLAMPED)` | Resulting real speeds; `CLAMPED` = ceiling hit |
-| `[LIMITS] Z a..b mm \| ROT a..b deg \| A1 a..b deg \| A2 a..b deg` | Active soft limits |
-| `[LIMIT_SET] axis END = value` | A limit was accepted |
-| `[COORD_RESET] ...` | Counters zeroed; soft limits now active |
-| `[LIMIT] ROT_CW / Z_UP / A1_FWD ...` | An axis reached a limit and was stopped |
+|:---------|:--------|
+| `PONG` / `[CONNECTED]` | Heartbeat reply / IO0 handshake success |
+| `[ALIVE] uptime: Xs` | Idle status ping with board uptime |
+| `[CLEARCORE POS] D1: F mm \| ROT: F° \| A1M: F° \| A2M: F° (P%)` | Live P2P position + completion % |
+| `[JOG POS] ROT: F° \| A1M: F° \| A2M: F° \| Z: F mm` | Live jog position |
+| `[SPEED] master F RPM, F RPM/s \| RM F% \| ARM F% \| ZM F%` | Active speed configuration |
+| `[PROFILE] RM F °/s ... (CLAMPED)` | Real derived speeds; `CLAMPED` = ceiling hit |
+| `[LIMITS] Z a..b mm \| ROT a..b° \| A1 a..b° \| A2 a..b°` | Active soft limits |
+| `[LIMIT_SET] axis END = value` | Limit accepted |
+| `[COORD_RESET] ...` | Counters zeroed, soft limits active |
+| `[LIMIT] ROT_CW / Z_UP / A1_FWD ...` | Axis hit a limit and was stopped |
 | `[IK] arm=N ...` / `[FK] arm=N ...` | Kinematics query result |
-| `[SINGULARITY] th3=F deg` | Advisory: frog-leg near straight |
-| `[WATCHDOG] ...` | Board stopped a jog — no keep-alive from the host |
-| `DA DEN DIEM DICH THANH CONG` | P2P move successfully completed |
-| `DUNG KHAN CAP` | Stop/ESTOP command acknowledged |
+| `[SINGULARITY] th3=F°` | Advisory: frog-leg near straight-arm |
+| `[WATCHDOG] ...` | Jog stopped — no keep-alive from host |
+| `DA DEN DIEM DICH THANH CONG` | P2P move completed successfully |
+| `DUNG KHAN CAP` | Stop/ESTOP acknowledged |
 | `[HOME] Homing started.` / `[HOME] Homing complete.` | PLC homing handshake |
-| `[WARN] ...` | An interlock auto-canceled a conflicting motion |
-| `[ERROR] ...` | Malformed, out-of-range or out-of-sequence command |
+| `[WARN] ...` | Interlock auto-canceled a conflicting motion |
+| `[ERROR] ...` | Malformed, out-of-range, or out-of-sequence command |
+
+---
+
+## Safety Design
+
+Defense in depth — enforced in both software and firmware independently:
+
+- **Mode switching** auto-stops any active jog or P2P motion.
+- **Firmware interlocks** independently refuse P2P while jogging (and vice versa), as a backstop if GUI and firmware ever desync.
+- **One E-STOP code path** (`emergency_stop_all`): both the on-screen button and SPACE call it. One audited function beats several similar ones.
+- **PING always gets an immediate PONG**, even mid-motion, so the heartbeat never times out because the board is busy.
+- **PLC sensors** (M5–M8) sit at opposite ends of their axes. Jog **warns** when driving into a covered sensor but does not block (the operator may need to back off). P2P **refuses** a move that would drive further into a covered sensor.
+- **Dead PLC link** reads as sensors UNKNOWN (not CLEAR), so nothing auto-resets on a dead connection.
+
+### LED Activity Indicator
+The board's status LED (IO0) is an **activity light**, not a steady "connected" light:
+- Every command **received** triggers a short flash.
+- Every feedback line **sent** triggers a slightly longer flash.
+- A live connection shows as a slow, regular flicker; a dead one goes fully dark.
+- All timing is `millis()`-based — never `delay()` — so motion, serial, and heartbeats are never blocked.
+
+---
 
 ## Tests
 
-```
+```bash
 tests/run_tests.sh
 ```
 
-Two suites. `tests/firmware_check.cpp` compiles the `.ino` against a
-desktop ClearCore shim and asserts on the text the board sends back;
-`tests/python_check.py` drives the GUI's logic through a headless Tk stub.
-Both live inside the repo deliberately — an earlier generation of these
-harnesses lived in `/tmp` and vanished with a machine restart, taking the
-only evidence the firmware worked with them. See `tests/README.md` for the
-two stub details that are load-bearing.
+Two test suites:
+
+| Suite | What it tests | How it works |
+|:------|:--------------|:-------------|
+| `tests/firmware_check.cpp` | Firmware logic (IK, limits, PLC, sensors, homing) | Compiles the `.ino` against a desktop ClearCore shim and asserts on serial output |
+| `tests/python_check.py` | GUI logic (kinematics, boundaries, speed, panels) | Drives the app through a headless Tk stub |
+
+Both live inside the repo deliberately — an earlier generation lived in `/tmp` and vanished with a machine restart. See `tests/README.md` for stub details.
