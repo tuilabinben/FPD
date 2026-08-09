@@ -1,0 +1,183 @@
+"""COM-port discovery, connect/disconnect, and the TX/RX pump."""
+
+from tkinter import messagebox
+
+from .. import serial_backend
+from ..config import (
+    DEFAULT_COM_PORT,
+    PING_TIMEOUT_MS,
+    SERIAL_POLL_MS,
+)
+from ..theme import ACCENT_GREEN, ACCENT_ORANGE, ACCENT_RED, TEXT_MUTED
+from ..widgets import set_led
+
+NO_PORT_LABEL = "No COM ports"
+
+
+class SerialLinkMixin:
+    # ── port discovery ───────────────────────────────────────────────
+    def refresh_com_ports(self):
+        if not serial_backend.HAS_SERIAL:
+            self.log("WARNING: the 'pyserial' library is not installed. "
+                     "Run: pip install pyserial", tag="error")
+            self.com_combo["values"] = [NO_PORT_LABEL]
+            self.com_combo.set(NO_PORT_LABEL)
+            return
+
+        ports = serial_backend.available_ports()
+        if not ports:
+            self.com_combo["values"] = [NO_PORT_LABEL]
+            self.com_combo.set(NO_PORT_LABEL)
+            self.log("No COM ports found.")
+            return
+
+        previous = self.com_var.get()
+        self.com_combo["values"] = ports
+        # Keep the user's current selection if it survived the rescan,
+        # instead of always snapping back to the default port.
+        if previous in ports:
+            self.com_combo.set(previous)
+        elif DEFAULT_COM_PORT in ports:
+            self.com_combo.set(DEFAULT_COM_PORT)
+        else:
+            self.com_combo.set(ports[0])
+        self.log(f"Found {len(ports)} COM port(s): {', '.join(ports)}")
+
+    # ── connect / disconnect ─────────────────────────────────────────
+    def toggle_connection(self):
+        if self.is_connected:
+            self.disconnect_serial()
+        else:
+            self.connect_serial()
+
+    def connect_serial(self):
+        if not serial_backend.HAS_SERIAL:
+            messagebox.showerror(
+                "Missing library",
+                "The 'pyserial' library is not installed.\nRun: pip install pyserial")
+            return
+
+        port = self.com_var.get()
+        baud = self.baud_var.get()
+        if not port or port == NO_PORT_LABEL:
+            messagebox.showwarning("Warning", "Please select a valid COM port.")
+            return
+
+        try:
+            self.ser = serial_backend.open_port(port, baud)
+        except (serial_backend.SerialException, ValueError, OSError) as e:
+            self.log(f"Error connecting to {port}: {e}", tag="error")
+            messagebox.showerror(
+                "Connection error",
+                f"Could not open {port}.\n"
+                "Another program may already have the port open.")
+            return
+
+        self.is_connected = True
+        self._missed_beats = 0
+        # Invalidate any RX pump left over from a previous session so two
+        # listener loops can never run at once after a reconnect.
+        self._rx_generation += 1
+
+        set_led(self.com_led_card, "OPEN", ACCENT_GREEN)
+        set_led(self.hw_led_card, "WAITING...", ACCENT_ORANGE)
+        # Unknown until the board answers PLC_STATUS.
+        self._plc_link_lost()
+
+        self.btn_connect.set_config("DISCONNECT", ACCENT_RED, icon="❌")
+        self.status_var.set(f"COM OPEN — Waiting for ClearCore handshake on {port}...")
+        self.log(f"Opened {port} at {baud} bps. Sending PING to ClearCore...")
+
+        self._listen_hardware_response(self._rx_generation)
+        self.send("PING")
+        self._schedule("_ping_timeout_job", PING_TIMEOUT_MS, self._on_ping_timeout)
+        self._schedule_next_heartbeat()
+
+    def disconnect_serial(self):
+        self.send("BYE")
+        self._schedule("_disconnect_job", 100, self._do_disconnect)
+
+    def _do_disconnect(self):
+        self._disconnect_job = None
+        self._close_port()
+        self.is_connected = False
+        self.hw_confirmed = False
+        self._missed_beats = 0
+        self._rx_generation += 1
+
+        self._cancel_jobs("_ping_timeout_job", "_heartbeat_job", "_hb_blink_job")
+
+        # Safety: treat any disconnect as an all-stop.
+        self.is_running = False
+        self.is_homing = False
+        self._cancel_jobs("anim_job", "_jog_sim_job")
+        self._release_all_jog_axes(send_stop=False)   # port is already closed
+        self._set_motion_locked(False)
+
+        set_led(self.com_led_card, "CLOSED", ACCENT_RED)
+        set_led(self.hw_led_card, "NO SIGNAL", ACCENT_RED)
+        self._plc_link_lost()
+
+        self.btn_connect.set_config("CONNECT", ACCENT_GREEN, icon="🔌")
+        self.status_var.set("DISCONNECTED — Hardware Offline")
+        self.log("Sent BYE and disconnected. All motion stopped.")
+
+    def _close_port(self):
+        """Closes the port, swallowing driver errors (a yanked USB cable
+        makes close() itself raise — the old code let that crash the app)."""
+        if self.ser is None:
+            return
+        try:
+            if self.ser.is_open:
+                self.ser.close()
+        except Exception as e:                        # pragma: no cover
+            self.log(f"Error closing the port: {e}", tag="warn")
+        finally:
+            self.ser = None
+
+    # ── TX ───────────────────────────────────────────────────────────
+    def send(self, msg: str, log_tx=True):
+        """Writes one newline-terminated command. No-op when offline, so
+        every caller can send unconditionally."""
+        line = msg.strip()
+        if not line:
+            return
+        if not (self.ser and getattr(self.ser, "is_open", False)):
+            return
+        try:
+            self.ser.write((line + "\n").encode("utf-8"))
+            if log_tx:
+                self.log(f">> {line}", tag="tx")
+        except Exception as e:
+            self.log(f"Serial write failed: {e}", tag="error")
+            # A write failure means the link is gone — drop it instead of
+            # silently pretending to still be connected.
+            self._on_link_failure()
+
+    _send_serial = send      # backwards-compatible alias
+
+    def _on_link_failure(self):
+        if self.is_connected:
+            self.log("Lost the physical COM connection — disconnecting.", tag="error")
+            self._do_disconnect()
+
+    # ── RX ───────────────────────────────────────────────────────────
+    def _listen_hardware_response(self, generation):
+        if generation != self._rx_generation or not self.is_connected:
+            return
+        if self.ser and getattr(self.ser, "is_open", False):
+            try:
+                while self.ser.in_waiting > 0:
+                    raw = self.ser.readline().decode("utf-8", errors="ignore").strip()
+                    if not raw:
+                        continue
+                    tag = "rx"
+                    if raw.startswith("[ERROR]"):
+                        tag = "error"
+                    elif raw.startswith("[WARN]"):
+                        tag = "warn"
+                    self.log(f"<< {raw}", tag=tag)
+                    self._parse_hardware_response(raw)
+            except Exception:
+                pass
+        self.root.after(SERIAL_POLL_MS, self._listen_hardware_response, generation)

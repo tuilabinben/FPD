@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+
+# Runtime state — generated on first run / on APPLY, not shipped source.
+# See robot_sim/paths.py: these live next to the package in a dev run.
+robot_sim/machine_settings.json
+robot_sim/keybinds.json
+robot_sim/appearance.json
+robot_sim/limit_presets.json
+
+# Test scratch space and compiled test binaries
+tests/_tmp/
+tests/firmware_check
+tests/firmware_check.exe
+
+# PyInstaller build output, once packaging is set up
+build/
+dist/
+*.spec
