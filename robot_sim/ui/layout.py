@@ -1,5 +1,6 @@
 """Window shell: ttk styles, the scrollable body, and sections 1, 2 and 4."""
 
+import sys
 import tkinter as tk
 from tkinter import ttk
 
@@ -112,8 +113,9 @@ class LayoutMixin:
     def _bind_mousewheel(self, active):
         canvas = self._main_canvas
         if active:
+            step = (lambda d: int(-d)) if sys.platform == "darwin" else (lambda d: int(-d / 120))
             canvas.bind_all("<MouseWheel>",
-                            lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
+                            lambda e: canvas.yview_scroll(step(e.delta), "units"))
             canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-3, "units"))
             canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(3, "units"))
         else:

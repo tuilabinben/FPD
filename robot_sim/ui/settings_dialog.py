@@ -32,6 +32,7 @@ WHAT IT DELIBERATELY DOESN'T DO
 
 import json
 import os
+import sys
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -606,8 +607,14 @@ class SettingsDialogMixin:
         def _wheel(event):
             if not bar.winfo_ismapped():
                 return None                     # nothing to scroll
-            delta = -1 if getattr(event, "num", 0) == 5 else (
-                1 if getattr(event, "num", 0) == 4 else int(-event.delta / 120))
+            if getattr(event, "num", 0) == 5:
+                delta = -1
+            elif getattr(event, "num", 0) == 4:
+                delta = 1
+            elif sys.platform == "darwin":
+                delta = int(-event.delta)
+            else:
+                delta = int(-event.delta / 120)
             canvas.yview_scroll(delta, "units")
             return "break"
 
