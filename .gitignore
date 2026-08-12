@@ -13,3 +13,7 @@ robot_sim/limit_presets.json
 build/
 dist/
 *.spec
+
+# Local test suite — restored for local dev use only. Deliberately kept out
+# of the repo per commit 6b0ed95 ("product only"); do not track or push it.
+tests/

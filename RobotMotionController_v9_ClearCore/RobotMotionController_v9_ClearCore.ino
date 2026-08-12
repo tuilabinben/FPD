@@ -1062,6 +1062,26 @@ const unsigned long PLC_RECONNECT_MS = 3000;
 
 // MC protocol 3E header fields. "03FF" + station 00 addresses the CPU the
 // Ethernet module is mounted on, which is the normal single-CPU case.
+//
+// COMMUNICATION DATA CODE MUST MATCH THE PLC'S OWN SETTING, EXACTLY.
+//
+// GX Works3: Module Parameter -> Ethernet Port -> Basic Settings ->
+// Communication Data Code. ASCII and Binary are two unrelated wire formats
+// with no overlap — a socket opened for one silently drops every frame
+// sent in the other, no error, nothing. That is not a guess: this board
+// sent ASCII, the PLC's own "Own Node Settings" screen was confirmed set
+// to Binary, and the field symptom was exactly what that mismatch produces
+// — TCP connects clean, plcGoodReads stays 0 forever, RX buffer always
+// empty. This machine's PLC is Binary, so PLC_MC_ASCII is 0.
+//
+// The two frame formats below are NOT a half-measure switch: field widths,
+// byte order, and even which helper functions apply differ completely
+// between them (see the binary byte helpers further down). Flipping this
+// macro must reproduce whatever the PLC's screen actually says — check
+// there first if this board and the PLC ever disagree again.
+#define PLC_MC_ASCII 0     // 1 = ASCII text frames, 0 = binary frames
+
+#if PLC_MC_ASCII
 #define PLC_MC_SUBHEADER_REQ  "5000"
 #define PLC_MC_SUBHEADER_RES  "D000"
 #define PLC_MC_NETWORK        "00"
@@ -1077,8 +1097,28 @@ const unsigned long PLC_RECONNECT_MS = 3000;
 // No CMD_WRITE and no SUB_BIT: the link is read-only and there is nothing
 // left that could assemble a write frame. See plcFrameReadWords() below.
 // Everything before the response data length field: subheader(4) +
-// network(2) + pc(2) + io(4) + station(2).
-const int PLC_MC_RES_HEADER_CHARS = 14;
+// network(2) + pc(2) + io(4) + station(2), in ASCII CHARACTERS.
+const int PLC_MC_RES_HEADER_UNITS = 14;
+#else
+// Same fields, as raw bytes. Multi-byte fields are LOW BYTE FIRST — the
+// Mitsubishi manual states this explicitly for binary frames; it does not
+// apply to ASCII, which has no byte order because it is text.
+const uint8_t PLC_MC_SUBHEADER_REQ_B0 = 0x50, PLC_MC_SUBHEADER_REQ_B1 = 0x00;
+const uint8_t PLC_MC_SUBHEADER_RES_B0 = 0xD0, PLC_MC_SUBHEADER_RES_B1 = 0x00;
+const uint8_t  PLC_MC_NETWORK_B        = 0x00;
+const uint8_t  PLC_MC_PC_B             = 0xFF;
+const uint8_t  PLC_MC_DEST_IO_LO       = 0xFF, PLC_MC_DEST_IO_HI = 0x03;  // 03FF
+const uint8_t  PLC_MC_DEST_STATION_B   = 0x00;
+const uint16_t PLC_MC_MONITOR_TIMER_B  = 0x0002;
+const uint16_t PLC_MC_CMD_READ_B       = 0x0401;
+const uint16_t PLC_MC_SUB_WORD_B       = 0x0000;
+// MELSEC binary device code table, M device only — the only device this
+// board ever reads.
+const uint8_t  PLC_MC_DEVICE_CODE_M_B  = 0x90;
+// Everything before the response data length field: subheader(2) +
+// network(1) + pc(1) + io(2) + station(1), in RAW BYTES.
+const int PLC_MC_RES_HEADER_UNITS = 7;
+#endif
 
 // ══════════════════════════════════════════════════════════════
 // M5..M8 ARE HOME SENSORS, NOT LIMIT SWITCHES
@@ -2392,9 +2432,13 @@ String plcStatusSummary() {
   return s;
 }
 
-// ---- ASCII hex helpers ----
-// Uppercase, zero padded, fixed width. MC protocol is not tolerant about
-// either: a lower-case 'a' and a missing leading zero are both rejected.
+// ---- Hex/decimal text helpers ----
+// Shared by both wire formats: ASCII framing uses these to BUILD the wire
+// text itself; binary framing only uses them for LOG DISPLAY (turning an
+// already-decoded value into readable hex for sendFeedback), never for the
+// wire. Uppercase, zero padded, fixed width. MC protocol ASCII framing is
+// not tolerant about either: a lower-case 'a' and a missing leading zero
+// are both rejected.
 String plcHex(unsigned long value, int width) {
   static const char digits[] = "0123456789ABCDEF";
   // Built in a char buffer rather than by appending String(char): on some
@@ -2415,6 +2459,8 @@ String plcDec(unsigned long value, int width) {
   while (out.length() < width) out = String("0") + out;
   return out;
 }
+
+#if PLC_MC_ASCII
 // Device number field: 6 characters, hexadecimal for X/Y/B/W and decimal
 // for M/D/T. Passing the wrong base silently addresses another device.
 String plcDeviceNum(long number, bool hexNumbering) {
@@ -2451,6 +2497,98 @@ String plcFrameReadWords(const char *deviceCode, long deviceNum,
   return plcBuildFrame(String(PLC_MC_CMD_READ) + PLC_MC_SUB_WORD
                      + deviceCode + plcDeviceNum(deviceNum, hexNumbering)
                      + plcHex(words, 4));
+}
+#else
+// ---- Binary byte helpers ----
+//
+// String is reused as a raw byte buffer here, NOT as text. That is safe
+// for the operations below: String::operator+=(char) and .length() track
+// an explicit length rather than calling strlen(), so an embedded 0x00
+// (the subheader's own second byte, on every single frame) does not
+// truncate anything. What is NOT safe, and is deliberately never used on
+// a binary buffer anywhere in this file, is any String method that calls
+// into the C string library under the hood (startsWith, indexOf, the
+// String(const char*) constructor) — those stop at the first embedded
+// 0x00 and would silently mis-parse almost every real frame. Byte access
+// below always goes through plcByteAt()/plcU16At(), never those methods.
+void plcAppendByte(String &s, uint8_t b) { s += (char)b; }
+void plcAppendU16LE(String &s, uint16_t v) {
+  plcAppendByte(s, (uint8_t)(v & 0xFF));
+  plcAppendByte(s, (uint8_t)((v >> 8) & 0xFF));
+}
+void plcAppendU24LE(String &s, uint32_t v) {
+  plcAppendByte(s, (uint8_t)(v & 0xFF));
+  plcAppendByte(s, (uint8_t)((v >> 8) & 0xFF));
+  plcAppendByte(s, (uint8_t)((v >> 16) & 0xFF));
+}
+// MUST mask with & 0xFF: charAt() returns a plain char, which this
+// toolchain may treat as signed, and a byte like 0x90 (M device's own
+// binary code, present in every frame this board sends) sign-extends into
+// a negative int otherwise.
+uint8_t plcByteAt(const String &s, int i) { return (uint8_t)s.charAt(i); }
+uint16_t plcU16At(const String &s, int i) {
+  return (uint16_t)plcByteAt(s, i) | ((uint16_t)plcByteAt(s, i + 1) << 8);
+}
+// Hex-dumps a raw buffer for display. Most of a binary MC protocol frame
+// is unprintable control bytes, and an embedded 0x0A would otherwise split
+// the log into a spurious extra line if sent through sendFeedback as-is.
+String plcHexDump(const String &raw) {
+  String out;
+  for (int i = 0; i < (int)raw.length(); i++) {
+    if (i) out += ' ';
+    out += plcHex(plcByteAt(raw, i), 2);
+  }
+  return out;
+}
+
+// Assembles a complete 3E binary request. `body` is everything from the
+// command field onwards, in raw bytes — same contract as the ASCII
+// plcBuildFrame() above, just byte units instead of character units.
+String plcBuildFrame(const String &body) {
+  String payload;
+  plcAppendU16LE(payload, PLC_MC_MONITOR_TIMER_B);
+  payload += body;
+  String frame;
+  plcAppendByte(frame, PLC_MC_SUBHEADER_REQ_B0);
+  plcAppendByte(frame, PLC_MC_SUBHEADER_REQ_B1);
+  plcAppendByte(frame, PLC_MC_NETWORK_B);
+  plcAppendByte(frame, PLC_MC_PC_B);
+  plcAppendByte(frame, PLC_MC_DEST_IO_LO);
+  plcAppendByte(frame, PLC_MC_DEST_IO_HI);
+  plcAppendByte(frame, PLC_MC_DEST_STATION_B);
+  plcAppendU16LE(frame, (uint16_t)payload.length());
+  frame += payload;
+  return frame;
+}
+
+// Batch read in WORD units, binary. The device number has no separate
+// hex/decimal numbering rule the way ASCII's plcDeviceNum() does — that
+// distinction is purely a text-encoding concept — it is always a raw
+// 3-byte little-endian integer. Device code is one byte from the MELSEC
+// table; only M is wired up because M is the only device this board reads.
+String plcFrameReadWordsBin(uint8_t deviceCodeByte, long deviceNum,
+                            uint16_t words) {
+  String body;
+  plcAppendU16LE(body, PLC_MC_CMD_READ_B);
+  plcAppendU16LE(body, PLC_MC_SUB_WORD_B);
+  plcAppendU24LE(body, (uint32_t)deviceNum);
+  plcAppendByte(body, deviceCodeByte);
+  plcAppendU16LE(body, words);
+  return plcBuildFrame(body);
+}
+#endif
+
+// Builds the one request this board ever sends: M0..M15, one word. Mode-
+// agnostic on purpose, so the two call sites (the poll and PLC_TEST) do
+// not need their own #if PLC_MC_ASCII branch.
+String plcBuildPollFrame() {
+#if PLC_MC_ASCII
+  return plcFrameReadWords(PLC_POLL_DEVICE_CODE, PLC_POLL_DEVICE_NUM,
+                           false, PLC_POLL_WORDS);
+#else
+  return plcFrameReadWordsBin(PLC_MC_DEVICE_CODE_M_B, PLC_POLL_DEVICE_NUM,
+                              PLC_POLL_WORDS);
+#endif
 }
 
 // *** THERE IS NO WRITE FRAME BUILDER, ON PURPOSE ***
@@ -2504,11 +2642,30 @@ bool plcDebug = false;
 // plcDataState() reports that, and the flapping stops because a link that
 // opens and never answers now sits steadily on NO_REPLY.
 // ══════════════════════════════════════════════════════════════
-const unsigned long PLC_DATA_STALE_MS = 4000;   // > 3 idle polls at 500 ms
+// STALENESS IS DERIVED FROM THE POLL RATE, NOT HARD-CODED.
+//
+// It was a constant 4000 ms, written when the idle poll was 500 ms. The poll
+// later became 5000 ms and the constant did not follow, so the window was
+// SHORTER than the interval between reads: a perfectly healthy link reported
+// OK for 4 s, then STALE for the 1 s until the next reply landed. The host
+// asks for PLC_STATUS every 3 s, so roughly one poll in five caught that
+// window and the lamp dropped CONNECTED -> NO REPLY and back — the same flap
+// this whole section exists to remove, one level up.
+//
+// Three intervals of slack: one missed reply is a hiccup, three in a row is
+// a link that has stopped. The +1000 covers the 800 ms socket timeout that
+// precedes a retry, so a single timeout cannot age the data out on its own.
+// It must be a FUNCTION, not a constant: SET_PLC_POLL can move plcPollIdleMs
+// anywhere from 20 ms to 60 s at runtime, and homing polls at a different
+// rate again.
+unsigned long plcDataStaleMs() {
+  unsigned long interval = isHoming ? PLC_POLL_HOMING_MS : plcPollIdleMs;
+  return interval * 3 + 1000;
+}
 
 const char *plcDataState() {
   if (plcGoodReads == 0) return "NONE";
-  if (millis() - plcLastPollOk > PLC_DATA_STALE_MS) return "STALE";
+  if (millis() - plcLastPollOk > plcDataStaleMs()) return "STALE";
   return "OK";
 }
 
@@ -2570,7 +2727,13 @@ bool plcEnsureConnected() {
 bool plcSend(const String &frame) {
   if (!plcEnsureConnected()) return false;
   plcSendAttempts++;
-  if (plcDebug) sendFeedback("[PLC_TX] " + frame);
+  if (plcDebug) {
+#if PLC_MC_ASCII
+    sendFeedback("[PLC_TX] " + frame);
+#else
+    sendFeedback("[PLC_TX] " + plcHexDump(frame));
+#endif
+  }
   plcClient.print(frame);
   plcClient.flush();
   plcRxBuf = "";
@@ -2579,20 +2742,44 @@ bool plcSend(const String &frame) {
   return true;
 }
 
+// PUSH the decoded word whenever it changes rather than waiting to be
+// asked. The host polls PLC_STATUS every few seconds; on its own that made
+// a sensor change take up to one host poll PLUS one PLC poll to appear.
+// Only on a change, so it cannot become a log flood. Shared by both parsers
+// below — the only thing that differs between ASCII and binary is how the
+// word got decoded, not what happens once it has.
+void plcOnGoodRead(uint16_t word) {
+  bool first = !plcStatusValid;
+  uint16_t previous = plcStatusWord;
+  plcStatusWord  = word;
+  plcStatusValid = true;
+  plcLastPollOk  = millis();
+  plcGoodReads++;
+  if (first || plcStatusWord != previous) {
+    sendFeedback("[PLC_STATE] link=UP socket=OPEN data=" + String(plcDataState())
+               + " conn=" + String((unsigned long)plcConnectsOk) + "/"
+               + String((unsigned long)plcConnectTries)
+               + " word=" + plcHex(plcStatusWord, 4)
+               + " timeouts=" + String((unsigned long)plcTxnTimeouts)
+               + " | " + plcStatusSummary());
+  }
+}
+
+#if PLC_MC_ASCII
 // Parses one complete response. Returns true when the frame was consumed
 // (successfully or not) so the transaction can be closed.
 bool plcConsumeResponse() {
   // Need the fixed header plus the 4-char length field before the total
   // frame size is even knowable.
-  if (plcRxBuf.length() < PLC_MC_RES_HEADER_CHARS + 4) return false;
-  long dataLen = plcParseHex(plcRxBuf, PLC_MC_RES_HEADER_CHARS, 4);
+  if (plcRxBuf.length() < PLC_MC_RES_HEADER_UNITS + 4) return false;
+  long dataLen = plcParseHex(plcRxBuf, PLC_MC_RES_HEADER_UNITS, 4);
   if (dataLen < 0) {
     sendFeedback("[ERROR] PLC sent a malformed response length — dropping the "
                  "socket and resynchronising.");
     plcClient.stop();
     return true;
   }
-  int total = PLC_MC_RES_HEADER_CHARS + 4 + (int)dataLen;
+  int total = PLC_MC_RES_HEADER_UNITS + 4 + (int)dataLen;
   if (plcRxBuf.length() < total) return false;      // still arriving
 
   String frame = plcRxBuf.substring(0, total);
@@ -2605,7 +2792,7 @@ bool plcConsumeResponse() {
     return true;
   }
 
-  long endCode = plcParseHex(frame, PLC_MC_RES_HEADER_CHARS + 4, 4);
+  long endCode = plcParseHex(frame, PLC_MC_RES_HEADER_UNITS + 4, 4);
   if (endCode != 0) {
     sendFeedback("[ERROR] PLC end code " + plcHex((unsigned long)endCode, 4)
                + " — the read was refused. Check that M0 exists and that MC "
@@ -2615,31 +2802,53 @@ bool plcConsumeResponse() {
 
   // Every reply is a word read. One word of packed bits, 4 ASCII hex
   // chars, LSB = lowest device.
-  long w = plcParseHex(frame, PLC_MC_RES_HEADER_CHARS + 8, 4);
+  long w = plcParseHex(frame, PLC_MC_RES_HEADER_UNITS + 8, 4);
   if (w < 0) {
     sendFeedback("[ERROR] PLC returned unreadable device data.");
     return true;
   }
-  bool first = !plcStatusValid;
-  uint16_t previous = plcStatusWord;
-  plcStatusWord  = (uint16_t)w;
-  plcStatusValid = true;
-  plcLastPollOk  = millis();
-  plcGoodReads++;
-  // PUSH the word whenever it changes rather than waiting to be asked. The
-  // host polls PLC_STATUS every few seconds; on its own that made a sensor
-  // change take up to one host poll PLUS one PLC poll to appear. Only on a
-  // change, so it cannot become a log flood.
-  if (first || plcStatusWord != previous) {
-    sendFeedback("[PLC_STATE] link=UP socket=OPEN data=" + String(plcDataState())
-               + " conn=" + String((unsigned long)plcConnectsOk) + "/"
-               + String((unsigned long)plcConnectTries)
-               + " word=" + plcHex(plcStatusWord, 4)
-               + " timeouts=" + String((unsigned long)plcTxnTimeouts)
-               + " | " + plcStatusSummary());
-  }
+  plcOnGoodRead((uint16_t)w);
   return true;
 }
+#else
+// Byte-indexed twin of the ASCII parser above. Every offset here is BYTES
+// into plcRxBuf, not characters — the two units are not interchangeable,
+// see PLC_MC_RES_HEADER_UNITS's definition above. A garbled length field
+// cannot be detected as "malformed" the way ASCII's hex parse failure can
+// — any 2 bytes decode to SOME uint16 — so a bad length just never
+// completes and the transaction times out and resyncs the normal way;
+// there is no separate error branch for it here.
+bool plcConsumeResponse() {
+  if ((int)plcRxBuf.length() < PLC_MC_RES_HEADER_UNITS + 2) return false;
+  int dataLen = (int)plcU16At(plcRxBuf, PLC_MC_RES_HEADER_UNITS);
+  int total = PLC_MC_RES_HEADER_UNITS + 2 + dataLen;
+  if ((int)plcRxBuf.length() < total) return false;      // still arriving
+
+  String frame = plcRxBuf.substring(0, total);
+  plcRxBuf = plcRxBuf.substring(total);
+
+  if (plcByteAt(frame, 0) != PLC_MC_SUBHEADER_RES_B0
+   || plcByteAt(frame, 1) != PLC_MC_SUBHEADER_RES_B1) {
+    sendFeedback("[ERROR] PLC response subheader was not D0 00 — the port is "
+                 "probably not speaking MC protocol 3E BINARY.");
+    return true;
+  }
+
+  uint16_t endCode = plcU16At(frame, PLC_MC_RES_HEADER_UNITS + 2);
+  if (endCode != 0) {
+    sendFeedback("[ERROR] PLC end code " + plcHex((unsigned long)endCode, 4)
+               + " — the read was refused. Check that M0 exists and that MC "
+                 "protocol is enabled on the port.");
+    return true;
+  }
+
+  // Every reply is a word read. One word of packed bits, 2 raw bytes,
+  // low byte first, LSB of the low byte = lowest device.
+  uint16_t w = plcU16At(frame, PLC_MC_RES_HEADER_UNITS + 4);
+  plcOnGoodRead(w);
+  return true;
+}
+#endif
 
 void plcServiceRx() {
   bool got = false;
@@ -2648,7 +2857,13 @@ void plcServiceRx() {
     if (plcRxBuf.length() < 200) plcRxBuf += c;   // never grow unbounded
     got = true;
   }
-  if (got && plcDebug) sendFeedback("[PLC_RX] " + plcRxBuf);
+  if (got && plcDebug) {
+#if PLC_MC_ASCII
+    sendFeedback("[PLC_RX] " + plcRxBuf);
+#else
+    sendFeedback("[PLC_RX] " + plcHexDump(plcRxBuf));
+#endif
+  }
   if (!plcTxnActive) { plcRxBuf = ""; return; }
 
   if (plcConsumeResponse()) { plcTxnActive = false; return; }
@@ -2680,6 +2895,65 @@ void plcServiceRx() {
       }
     }
   }
+}
+
+// Parses the one-shot PLC_TEST reply and reports what it means. Separate
+// from plcConsumeResponse() on purpose — PLC_TEST is a blocking diagnostic
+// run with the machine stopped, not the incremental state machine the
+// normal poll uses, and it needs to say something useful about a reply
+// that never showed up at all, which plcConsumeResponse() never sees
+// (it is only called once bytes already exist).
+void plcTestReport(const String &raw) {
+  if (raw.length() == 0) {
+    sendFeedback("[PLC_TEST] RX nothing. The socket is open but the PLC did not "
+                 "answer a device read — this is almost always MC protocol not "
+                 "enabled on that port, or the Communication Data Code set to "
+#if PLC_MC_ASCII
+                 "BINARY while this board speaks ASCII."
+#else
+                 "ASCII while this board speaks BINARY."
+#endif
+                );
+    return;
+  }
+#if PLC_MC_ASCII
+  sendFeedback("[PLC_TEST] RX " + raw);
+  if (!raw.startsWith(String(PLC_MC_SUBHEADER_RES))) {
+    sendFeedback("[PLC_TEST] Subheader is not " PLC_MC_SUBHEADER_RES
+                 " — the port is answering, but not with MC protocol 3E ASCII.");
+    return;
+  }
+  long endCode = plcParseHex(raw, PLC_MC_RES_HEADER_UNITS + 4, 4);
+  if (endCode != 0) {
+    sendFeedback("[PLC_TEST] End code " + plcHex((unsigned long)endCode, 4)
+               + " — the PLC refused the read. Check that M0..M15 exist and that "
+                 "the module permits reads.");
+    return;
+  }
+  long w = plcParseHex(raw, PLC_MC_RES_HEADER_UNITS + 8, 4);
+  plcStatusWord = (uint16_t)w;
+#else
+  sendFeedback("[PLC_TEST] RX " + plcHexDump(raw));
+  if ((int)raw.length() < PLC_MC_RES_HEADER_UNITS + 2
+   || plcByteAt(raw, 0) != PLC_MC_SUBHEADER_RES_B0
+   || plcByteAt(raw, 1) != PLC_MC_SUBHEADER_RES_B1) {
+    sendFeedback("[PLC_TEST] Subheader is not D0 00 — the port is answering, but "
+                 "not with MC protocol 3E BINARY.");
+    return;
+  }
+  uint16_t endCode = plcU16At(raw, PLC_MC_RES_HEADER_UNITS + 2);
+  if (endCode != 0) {
+    sendFeedback("[PLC_TEST] End code " + plcHex((unsigned long)endCode, 4)
+               + " — the PLC refused the read. Check that M0..M15 exist and that "
+                 "the module permits reads.");
+    return;
+  }
+  plcStatusWord = plcU16At(raw, PLC_MC_RES_HEADER_UNITS + 4);
+#endif
+  plcStatusValid = true;
+  plcLastPollOk = millis();
+  sendFeedback("[PLC_TEST] OK — M0..M15 = " + plcHex((unsigned long)plcStatusWord, 4)
+             + " | " + plcStatusSummary());
 }
 #endif  // PLC_LINK_ETHERNET
 
@@ -2820,8 +3094,7 @@ void plcServicePoll() {
   unsigned long interval = isHoming ? PLC_POLL_HOMING_MS : plcPollIdleMs;
   if (plcLastPollSent != 0 && (now - plcLastPollSent) < interval) return;
   plcLastPollSent = now;
-  plcSend(plcFrameReadWords(PLC_POLL_DEVICE_CODE, PLC_POLL_DEVICE_NUM,
-                            false, PLC_POLL_WORDS));
+  plcSend(plcBuildPollFrame());
 #endif
 }
 
@@ -3682,9 +3955,12 @@ void handleCommand(String cmd) {
                  + String((int)PLC_PORT) + ".");
       return;
     }
-    String frame = plcFrameReadWords(PLC_POLL_DEVICE_CODE, PLC_POLL_DEVICE_NUM,
-                                     false, PLC_POLL_WORDS);
+    String frame = plcBuildPollFrame();
+#if PLC_MC_ASCII
     sendFeedback("[PLC_TEST] TX " + frame);
+#else
+    sendFeedback("[PLC_TEST] TX " + plcHexDump(frame));
+#endif
     plcRxBuf = "";
     plcClient.print(frame);
     plcClient.flush();
@@ -3697,34 +3973,9 @@ void handleCommand(String cmd) {
         char c = (char)plcClient.read();
         if (plcRxBuf.length() < 200) plcRxBuf += c;
       }
-      if (plcRxBuf.length() >= PLC_MC_RES_HEADER_CHARS + 8) break;
+      if ((int)plcRxBuf.length() >= PLC_MC_RES_HEADER_UNITS + 4) break;
     }
-    if (plcRxBuf.length() == 0) {
-      sendFeedback("[PLC_TEST] RX nothing. The socket is open but the PLC did not "
-                   "answer a device read — this is almost always MC protocol not "
-                   "enabled on that port, or the port set to BINARY while this "
-                   "board speaks ASCII.");
-      return;
-    }
-    sendFeedback("[PLC_TEST] RX " + plcRxBuf);
-    if (!plcRxBuf.startsWith(String(PLC_MC_SUBHEADER_RES))) {
-      sendFeedback("[PLC_TEST] Subheader is not " PLC_MC_SUBHEADER_RES
-                   " — the port is answering, but not with MC protocol 3E ASCII.");
-      return;
-    }
-    long endCode = plcParseHex(plcRxBuf, PLC_MC_RES_HEADER_CHARS + 4, 4);
-    if (endCode != 0) {
-      sendFeedback("[PLC_TEST] End code " + plcHex((unsigned long)endCode, 4)
-                 + " — the PLC refused the read. Check that M0..M15 exist and that "
-                   "the module permits reads.");
-      return;
-    }
-    long w = plcParseHex(plcRxBuf, PLC_MC_RES_HEADER_CHARS + 8, 4);
-    plcStatusWord = (uint16_t)w;
-    plcStatusValid = true;
-    plcLastPollOk = millis();
-    sendFeedback("[PLC_TEST] OK — M0..M15 = " + plcHex((unsigned long)w, 4)
-               + " | " + plcStatusSummary());
+    plcTestReport(plcRxBuf);
 #else
     sendFeedback("[PLC_TEST] No Ethernet client compiled in (link mode "
                + String(PLC_LINK_MODE) + ").");
