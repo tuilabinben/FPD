@@ -122,6 +122,17 @@ class XYBoardMixin:
         return cx + x_mm * k, cy - y_mm * k      # screen Y grows downwards
 
     # ── drawing ──────────────────────────────────────────────────────
+    def _schedule_xy_refresh(self):
+        """Throttles canvas redraws so a burst of telemetry doesn't stall the UI."""
+        if getattr(self, "_xy_refresh_pending", False):
+            return
+        self._xy_refresh_pending = True
+        self._schedule("_xy_refresh_job", 100, self._do_refresh_xy_board)
+
+    def _do_refresh_xy_board(self):
+        self._xy_refresh_pending = False
+        self._refresh_xy_board()
+
     def _refresh_xy_board(self):
         c = getattr(self, "xy_canvas", None)
         if c is None:

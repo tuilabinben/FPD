@@ -155,6 +155,13 @@ class JogControlMixin:
         Displaying only the motor number was the old bug (it was labelled
         as though it were the arm angle); displaying only the frog-leg
         number would hide that it rests on a ratio taken from the model."""
+        
+        # ── skip redundant UI updates ──
+        current_pose = (self.sim_rot, self.sim_a1, self.sim_a2, self.sim_z)
+        if getattr(self, "_last_jog_readout_pose", None) == current_pose:
+            return
+        self._last_jog_readout_pose = current_pose
+        
         self.rot_pos_v.set(f"{self.sim_rot:.2f} deg")
         self.a1_pos_v.set(f"{self.sim_a1:.2f} motor deg")
         self.a2_pos_v.set(f"{self.sim_a2:.2f} motor deg")

@@ -161,6 +161,9 @@ class RobotControlApp(
             self.log_text.insert("1.0", snap["log"])
             self.log_text.see("end")
             self.log_text.config(state="disabled")
+            # Re-sync the internal line counter after a bulk insert so that
+            # the trimming logic does not re-query the widget on every log().
+            self._reset_log_line_count()
 
     def _rebuild_ui(self):
         from .theme import BG as NEW_BG

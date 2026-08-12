@@ -544,10 +544,17 @@ class P2PControlMixin:
         # The board's live dot is the same pose, so it moves with the run
         # and with a jog.
         if getattr(self, "xy_canvas", None) is not None:
-            self._refresh_xy_board()
+            self._schedule_xy_refresh()
         if getattr(self, "curr_d1_v", None) is None:
             return
         d1, rot, a1, a2 = self.current_joints
+        
+        # ── skip redundant UI updates ──
+        current_pose = (d1, rot, a1, a2, self.arm_config)
+        if getattr(self, "_last_p2p_readout_pose", None) == current_pose:
+            return
+        self._last_p2p_readout_pose = current_pose
+
         self.curr_d1_v.set(f"{d1:.2f} mm")
         self.curr_rot_v.set(f"{rot:.2f} deg")
         # a1/a2 are MOTOR degrees. The frog-leg angle and reach go on the

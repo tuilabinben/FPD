@@ -1,4 +1,19 @@
-"""COM-port discovery, connect/disconnect, and the TX/RX pump."""
+"""COM-port discovery, connect/disconnect, and the TX/RX pump.
+
+Performance notes (v9.3)
+------------------------
+The RX loop previously read every queued line in one ``while in_waiting``
+pass and called ``log()`` + ``_parse_hardware_response()`` for each.
+During a fast jog the board sends telemetry every 50 ms, so a single poll
+tick could drain 5–20 lines, each triggering a full widget insert + layout
+recalculation — enough to stall the Tkinter event loop visibly.
+
+This version caps the number of lines processed per poll tick
+(``_RX_BATCH_LIMIT``).  Excess lines stay in the serial buffer and are
+picked up on the *next* 50 ms tick.  The batch limit is deliberately
+generous (20 lines) — the goal is to avoid an unbounded burst, not to slow
+the normal case.
+"""
 
 from tkinter import messagebox
 
@@ -12,6 +27,13 @@ from ..theme import ACCENT_GREEN, ACCENT_ORANGE, ACCENT_RED, TEXT_MUTED
 from ..widgets import set_led
 
 NO_PORT_LABEL = "No COM ports"
+
+# Maximum number of serial lines to process in one poll tick.  The rest
+# stay in pyserial's buffer and are picked up 50 ms later.  This prevents
+# a burst of board telemetry from blocking the Tkinter event loop for
+# hundreds of milliseconds: each line triggers a log() insert and a
+# _parse_hardware_response() that may repaint labels and canvases.
+_RX_BATCH_LIMIT = 20
 
 
 class SerialLinkMixin:
@@ -167,10 +189,12 @@ class SerialLinkMixin:
             return
         if self.ser and getattr(self.ser, "is_open", False):
             try:
-                while self.ser.in_waiting > 0:
+                processed = 0
+                while self.ser.in_waiting > 0 and processed < _RX_BATCH_LIMIT:
                     raw = self.ser.readline().decode("utf-8", errors="ignore").strip()
                     if not raw:
                         continue
+                    processed += 1
                     tag = "rx"
                     if raw.startswith("[ERROR]"):
                         tag = "error"
