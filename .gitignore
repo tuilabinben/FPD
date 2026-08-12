@@ -1,6 +1,10 @@
 # Python
 __pycache__/
 *.pyc
+.venv/
+
+# Editor
+.vscode/
 
 # Runtime state — generated on first run / on APPLY, not shipped source.
 # See robot_sim/paths.py: these live next to the package in a dev run.

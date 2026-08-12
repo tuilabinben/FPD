@@ -1,6 +1,5 @@
 """Window shell: ttk styles, the scrollable body, and sections 1, 2 and 4."""
 
-import sys
 import tkinter as tk
 from tkinter import ttk
 
@@ -36,6 +35,7 @@ from ..theme import (
 )
 from ..widgets import (RoundedButton, RoundedFrame, make_section,
                        make_status_led)
+from .scrolling import touchpad_scroll, wheel_scroll
 
 
 class LayoutMixin:
@@ -103,25 +103,66 @@ class LayoutMixin:
         canvas.bind("<Configure>",
                     lambda e: canvas.itemconfig(window_id, width=e.width))
 
-        # Scroll only while the pointer is over the body. The old version used
-        # bind_all, which hijacked the wheel everywhere — including over the
-        # combo boxes and the log — for the whole application.
-        canvas.bind("<Enter>", lambda e: self._bind_mousewheel(True))
-        canvas.bind("<Leave>", lambda e: self._bind_mousewheel(False))
+        # bind_all, then filter in the handler. Binding only the canvas
+        # doesn't work: the canvas is covered by its own child widgets, so
+        # it almost never sees the pointer and the page would only scroll
+        # over the few bare gaps between panels.
+        self.root.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.root.bind_all("<Button-4>", self._on_mousewheel)
+        self.root.bind_all("<Button-5>", self._on_mousewheel)
+        # A two-finger trackpad swipe is NOT a MouseWheel event under
+        # Tk 9 — it arrives as TouchpadScroll, which Tk 8.6 doesn't have
+        # at all, hence the guard.
+        try:
+            self.root.bind_all("<TouchpadScroll>", self._on_touchpad_scroll)
+        except tk.TclError:
+            pass
         return main
 
-    def _bind_mousewheel(self, active):
-        canvas = self._main_canvas
-        if active:
-            step = (lambda d: int(-d)) if sys.platform == "darwin" else (lambda d: int(-d / 120))
-            canvas.bind_all("<MouseWheel>",
-                            lambda e: canvas.yview_scroll(step(e.delta), "units"))
-            canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-3, "units"))
-            canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(3, "units"))
-        else:
-            canvas.unbind_all("<MouseWheel>")
-            canvas.unbind_all("<Button-4>")
-            canvas.unbind_all("<Button-5>")
+    def _wheel_target_is_ours(self, widget):
+        """False when something else owns the wheel where the pointer is.
+
+        Two cases: a dialog on top (Settings scrolls its own tab), and the
+        event log, which scrolls its own content via the Text class binding.
+        """
+        try:
+            if widget.winfo_toplevel() is not self.root:
+                return False
+        except Exception:
+            return False
+        log = getattr(self, "log_text", None)
+        node = widget
+        while node is not None:
+            if log is not None and node is log:
+                return False
+            node = getattr(node, "master", None)
+        return True
+
+    def _on_mousewheel(self, event):
+        if not self._wheel_target_is_ours(event.widget):
+            return None
+        wheel_scroll(self._main_canvas, event)
+        return "break"
+
+    def _on_touchpad_scroll(self, event):
+        if not self._wheel_target_is_ours(event.widget):
+            return None
+        touchpad_scroll(self._main_canvas, event)
+        return "break"
+
+    def _wheel_scrolls_page(self, widget):
+        """Scroll the page over a widget whose class eats the wheel.
+
+        A readonly Combobox changes its own value on a wheel event — spin
+        the BAUD field just by scrolling past it. A binding on the widget
+        itself runs before the class binding and can cancel it.
+        """
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            widget.bind(seq, self._on_mousewheel)
+        try:
+            widget.bind("<TouchpadScroll>", self._on_touchpad_scroll)
+        except tk.TclError:
+            pass
 
     # ── section 1 ────────────────────────────────────────────────────
     def _build_connection_section(self, main):
@@ -134,6 +175,7 @@ class LayoutMixin:
         self.com_var = tk.StringVar()
         self.com_combo = ttk.Combobox(row, textvariable=self.com_var, width=12, state="readonly")
         self.com_combo.pack(side="left", padx=(0, 10))
+        self._wheel_scrolls_page(self.com_combo)
 
         RoundedButton(row, text="REFRESH", icon="🔄", bg_color=SURFACE, fg_color=TEXT_LIGHT,
                       width=100, height=34,
@@ -145,6 +187,7 @@ class LayoutMixin:
         self.baud_combo = ttk.Combobox(row, textvariable=self.baud_var, width=9,
                                        state="readonly", values=BAUD_CHOICES)
         self.baud_combo.pack(side="left", padx=(0, 16))
+        self._wheel_scrolls_page(self.baud_combo)
 
         self.btn_connect = RoundedButton(row, text="CONNECT", icon="🔌", bg_color=ACCENT_GREEN, fg_color=INK_DARK,
                                          width=130, height=34, command=self.toggle_connection)

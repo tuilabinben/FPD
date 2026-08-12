@@ -32,7 +32,6 @@ WHAT IT DELIBERATELY DOESN'T DO
 
 import json
 import os
-import sys
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -110,6 +109,7 @@ from ..widgets import (
     make_well,
     set_entry_border,
 )
+from .scrolling import touchpad_scroll, wheel_scroll
 
 SPEED_HELP = (
     "One fixed reference speed. Each motor runs at its own percentage of it.\n"
@@ -607,37 +607,49 @@ class SettingsDialogMixin:
         def _wheel(event):
             if not bar.winfo_ismapped():
                 return None                     # nothing to scroll
-            if getattr(event, "num", 0) == 5:
-                delta = -1
-            elif getattr(event, "num", 0) == 4:
-                delta = 1
-            elif sys.platform == "darwin":
-                delta = int(-event.delta)
-            else:
-                delta = int(-event.delta / 120)
-            canvas.yview_scroll(delta, "units")
+            wheel_scroll(canvas, event)
             return "break"
 
-        for widget in (canvas, body):
-            widget.bind("<MouseWheel>", _wheel)
-            widget.bind("<Button-4>", _wheel)
-            widget.bind("<Button-5>", _wheel)
+        def _touchpad(event):
+            """Two-finger swipe — a separate event type under Tk 9, so
+            binding the wheel alone leaves the trackpad dead."""
+            if not bar.winfo_ismapped():
+                return None
+            touchpad_scroll(canvas, event)
+            return "break"
+
+        self._bind_scroll_events(canvas, _wheel, _touchpad)
+        self._bind_scroll_events(body, _wheel, _touchpad)
         body._wheel_handler = _wheel
-        self._bind_wheel_deep(body, _wheel)
+        body._touchpad_handler = _touchpad
+        self._bind_wheel_deep(body, _wheel, _touchpad)
         return body
 
-    def _bind_wheel_deep(self, root_widget, handler):
+    @staticmethod
+    def _bind_scroll_events(widget, wheel_handler, touchpad_handler):
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            widget.bind(seq, wheel_handler)
+        try:
+            widget.bind("<TouchpadScroll>", touchpad_handler)
+        except tk.TclError:
+            pass                                # Tk 8.6 has no such event
+
+    def _bind_wheel_deep(self, root_widget, handler, touchpad_handler=None):
         """Forwards the wheel from children created later.
 
         Frames stacked on the canvas swallow wheel events, so the scroll
         would die wherever the pointer happened to be. Re-run after a tab
         is populated.
         """
+        if touchpad_handler is None:
+            touchpad_handler = getattr(root_widget, "_touchpad_handler", None)
+
         def apply(widget):
             try:
-                widget.bind("<MouseWheel>", handler)
-                widget.bind("<Button-4>", handler)
-                widget.bind("<Button-5>", handler)
+                for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                    widget.bind(seq, handler)
+                if touchpad_handler is not None:
+                    widget.bind("<TouchpadScroll>", touchpad_handler)
             except Exception:
                 pass
             for child in widget.winfo_children():
