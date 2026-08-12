@@ -7,6 +7,7 @@ from ..config import (ARM_CONFIGS, ARM_HOME_DEG, PLC_SENSOR_JOINT_INDEX,
                       PLC_SENSOR_PANEL, ROT_HOME_DEG, Z_HOME_ABS_MM,
                       Z_HOME_MM, Z_INPUT_MAX_MM, Z_INPUT_MIN_MM)
 from ..kinematics import (
+    base_angle_from_motor_deg,
     fold_angle_from_motor_deg,
     forward_kinematics,
     is_near_singularity,
@@ -278,12 +279,12 @@ class P2PControlMixin:
             # A1M target and the B row the A2M target.
             self.calc_a_d1_v.set(f"{d1:.2f} mm")
             self.calc_a_rot_v.set(f"{rot:.2f} deg")
-            self.calc_a_a1_v.set(f"{a1:.2f} motor deg")
-            self.calc_a_a2_v.set(f"{a2:.2f} motor deg")
+            self.calc_a_a1_v.set(f"{base_angle_from_motor_deg(a1):.2f} base deg")
+            self.calc_a_a2_v.set(f"{base_angle_from_motor_deg(a2):.2f} base deg")
             self.calc_b_d1_v.set(f"{d1:.2f} mm")
             self.calc_b_rot_v.set(f"{rot:.2f} deg")
-            self.calc_b_a1_v.set(f"{a1:.2f} motor deg")
-            self.calc_b_a2_v.set(f"{a2:.2f} motor deg")
+            self.calc_b_a1_v.set(f"{base_angle_from_motor_deg(a1):.2f} base deg")
+            self.calc_b_a2_v.set(f"{base_angle_from_motor_deg(a2):.2f} base deg")
 
             self.send(f"LOAD_BOTH:{d1:.3f},{rot:.3f},{a1:.3f},{a2:.3f}")
             self.log(f"IK solved (both arms simultaneously) and loaded: "
@@ -299,12 +300,12 @@ class P2PControlMixin:
         }
         self.calc_a_d1_v.set(f"{d1a:.2f} mm")
         self.calc_a_rot_v.set(f"{rota:.2f} deg")
-        self.calc_a_a1_v.set(f"{a1a:.2f} motor deg")
-        self.calc_a_a2_v.set(f"{a2a:.2f} motor deg")
+        self.calc_a_a1_v.set(f"{base_angle_from_motor_deg(a1a):.2f} base deg")
+        self.calc_a_a2_v.set(f"{base_angle_from_motor_deg(a2a):.2f} base deg")
         self.calc_b_d1_v.set(f"{d1b:.2f} mm")
         self.calc_b_rot_v.set(f"{rotb:.2f} deg")
-        self.calc_b_a1_v.set(f"{a1b:.2f} motor deg")
-        self.calc_b_a2_v.set(f"{a2b:.2f} motor deg")
+        self.calc_b_a1_v.set(f"{base_angle_from_motor_deg(a1b):.2f} base deg")
+        self.calc_b_a2_v.set(f"{base_angle_from_motor_deg(a2b):.2f} base deg")
 
         self.send(f"LOAD:{d1a:.3f},{rota:.3f},{a1a:.3f},{a2a:.3f},"
                   f"{d1b:.3f},{rotb:.3f},{a1b:.3f},{a2b:.3f}")
@@ -550,10 +551,12 @@ class P2PControlMixin:
         d1, rot, a1, a2 = self.current_joints
         self.curr_d1_v.set(f"{d1:.2f} mm")
         self.curr_rot_v.set(f"{rot:.2f} deg")
-        # a1/a2 are MOTOR degrees. The frog-leg angle and reach go on the
-        # Cartesian line below, where there is room to label them.
-        self.curr_a1_v.set(f"{a1:.2f} motor deg")
-        self.curr_a2_v.set(f"{a2:.2f} motor deg")
+        # a1/a2 are MOTOR degrees on the wire; the operator reads the BASE
+        # angle, so convert at the point of display. The frog-leg angle and
+        # reach go on the Cartesian line below, where there is room to
+        # label them.
+        self.curr_a1_v.set(f"{base_angle_from_motor_deg(a1):.2f} base deg")
+        self.curr_a2_v.set(f"{base_angle_from_motor_deg(a2):.2f} base deg")
 
         # forward_kinematics() is frog-leg geometry, so the motor degrees
         # held in a1/a2 have to be converted before it sees them. Feeding

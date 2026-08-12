@@ -93,7 +93,7 @@ const double FOLD_ANGLE_MIN_DEG      = FOLD_ANGLE_HOME_DEG;
 const double FOLD_ANGLE_MAX_DEG      = 120.0;
 const double FOLD_SINGULARITY_WARN_DEG = 110.0;
 
-const double ARM_GEAR_RATIO_DEF = 20.0;
+const double ARM_GEAR_RATIO_DEF = 2.0;
 const double ARM_GEAR_RATIO_MIN = 0.01, ARM_GEAR_RATIO_MAX = 1000.0;
 double armGearRatio = ARM_GEAR_RATIO_DEF;
 
@@ -192,7 +192,7 @@ const double PULSES_PER_DEG_ARM_MOTOR = PULSES_PER_MOTOR_REV / 360.0;
 // ══════════════════════════════════════════════════════════════
 // ZM LEAD — MEASURE THIS.
 // ══════════════════════════════════════════════════════════════
-const double Z_MM_PER_REV_DEF = 5.0;
+const double Z_MM_PER_REV_DEF = 80.0;
 const double Z_MM_PER_REV_MIN = 0.1, Z_MM_PER_REV_MAX = 500.0;
 double zMmPerRev = Z_MM_PER_REV_DEF;
 

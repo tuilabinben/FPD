@@ -200,7 +200,7 @@ class P2PPanelMixin:
 
     # ── computed IK targets ──────────────────────────────────────────
     def _build_computed_targets(self, parent):
-        tk.Label(parent, text="COMPUTED JOINT TARGETS (d1 mm / RM ° / A1M motor ° / A2M motor °)",
+        tk.Label(parent, text="COMPUTED JOINT TARGETS (d1 mm / RM ° / A1M base ° / A2M base °  —  base 0° = retracted, 90° = straight out)",
                  bg=PANEL_BG, fg=TEXT_MUTED,
                  font=FONT_CAPTION).pack(anchor="w", pady=(14, 0))
 

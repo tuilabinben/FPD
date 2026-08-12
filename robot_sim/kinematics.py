@@ -43,6 +43,7 @@ from .config import (
     FOLD_ANGLE_HOME_DEG,
     FOLD_ANGLE_MAX_DEG,
     FOLD_ANGLE_MIN_DEG,
+    FOLD_ANGLE_SPEC_MAX_DEG,
     FOLD_ANGLE_SINGULARITY_WARN_DEG,
     ROT_MAX_DEG,
     ROT_MIN_DEG,
@@ -156,6 +157,46 @@ def fold_angle_from_motor_deg(motor_deg):
 def motor_deg_from_fold_angle(fold_deg):
     """Frog-leg rotation from home (deg) -> motor rotation from home."""
     return fold_deg * ARM_GEAR_RATIO
+
+
+# ----------------------------------------------------------------------
+# Arm BASE angle — the number the operator reads off the machine
+# ----------------------------------------------------------------------
+# The base (shoulder) link swings 0 deg at HOME (240 mm reach) to 90 deg
+# with the arm at the rated working reach of 575 mm. The scale is anchored
+# on FOLD_ANGLE_SPEC_MAX_DEG (146.68 deg of fold = 575 mm reach = 90 deg
+# base) rather than the geometric singularity at 180 deg, because the
+# singularity is never a valid target and anchoring there would mean
+# "straight out" reads ~73 deg instead of the 90 the operator sees on the
+# machine.
+#
+# DISPLAY ONLY. The wire protocol, the taught boundaries and everything the
+# board stores remain MOTOR degrees - see CLAUDE.md section 1b.
+BASE_ANGLE_MAX_DEG = 90.0
+
+
+def base_angle_from_fold_angle(fold_deg):
+    """Frog-leg rotation from home (deg) -> arm base angle (deg).
+
+    0 deg fold -> 0 deg base (240 mm, retracted home).
+    FOLD_ANGLE_SPEC_MAX_DEG -> 90 deg base (575 mm, rated working reach).
+    """
+    return fold_deg * (BASE_ANGLE_MAX_DEG / FOLD_ANGLE_SPEC_MAX_DEG)
+
+
+def fold_angle_from_base_angle(base_deg):
+    """Arm base angle (deg) -> frog-leg rotation from home."""
+    return base_deg * (FOLD_ANGLE_SPEC_MAX_DEG / BASE_ANGLE_MAX_DEG)
+
+
+def base_angle_from_motor_deg(motor_deg):
+    """Motor rotation from home (deg) -> arm base angle (deg)."""
+    return base_angle_from_fold_angle(fold_angle_from_motor_deg(motor_deg))
+
+
+def motor_deg_from_base_angle(base_deg):
+    """Arm base angle (deg) -> motor rotation from home."""
+    return motor_deg_from_fold_angle(fold_angle_from_base_angle(base_deg))
 
 
 def motor_deg_to_reach(motor_deg):
