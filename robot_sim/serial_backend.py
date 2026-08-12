@@ -22,7 +22,13 @@ def available_ports():
     return [p.device for p in list_ports.comports()]
 
 
-def open_port(port, baudrate, timeout=0.05):
+def open_port(port, baudrate, timeout=0.05, write_timeout=0.5):
     if not HAS_SERIAL:
         raise SerialException("pyserial is not installed")
-    return serial.Serial(port=port, baudrate=int(baudrate), timeout=timeout)
+    # write_timeout matters as much as the read timeout: pyserial's default
+    # is None, which blocks forever on a stalled USB link. send() runs on
+    # the Tk main thread, so an unbounded write() freezes the whole GUI
+    # until the OS driver gives up -- with this set, write() raises instead
+    # and send()'s existing except-clause disconnects cleanly.
+    return serial.Serial(port=port, baudrate=int(baudrate),
+                         timeout=timeout, write_timeout=write_timeout)

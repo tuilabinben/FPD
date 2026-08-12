@@ -162,15 +162,22 @@ class SerialLinkMixin:
             self._do_disconnect()
 
     # ── RX ───────────────────────────────────────────────────────────
+    # Cap the number of lines consumed per tick so a flooded serial
+    # buffer (e.g. from Ethernet socket cycling) cannot block the
+    # Tkinter event loop for hundreds of milliseconds.
+    _RX_MAX_LINES_PER_TICK = 20
+
     def _listen_hardware_response(self, generation):
         if generation != self._rx_generation or not self.is_connected:
             return
         if self.ser and getattr(self.ser, "is_open", False):
             try:
-                while self.ser.in_waiting > 0:
+                lines_read = 0
+                while self.ser.in_waiting > 0 and lines_read < self._RX_MAX_LINES_PER_TICK:
                     raw = self.ser.readline().decode("utf-8", errors="ignore").strip()
                     if not raw:
                         continue
+                    lines_read += 1
                     tag = "rx"
                     if raw.startswith("[ERROR]"):
                         tag = "error"
