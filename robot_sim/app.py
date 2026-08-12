@@ -16,6 +16,8 @@ from .config import (
     LIMITS_ENABLED_KEY,
     LIMIT_ENFORCE_KEYS,
     DEFAULT_LIMITS_ENABLED,
+    PLC_LINK_ENABLED_KEY,
+    DEFAULT_PLC_LINK_ENABLED,
     DEFAULT_LIMIT_ENFORCED,
     PLC_SENSOR_PANEL,
     PID_LOCK_KEYS,
@@ -276,6 +278,7 @@ class RobotControlApp(
         for enforce_key in LIMIT_ENFORCE_KEYS:
             self.settings[enforce_key] = DEFAULT_LIMIT_ENFORCED
         self.settings[LIMITS_ENABLED_KEY] = DEFAULT_LIMITS_ENABLED
+        self.settings[PLC_LINK_ENABLED_KEY] = DEFAULT_PLC_LINK_ENABLED
         # Per-motor percentages of the fixed reference speed — SPEED_FIELDS.
         for key, (_label, _unit, default, _lo, _hi) in SPEED_FIELDS.items():
             self.settings[key] = default

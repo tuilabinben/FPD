@@ -297,7 +297,7 @@ const double ARM_LINK_SUM_MM      = A4_MM + A5_MM;   // 320.0
 const double ARM_RADIAL_OFFSET_MM = A3_MM + A6_MM;   // 293.2
 
 // Motor revs per turntable rev: 1/4.375 then 1/6.5 in the Simscape model.
-const double I_RM_TOTAL = 4.375 * 6.5;               // 28.4375
+const double I_RM_TOTAL = 1 * 6.5;               // 28.4375
 
 // Joint travel  [notes §3]
 const double ARM_ZERO_CAD_DEG = 60.0;   // the CAD angle we call 0
@@ -1685,6 +1685,7 @@ bool          plcStatusValid  = false;   // false until one poll has landed
 unsigned long plcLastPollOk   = 0;
 unsigned long plcLastPollSent = 0;
 bool          plcLinkUp       = false;
+bool          plcLinkEnabled  = true;
 // Rising-edge memory for the four home sensors, so a sensor that stays
 // covered is reported once instead of on every 50 ms poll.
 bool plcHomeSensorPrev[4] = {false, false, false, false};
@@ -2284,6 +2285,15 @@ void plcServicePoll() {
 // Called from loop(). Poll, then act on what came back.
 void servicePlc() {
 #if PLC_LINK_MODE == PLC_LINK_ETHERNET
+  if (!plcLinkEnabled) {
+    if (plcClient.connected()) {
+      plcClient.stop();
+      plcLinkUp = false;
+      plcStatusValid = false;
+    }
+    return;
+  }
+
   static unsigned long lastActedOn = 0;
   plcServicePoll();
   if (plcStatusValid && plcLastPollOk != lastActedOn) {
@@ -2636,6 +2646,17 @@ void handleCommand(String cmd) {
     sendFeedback(String("[LIMITS_ENABLED] ") + (limitsEnabled ? "1 — enforced"
                                                              : "0 — SUSPENDED"));
     reportLimits();
+    return;
+  }
+
+  // SET_PLC_LINK:<0|1>   suspend/resume the ClearCore's connection to the PLC
+  if (upper.startsWith("SET_PLC_LINK:")) {
+    bool want = cmd.substring(13).toInt() != 0;
+    if (!want && plcLinkEnabled) {
+      sendFeedback("[WARN] PLC LINK DISABLED. The ClearCore will disconnect from the PLC and stop polling.");
+    }
+    plcLinkEnabled = want;
+    sendFeedback(String("[PLC_LINK] ") + (plcLinkEnabled ? "1 — ENABLED" : "0 — DISABLED"));
     return;
   }
 

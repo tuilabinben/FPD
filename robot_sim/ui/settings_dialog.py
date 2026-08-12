@@ -38,6 +38,7 @@ from tkinter import messagebox, ttk
 from ..config import (
     LIMIT_FIELDS,
     LIMITS_ENABLED_KEY,
+    PLC_LINK_ENABLED_KEY,
     LIMIT_GROUPS,
     LIMIT_ENFORCE_BY_AXIS,
     LIMIT_ENFORCE_KEYS,
@@ -309,6 +310,8 @@ class SettingsDialogMixin:
             on = 1 if s.get(enforce_key, True) else 0
             self.send(f"SET_LIMIT_ENFORCE:{axis},{on}", log_tx=False)
         self.send(f"SET_LIMITS_ENABLED:{1 if s.get(LIMITS_ENABLED_KEY, True) else 0}",
+                  log_tx=False)
+        self.send(f"SET_PLC_LINK:{1 if s.get(PLC_LINK_ENABLED_KEY, True) else 0}",
                   log_tx=False)
 
     def _push_settings_to_board(self, reason=""):
@@ -968,6 +971,13 @@ class SettingsDialogMixin:
         self._limits_enabled_btn.pack(side="left", padx=(12, 0))
         self._refresh_limits_enabled()
 
+        self._plc_link_btn = RoundedButton(
+            enable_row, text="", bg_color=SURFACE, fg_color=TEXT_LIGHT,
+            width=210, height=30, radius=10, font=FONT_CAPTION,
+            command=self._toggle_plc_link)
+        self._plc_link_btn.pack(side="left", padx=(12, 0))
+        self._refresh_plc_link()
+
         # RESET COORDINATES moved to section 3, MOTION CONTROL. It is a
         # machine action used while jogging to the reference pose, so making
         # it reachable only through this dialog meant leaving the controls
@@ -1076,6 +1086,27 @@ class SettingsDialogMixin:
         btn.set_config("BOUNDARIES ENFORCED" if on else "BOUNDARIES DISABLED",
                        SURFACE if on else ACCENT_RED,
                        icon="🛡" if on else "⚠",
+                       fg_color=TEXT_LIGHT if on else INK_DARK)
+
+    def _toggle_plc_link(self):
+        want = not self.settings.get(PLC_LINK_ENABLED_KEY, True)
+        self.settings[PLC_LINK_ENABLED_KEY] = want
+        self.send(f"SET_PLC_LINK:{1 if want else 0}")
+        self._save_settings_file()
+        self._refresh_plc_link()
+        if want:
+            self.log("PLC Link ENABLED.")
+        else:
+            self.log("⚠ PLC LINK DISABLED. ClearCore will not connect to the PLC.", tag="warn")
+
+    def _refresh_plc_link(self):
+        on = self.settings.get(PLC_LINK_ENABLED_KEY, True)
+        btn = getattr(self, "_plc_link_btn", None)
+        if btn is None:
+            return
+        btn.set_config("PLC CONNECTED" if on else "PLC DISABLED",
+                       SURFACE if on else ACCENT_RED,
+                       icon="🔌" if on else "⚠",
                        fg_color=TEXT_LIGHT if on else INK_DARK)
 
     def _build_preset_row(self, parent):

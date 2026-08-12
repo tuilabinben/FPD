@@ -624,6 +624,9 @@ DEFAULT_LIMIT_ENFORCED = True
 LIMITS_ENABLED_KEY = "limits_enabled"
 DEFAULT_LIMITS_ENABLED = True
 
+PLC_LINK_ENABLED_KEY = "plc_link_enabled"
+DEFAULT_PLC_LINK_ENABLED = True
+
 LIMIT_FIELDS = {
     "lim_z_min":   ("Lower limit",     "Z",   "MIN", "mm",
                     D1_MIN_MM, D1_MAX_MM, DEFAULT_LIM_Z_MIN, 2),
