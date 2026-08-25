@@ -93,8 +93,8 @@ class HomeButton(tk.Canvas):
             return
         self.state = "hover" if self._hovering else "idle"
         self._draw()
-        # Only fire if the press started here and the pointer never left —
-        # HOME is a real motion command; an accidental drag must not trigger it.
+        # Fire only if press started here, pointer never left — HOME is real
+        # motion command, accidental drag must not trigger it.
         if was_pressed and self._hovering and self.command:
             self.command()
 

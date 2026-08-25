@@ -1,5 +1,5 @@
-"""Joystick/jog motion: dead-man axes, limit-sensor locks, boost, and the
-software-only motion simulation used when no hardware is confirmed."""
+"""Joystick/jog motion: dead-man axes, limit-sensor locks, boost, and
+software-only motion simulation used when no hardware confirmed."""
 
 from ..config import (
     ARM_MOTOR_RPM_MAX,
@@ -15,6 +15,7 @@ from ..config import (
     JOG_STOP_COMMAND,
     LIMITS_ENABLED_KEY,
     LIMIT_ENFORCE_BY_AXIS,
+    LIMIT_FIELDS,
     LIMIT_OPPOSITE,
     ROT_VEL_MAX_DEG_S,
     Z_VEL_MAX_MM_S,
@@ -29,10 +30,9 @@ IDLE_STATUS = "Idle — hold a key or button to jog"
 
 
 class JogControlMixin:
-    # ── start / stop one axis ────────────────────────────────────────
     def _resolve_jog_command(self, command):
-        """Applies the LINK toggle. With LINK on, a press on either arm pad
-        is promoted to the both-arms command so the elbows stay in step."""
+        """Applies LINK toggle. LINK on: press on either arm pad promoted
+        to both-arms command so elbows stay in step."""
         if self.arms_linked:
             return JOG_LINK_PROMOTION.get(command, command)
         return command
@@ -40,9 +40,9 @@ class JogControlMixin:
     def jog_start(self, command):
         command = self._resolve_jog_command(command)
 
-        # The pads are greyed out during RUN/HOME, but the keyboard used to
-        # bypass that entirely and could start a jog mid-program. Guard the
-        # logic itself, not just the widgets.
+        # pads greyed out during RUN/HOME, but keyboard used to bypass
+        # that and could start jog mid-program. Guard logic itself, not
+        # just widgets.
         if self.motion_locked:
             self.log(f"{command} ignored — a program is running and the jog axes are "
                      f"locked.", tag="warn")
@@ -54,13 +54,13 @@ class JogControlMixin:
                      f"Jog the opposite way to come off it.", tag="warn")
             return
 
-        # Two commands must never drive the same elbow at once — e.g.
-        # A1_FWD while ARM_BACK is held would send the board contradictory
-        # directions for AM1. Drop the conflicting axis first.
+        # two commands must never drive same elbow at once — e.g. A1_FWD
+        # while ARM_BACK held would send board contradictory directions
+        # for AM1. drop conflicting axis first.
         self._release_conflicting_arm_axes(command)
 
-        # A covered PLC sensor WARNS here and lets the jog through. It is
-        # enforced in P2P instead — see warn_if_jogging_into_sensor().
+        # covered PLC sensor WARNS here, lets jog through. enforced in
+        # P2P instead — see warn_if_jogging_into_sensor().
         self.warn_if_jogging_into_sensor(command)
 
         self._clear_limit_if_opposite(command)
@@ -69,9 +69,8 @@ class JogControlMixin:
         self._warn_unreferenced_once()
         self._refresh_jog_status()
 
-        # Keep the board's dead-man watchdog fed for as long as an axis is
-        # held. Without this the firmware stops the axis after
-        # JOG_WATCHDOG_MS — which is exactly what we want if the GUI dies.
+        # keep board's dead-man watchdog fed while axis held. w/o this
+        # firmware stops axis after JOG_WATCHDOG_MS — wanted if GUI dies.
         self._start_jog_heartbeat()
 
         if not self._hardware_live() and self._jog_sim_job is None:
@@ -91,8 +90,8 @@ class JogControlMixin:
                     self.jog_pads[active].key_deactivate()
 
     def jog_stop(self, start_cmd, stop_cmd=None):
-        # A press may have been promoted by LINK, so release whichever
-        # command actually went out — otherwise the linked axis latches on.
+        # press may've been promoted by LINK, release whichever command
+        # actually went out — else linked axis latches on
         for candidate in (start_cmd, self._resolve_jog_command(start_cmd)):
             if candidate in self.jog_active:
                 self.jog_active.discard(candidate)
@@ -100,8 +99,8 @@ class JogControlMixin:
         self._refresh_jog_status()
 
     def _release_all_jog_axes(self, send_stop=True):
-        """Single place that clears every active jog axis — previously this
-        was copy-pasted (slightly differently) in four methods."""
+        """Single place clearing every active jog axis — previously
+        copy-pasted (slightly differently) in four methods."""
         for cmd in list(self.jog_active):
             if send_stop:
                 self.send(JOG_STOP_COMMAND.get(cmd, "STOP"))
@@ -114,7 +113,6 @@ class JogControlMixin:
     def _hardware_live(self):
         return bool(self.is_connected and self.hw_confirmed)
 
-    # ── dead-man keep-alive ──────────────────────────────────────────
     def _start_jog_heartbeat(self):
         if self._jog_hb_job is None:
             self._jog_heartbeat()
@@ -122,14 +120,13 @@ class JogControlMixin:
     def _jog_heartbeat(self):
         self._jog_hb_job = None
         if not self.jog_active:
-            return                      # nothing held: let the board time out
+            return                      # nothing held: let board time out
         self.send("JOG_HB", log_tx=False)
         self._schedule("_jog_hb_job", JOG_HEARTBEAT_MS, self._jog_heartbeat)
 
-    # ── status strip ─────────────────────────────────────────────────
     def _refresh_jog_status(self):
-        # Boundaries apply with or without a reference. What a missing
-        # reference costs is the meaning of the NUMBERS, not the protection.
+        # boundaries apply with or without reference. missing reference
+        # costs meaning of NUMBERS, not protection.
         suffix = "" if self.is_homed else "   [NO REFERENCE — positions are relative]"
         if self.jog_active:
             self.jog_dot.itemconfig(self._jog_dot_id, fill=ACCENT_MINT)
@@ -148,13 +145,11 @@ class JogControlMixin:
                  "RESET COORDINATES, before commanding a P2P move.", tag="warn")
 
     def _update_jog_readout(self):
-        """sim_a1 / sim_a2 are MOTOR degrees — the raw rotation the board
-        counts. The frog-leg angle and the reach are derived, and shown
-        alongside rather than instead of it: the motor figure is the exact
-        one, and the frog-leg figure is the one the operator thinks in.
-        Displaying only the motor number was the old bug (it was labelled
-        as though it were the arm angle); displaying only the frog-leg
-        number would hide that it rests on a ratio taken from the model."""
+        """sim_a1/sim_a2 are MOTOR degrees — raw rotation board counts.
+        Frog-leg angle and reach are derived, shown alongside not instead:
+        motor figure exact, frog-leg figure is what operator thinks in.
+        Motor-only was old bug (labelled as if arm angle); frog-leg-only
+        would hide it rests on ratio taken from model."""
         self.rot_pos_v.set(f"{self.sim_rot:.2f} deg")
         self.a1_pos_v.set(f"{self.sim_a1:.2f} motor deg")
         self.a2_pos_v.set(f"{self.sim_a2:.2f} motor deg")
@@ -165,28 +160,25 @@ class JogControlMixin:
         self.a2_reach_v.set(
             f"fold {fold_angle_from_motor_deg(self.sim_a2):.2f}° · "
             f"R2 = {motor_deg_to_reach(self.sim_a2):.1f} mm")
-        # The P2P panel reads the SAME pose, so it has to repaint too —
-        # otherwise switching mode after a jog showed the stale numbers P2P
-        # last wrote, and the operator had two different answers on screen
-        # for where the machine was.
+        # P2P panel reads SAME pose, must repaint too — else switching
+        # mode after jog showed stale numbers P2P last wrote, operator had
+        # two different answers on screen for where machine was.
         self._refresh_p2p_pose_readout()
 
-    # ── optical limit sensors ────────────────────────────────────────
     def _is_limited(self, direction):
         return bool(self.rot_limit.get(direction) or self.z_limit.get(direction))
 
     def _on_limit_triggered(self, direction):
-        """Board reported [LIMIT] <direction>, or the software simulation
+        """Board reported [LIMIT] <direction>, or software simulation
         reached its own simulated bound."""
         if direction in self.rot_limit:
             self.rot_limit[direction] = True
         elif direction in self.z_limit:
             self.z_limit[direction] = True
         elif direction in JOG_ARM_AXES:
-            # An arm limit. Unlike the optical sensors on RM and ZM there
-            # is nothing to latch: the elbow limit is a soft one, and the
-            # opposite direction is always immediately available. Releasing
-            # the axis below is the whole response.
+            # arm limit. unlike optical sensors on RM/ZM nothing to latch:
+            # elbow limit is soft, opposite direction always immediately
+            # available. releasing axis below is whole response.
             pass
         else:
             self.log(f"[LIMIT] {direction} — unrecognised axis.", tag="warn")
@@ -194,9 +186,9 @@ class JogControlMixin:
 
         if direction in self.jog_active:
             self.jog_active.discard(direction)
-            # Actually tell the board to stop this axis. The old code only
-            # removed it from the local set, so a hardware-reported limit
-            # left the axis command latched on the board.
+            # actually tell board to stop this axis. old code only removed
+            # from local set, so hardware-reported limit left axis command
+            # latched on board.
             self.send(JOG_STOP_COMMAND.get(direction, "STOP"))
         if direction in self.jog_pads:
             self.jog_pads[direction].key_deactivate()
@@ -213,7 +205,6 @@ class JogControlMixin:
         elif opp in self.z_limit:
             self.z_limit[opp] = False
 
-    # ── boost (x1 / x1.5 / x2) ───────────────────────────────────────
     def cycle_boost(self):
         self.boost_index = (self.boost_index + 1) % len(BOOST_LEVELS)
         mult = BOOST_LEVELS[self.boost_index]
@@ -229,35 +220,31 @@ class JogControlMixin:
     _cycle_boost = cycle_boost
 
     def _speed_scale(self):
-        """Active boost multiplier. Axis speeds themselves now come from the
-        Settings profile in real units, so there is nothing else to scale."""
+        """Active boost multiplier. Axis speeds come from Settings profile
+        in real units now, nothing else to scale."""
         return BOOST_LEVELS[self.boost_index]
 
     def _axis_speeds(self):
-        """(rot deg/s, arm deg/s, z mm/s) for the simulation.
+        """(rot deg/s, arm deg/s, z mm/s) for simulation.
 
-        Derived from the universal RPM and the per-motor percentages
-        through the same arithmetic — and the same ceilings — the firmware
-        uses, so offline motion is a faithful preview of what the machine
-        will actually do rather than an optimistic one.
+        Derived from universal RPM and per-motor percentages through same
+        arithmetic — and same ceilings — firmware uses, so offline motion
+        is faithful preview of what machine actually does, not optimistic.
         """
         s = self.settings
         master = s["master_rpm"]
-        # The arm is bounded in MOTOR RPM, so the cap is applied there and
-        # the result converted — not to a °/s figure derived from a gear
-        # ratio nobody has measured yet.
+        # arm bounded in MOTOR RPM, cap applied there and result converted
+        # — not to °/s figure derived from gear ratio nobody's measured yet
         arm_rpm = min(arm_motor_rpm(master, s["arm_pct"]), ARM_MOTOR_RPM_MAX)
         return (
             min(rot_speed_deg_s(master, s["rot_pct"]), ROT_VEL_MAX_DEG_S),
-            # MOTOR degrees per second: the elbows are simulated in motor
-            # degrees, matching what the board reports and what the taught
-            # limits are stored in. No gear ratio is involved, so this
-            # figure is exact.
+            # MOTOR degrees/sec: elbows simulated in motor degrees,
+            # matching what board reports and taught limits are stored in.
+            # no gear ratio involved, figure exact.
             arm_rpm * 360.0 / 60.0,
             min(z_speed_mm_s(master, s["z_pct"]), Z_VEL_MAX_MM_S),
         )
 
-    # ── software-only jog simulation ─────────────────────────────────
     def _jog_sim_tick(self):
         self._jog_sim_job = None
         if not self.jog_active or self._hardware_live():
@@ -267,9 +254,9 @@ class JogControlMixin:
         scale = self._speed_scale()
         rot_v, arm_v, z_v = self._axis_speeds()
 
-        # Where each axis was BEFORE this tick. The clamp needs it to tell
-        # "crossed the boundary just now" from "started outside it and is
-        # jogging back in", which are the two halves of the escape rule.
+        # where each axis was BEFORE this tick. clamp needs it to tell
+        # "crossed boundary just now" from "started outside, jogging back
+        # in" — the two halves of escape rule.
         prev_rot, prev_z = self.sim_rot, self.sim_z
         self._prev_arm = {"A1M": self.sim_a1, "A2M": self.sim_a2}
 
@@ -278,10 +265,9 @@ class JogControlMixin:
         if "ROT_CCW" in self.jog_active:
             self.sim_rot -= rot_v * dt * scale
 
-        # The elbow angle is rotation from home: 0° retracted, 120°
-        # straight, and reach GROWS with it. Extending therefore
-        # INCREASES it.
-        # A1M and A2M are separate motors, so each integrates on its own.
+        # elbow angle is rotation from home: 0° retracted, 120° straight,
+        # reach GROWS with it. extending therefore INCREASES it.
+        # A1M/A2M separate motors, each integrates on its own.
         step = arm_v * dt * scale
         for command, (arms, sign) in JOG_ARM_AXES.items():
             if command not in self.jog_active:
@@ -307,8 +293,8 @@ class JogControlMixin:
         if hit:
             self._on_limit_triggered("Z_UP" if hit == "high" else "Z_DOWN")
 
-        # Each elbow is clamped independently. Hitting A1M's stop must not
-        # halt A2M — they are separate linkages on separate motors.
+        # each elbow clamped independently. hitting A1M's stop must not
+        # halt A2M — separate linkages, separate motors.
         self._clamp_arm("A1M")
         self._clamp_arm("A2M")
 
@@ -320,78 +306,105 @@ class JogControlMixin:
     def _limit_pair(self, axis):
         """(lower, upper) working limit for an axis.
 
-        Reads the live settings rather than the module constants, so a
-        limit edited in Settings takes effect on the offline simulation
-        the same instant it takes effect on the board — two copies of a
-        limit that can disagree is the failure this avoids.
+        Reads live settings not module constants, so limit edited in
+        Settings takes effect on offline simulation same instant it takes
+        effect on board — two disagreeing copies of a limit is failure
+        this avoids.
 
-        The elbow pair is TAUGHT rather than typed (see LIMIT_CAPTURE_ONLY
-        in config) and is stored UNORDERED — the operator jogs to one stop
-        and presses SET HERE, then the other, and which they reached first
-        is not something they should have to keep straight. Sorting
-        happens here, at the point of use, so both taught numbers survive
-        in the settings exactly as captured. This mirrors armBand() in the
-        firmware; the two must agree or the simulation and the board would
-        clamp at different places.
+        Elbow pair TAUGHT not typed (see LIMIT_CAPTURE_ONLY in config),
+        stored UNORDERED — operator jogs to one stop, presses SET HERE,
+        then other; which reached first not something to keep straight.
+        Sorting happens here, at point of use, so both taught numbers
+        survive in settings exactly as captured. Mirrors armBand() in
+        firmware; both must agree or simulation and board clamp at
+        different places.
         """
         s = self.settings
         try:
             a, b = s[f"lim_{axis}_min"], s[f"lim_{axis}_max"]
             return (a, b) if a <= b else (b, a)
         except KeyError:
-            # A settings file written before this axis existed. Fall back
-            # to the structural envelope rather than raising in the middle
-            # of a jog tick.
+            # settings file written before this axis existed. fall back to
+            # structural envelope rather than raising mid jog-tick.
             return ARM_SIM_MIN_DEG, ARM_SIM_MAX_DEG
 
     def _axis_bounds(self, lo, hi, axis=None):
-        """The band actually applied to an axis.
+        """Band actually applied to an axis.
 
-        A TAUGHT BOUNDARY APPLIES IMMEDIATELY. It does not wait for HOME or
+        TAUGHT BOUNDARY APPLIES IMMEDIATELY. Does not wait for HOME or
         RESET COORDINATES.
 
-        This used to widen the band by a full travel either side while
-        `is_homed` was false, on the argument that the counters are
-        meaningless without a reference. That argument does not survive
-        contact with how boundaries are actually set: you jog to the stop
-        and press SET HERE, so the boundary is captured against the SAME
-        counters that are being compared to it. It is meaningful in exactly
-        the frame it was taught in, reference or not. The widening meant a
-        limit somebody had just taught at -300 let the axis run to -427,
-        which is the bug this replaced.
+        Used to widen band by full travel either side while `is_homed`
+        false, arguing counters meaningless without reference. Argument
+        doesn't survive contact with how boundaries are set: jog to stop,
+        press SET HERE, boundary captured against SAME counters compared
+        to it. Meaningful in exactly frame taught in, reference or not.
+        Widening meant limit just taught at -300 let axis run to -427 —
+        bug this replaced.
 
-        `axis` is "Z" / "ROT" / "A1" / "A2", checked against the per-axis
-        enforcement switch and the master one, mirroring axisLimited() on
-        the board. Two systems of record disagreeing about whether the
-        machine is protected is the one thing worse than either answer.
+        `axis` is "Z"/"ROT"/"A1"/"A2", checked against per-axis
+        enforcement switch and master one, mirroring axisLimited() on
+        board. Two systems of record disagreeing whether machine is
+        protected is worse than either answer.
 
-        An axis that starts OUTSIDE its band is not trapped — see
-        `_apply_axis_limit()` for the escape rule.
+        Axis starting OUTSIDE its band not trapped — see
+        `_apply_axis_limit()` for escape rule.
+
+        ONE EXCEPTION: a FACTORY-DEFAULT floor, while UNREFERENCED.
+        HOME is minimum of every axis, so default floors sit at 0 — and
+        w/o reference counter reads 0 wherever it powered up, not at
+        bottom of travel. Axis then sits exactly ON its floor and every
+        downward tick clamps back: readout frozen, axis pinned, nothing
+        to escape from because escape rule counts sitting on boundary as
+        inside. Ceiling still applies — far end cannot coincide with
+        counter origin.
+
+        Narrow on purpose. A TAUGHT floor still applies unreferenced —
+        that is the -341.89 boundary jog once ran past to -427.16, and
+        widening it back is the bug this file exists to prevent. Only an
+        untouched default is relaxed, because a default was never
+        captured against any counter. Teach the floor, or reference the
+        machine, and it applies again.
         """
         if axis is not None and not self._axis_enforced(axis):
             span = hi - lo
             return lo - span, hi + span
+        if (axis is not None and not getattr(self, "is_homed", False)
+                and self._floor_is_factory_default(axis)):
+            return lo - (hi - lo), hi
         return lo, hi
+
+    def _floor_is_factory_default(self, axis):
+        """True when this axis's LOW boundary is still the shipped value.
+
+        Compares against LIMIT_FIELDS' own default rather than a literal,
+        so re-calibrating the arm frame cannot leave this reading a
+        number that no longer means what it did.
+        """
+        key = f"lim_{axis.lower()}_min"
+        field = LIMIT_FIELDS.get(key)
+        if field is None:
+            return False
+        return self.settings.get(key) == field[6]
 
     @staticmethod
     def _apply_axis_limit(value, previous, lo, hi):
-        """Clamps one axis, allowing it to escape a band it starts outside.
+        """Clamps one axis, allows escape from band it starts outside.
 
         Returns (value, "high"|"low"|None).
 
-        Coming from inside, the axis stops ON the boundary — the ordinary
-        case. Starting outside it — a boundary taught in a previous session,
-        applied against a counter that powered up somewhere else — motion
-        FURTHER out is refused and motion back toward the band is allowed.
+        Coming from inside, axis stops ON boundary — ordinary case.
+        Starting outside it — boundary taught in previous session, applied
+        against counter that powered up elsewhere — motion FURTHER out
+        refused, motion back toward band allowed.
 
-        Without that second half, applying limits without a reference could
-        pin an axis with no way to jog off, which is the exact failure the
-        old widening was there to avoid. The escape rule solves it without
-        giving up the protection.
+        W/o that second half, applying limits w/o reference could pin axis
+        with no way to jog off — exact failure old widening was there to
+        avoid. Escape rule solves it without giving up protection.
         """
         if value > hi:
             if previous <= hi:
-                return hi, "high"           # crossed out: stop on the line
+                return hi, "high"           # crossed out: stop on line
             if value > previous:
                 return previous, "high"     # already out, going further: freeze
             return value, None              # already out, coming back: allow
@@ -404,29 +417,28 @@ class JogControlMixin:
         return value, None
 
     def _axis_enforced(self, axis):
-        """True when this axis's boundary is actually policing anything.
+        """True when this axis's boundary actually policing anything.
 
-        An AND of the per-axis switch and the master one, in that order —
-        the master must never re-arm an axis switched off on its own."""
+        AND of per-axis switch and master one, in that order — master
+        must never re-arm axis switched off on its own."""
         if not self.settings.get(LIMITS_ENABLED_KEY, True):
             return False
         return bool(self.settings.get(LIMIT_ENFORCE_BY_AXIS[axis], True))
 
     def _clamp_arm(self, arm):
-        """Clamps one elbow to its travel and releases only the axes that
-        are actually driving THAT elbow in the offending direction.
+        """Clamps one elbow to its travel, releases only axes actually
+        driving THAT elbow in offending direction.
 
-        Each arm is clamped against its OWN limits. Using one shared arm
-        limit is how A2M used to be driven past its stop while A1M's angle
-        was the one being checked."""
+        Each arm clamped against its OWN limits. One shared arm limit is
+        how A2M used to be driven past its stop while A1M's angle was
+        checked."""
         angle = self.sim_a1 if arm == "A1M" else self.sim_a2
         is_a1 = arm == "A1M"
         lo, hi = self._axis_bounds(*self._limit_pair("a1" if is_a1 else "a2"),
                                    axis="A1" if is_a1 else "A2")
 
-        # Same escape rule as the other axes: an elbow that powers up
-        # outside a boundary taught in an earlier session can still be
-        # jogged back into range.
+        # same escape rule as other axes: elbow powering up outside a
+        # boundary taught in earlier session can still jog back into range
         previous = getattr(self, "_prev_arm", {}).get(arm, angle)
         angle, hit = self._apply_axis_limit(angle, previous, lo, hi)
         if hit == "high":
@@ -461,12 +473,11 @@ class JogControlMixin:
                 self._refresh_jog_status()
                 self.log(f"{command} stopped — {arm} is {desc}.", tag="warn")
 
-    # ── LINK toggle ──────────────────────────────────────────────────
     def toggle_arm_link(self):
-        """LINK on = both elbows follow one control (the v8 gesture that was
-        tested on hardware). LINK off = A1M and A2M are fully independent."""
-        # Never flip modes with an axis latched — the in-flight command
-        # would be released under a different resolution than it started.
+        """LINK on = both elbows follow one control (v8 gesture tested on
+        hardware). LINK off = A1M and A2M fully independent."""
+        # never flip modes with axis latched — in-flight command would be
+        # released under different resolution than it started
         self._release_all_jog_axes()
         self.arms_linked = not self.arms_linked
         active = self.arms_linked

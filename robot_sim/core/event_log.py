@@ -9,7 +9,7 @@ class EventLogMixin:
     def log(self, message: str, tag: str = "default"):
         timestamp = datetime.datetime.now().strftime("%H:%M:%S")
         widget = getattr(self, "log_text", None)
-        if widget is None:          # log() called before the UI exists
+        if widget is None:          # log() called before UI exists
             print(f"[{timestamp}] {message}")
             return
 
@@ -17,9 +17,8 @@ class EventLogMixin:
         widget.insert("end", f"[{timestamp}] {message}\n", tag)
         widget.see("end")
 
-        # Trim the oldest lines once the buffer grows past the cap. The old
-        # version deleted exactly one line per call, so a burst of messages
-        # could push the buffer well past the limit; this drains the excess.
+        # Trim oldest lines past cap. Old version deleted only 1 line/call,
+        # so message burst could push buffer well past limit; drains excess.
         line_count = int(widget.index("end-1c").split(".")[0])
         if line_count > LOG_MAX_LINES:
             excess = line_count - LOG_MAX_LINES
@@ -27,5 +26,5 @@ class EventLogMixin:
 
         widget.configure(state="disabled")
 
-    # Backwards-compatible alias for the original private name.
+    # back-compat alias for original private name
     _log = log

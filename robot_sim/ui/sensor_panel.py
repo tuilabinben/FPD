@@ -1,18 +1,18 @@
-"""The M5..M8 PLC sensor row, shared by both motion panels.
+"""M30..M32 PLC travel-limit row, shared by both motion panels.
 
-Built by P2P *and* by JOG for the same reason the coordinate-reset row is
-(see coord_reset.py): which sensors are covered decides whether the next
-command will move at all, so it has to be visible in whichever mode the
-operator is working in. One builder called twice, not two copies.
+Built by P2P AND JOG, same reason as coord-reset row (see coord_reset.py):
+which limits covered decides whether next command moves at all, must be
+visible in whichever mode operator works in. One builder called twice, not
+two copies.
 
-`self.plc_sensor_lamps` accumulates across both calls, keyed by bit, and
-holds a list of lamps per bit because the same bit has a lamp on each
-panel. `_refresh_plc_sensor_lamps()` walks all of them.
+`self.plc_sensor_lamps` accumulates across both calls, keyed by bit, holds
+list of lamps per bit — same bit has lamp on each panel.
+`_refresh_plc_sensor_lamps()` walks all of them.
 
-M7 and M8 are broken on this machine, so they render as a fixed
-placeholder rather than a state. Showing them as CLEAR would be claiming a
-reading the machine cannot make, and showing them as COVERED would suggest
-the elbows are blocked when nothing is blocking them.
+ROW USED TO SHOW M5..M8, THE HOME SENSORS. They lit a lamp and decided
+nothing, while M30 was the bit actually refusing a jog and had no lamp at
+all — an operator watched "M5 ZM lift = CLEAR" while ZM would not move
+down. Board no longer reads any M but these three.
 """
 
 import tkinter as tk
@@ -27,6 +27,7 @@ from ..config import (
 from ..theme import (
     ACCENT_GREEN,
     ACCENT_ORANGE,
+    ACCENT_PURPLE,
     FONT_CAPTION,
     FONT_HINT,
     LED_BG,
@@ -47,42 +48,42 @@ class SensorPanelMixin:
         row = tk.Frame(parent, bg=PANEL_BG)
         row.pack(pady=pady)
 
-        tk.Label(row, text="PLC SENSORS", bg=PANEL_BG, fg=TEXT_MUTED,
+        tk.Label(row, text="PLC LIMITS", bg=PANEL_BG, fg=TEXT_MUTED,
                  font=FONT_CAPTION).pack(side="left", padx=(6, 10))
 
         for bit, label, _axis, _cmd, end in PLC_SENSOR_PANEL:
-            # The end is in the caption because M5/M6 and M7/M8 are at
-            # OPPOSITE ends, and "covered" means the opposite thing for each
-            # pair — reading the lamp without that is guesswork.
-            suffix = "far" if end > 0 else "home"
-            # Starts UNKNOWN, not CLEAR. Until a device read lands this board
-            # has no idea, and saying CLEAR would be claiming good news.
+            # End in caption because the three do NOT sit at the same end —
+            # ZM and A2M stop at their minimum, RM at its maximum because it
+            # is mounted inverted. "Covered" means the opposite thing for
+            # them, so reading the lamp without the end is guesswork.
+            suffix = "max" if end > 0 else "min"
+            # Starts UNKNOWN not CLEAR. Until device read lands, board has
+            # no idea; CLEAR would claim good news.
             card = make_status_led(row, f"{bit}  {label} ({suffix})",
-                                   PLC_SENSOR_UNKNOWN_TEXT, ACCENT_ORANGE)
+                                   PLC_SENSOR_UNKNOWN_TEXT, ACCENT_PURPLE)
             card["frame"].pack(side="left", padx=(0, 6))
             self.plc_sensor_lamps.setdefault(bit, []).append(card)
 
-        # HOME STATE is the combination, not a device: M5 and M6 covered
-        # while M7 and M8 are clear. It is what zeroes the coordinates, so
-        # it earns its own lamp rather than leaving the operator to read
-        # four others and do the logic.
-        # "?" not "NO": before a device read lands, "not at home" is a claim
-        # this board cannot make either.
-        home_card = make_status_led(row, "HOME STATE", "?", ACCENT_ORANGE)
+        # HOME STATE is combination, not a device: all three covered. Zeroes
+        # the coordinates, earns own lamp rather than leaving operator to
+        # read three others and do the logic.
+        # "?" not "NO": before device read lands, "not at home" is a claim
+        # this board can't make either.
+        home_card = make_status_led(row, "HOME STATE", "?", ACCENT_PURPLE)
         home_card["frame"].pack(side="left", padx=(10, 0))
         self.plc_home_state_lamps.append(home_card)
 
-        # Where enforcement lives is not guessable from the lamps.
+        # Where enforcement lives isn't guessable from the lamps.
         tk.Label(row, text="blocks P2P · warns in JOG", bg=PANEL_BG,
                  fg=TEXT_MUTED, font=FONT_HINT).pack(side="left", padx=(10, 0))
         return row
 
     # ── state ────────────────────────────────────────────────────────
     def plc_sensors_known(self):
-        """True once a PLC device read has landed and is not stale.
+        """True once a PLC device read has landed and isn't stale.
 
-        Everything that reads the sensors has to ask this first. Treating
-        unknown as "not covered" is what made a dead link look safe.
+        Everything reading sensors must ask this first. Treating unknown as
+        "not covered" is what made a dead link look safe.
         """
         if not getattr(self, "plc_sensor_data_seen", False):
             return False
@@ -96,11 +97,11 @@ class SensorPanelMixin:
             return True
 
     def plc_home_state(self):
-        """True when the machine is sitting on its reference: the home-end
-        sensors covered and the far-end ones clear.
+        """True when machine sits on its reference: home-end sensors
+        covered, far-end ones clear.
 
-        False while the readings are unknown — an unknown machine is not a
-        homed machine, and this gates an automatic coordinate reset.
+        False while readings unknown — unknown machine is not a homed
+        machine; gates automatic coordinate reset.
         """
         if not self.plc_sensors_known():
             return False
@@ -115,14 +116,20 @@ class SensorPanelMixin:
         for bit, _label, _axis, _cmd, _end in PLC_SENSOR_PANEL:
             for card in self.plc_sensor_lamps.get(bit, ()):
                 if not known:
-                    set_led(card, PLC_SENSOR_UNKNOWN_TEXT, ACCENT_ORANGE)
+                    # PURPLE, not the orange COVERED uses. They were the same
+                    # colour, so a dead link painted three orange lamps that
+                    # read at a glance as three tripped limits — operator saw
+                    # "ZM covered" while its IO-3 lamp was blinking CLEAR.
+                    # Not TEXT_DIM either: unknown must not look like CLEAR,
+                    # which is the older half of this same bug.
+                    set_led(card, PLC_SENSOR_UNKNOWN_TEXT, ACCENT_PURPLE)
                 elif st.get(bit, False):
                     set_led(card, "COVERED", ACCENT_ORANGE)
                 else:
                     set_led(card, "CLEAR", TEXT_DIM)
         for card in getattr(self, "plc_home_state_lamps", ()):
             if not known:
-                set_led(card, "?", ACCENT_ORANGE)
+                set_led(card, "?", ACCENT_PURPLE)
             elif self.plc_home_state():
                 set_led(card, "AT HOME", ACCENT_GREEN)
             else:

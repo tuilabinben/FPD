@@ -1,7 +1,7 @@
-"""Behaviour mixins that make up RobotControlApp.
+"""Mixins making up RobotControlApp.
 
-Each mixin owns one concern and is combined in `robot_sim.app`. They all
-assume the attributes created in `RobotControlApp.__init__`.
+Each owns one concern, combined in `robot_sim.app`. All assume attributes
+created in `RobotControlApp.__init__`.
 """
 
 from .event_log import EventLogMixin

@@ -1,5 +1,5 @@
-"""Point-to-point motion: arm selection, IK LOAD, RUN, STOP and the
-software-only playback used when no hardware is confirmed."""
+"""Point-to-point motion: arm selection, IK LOAD, RUN, STOP and
+software-only playback used when no hardware confirmed."""
 
 from tkinter import messagebox
 
@@ -26,19 +26,18 @@ ANIM_TICK_MS = 150
 
 
 class P2PControlMixin:
-    # ── arm selector ─────────────────────────────────────────────────
     def set_arm_config(self, cfg):
         if cfg not in ARM_CONFIGS:
             return
         self.arm_config = cfg
-        # Changing the arm invalidates the joint targets already sent to the
-        # board; requiring a fresh LOAD prevents RUN from executing a program
-        # computed for the other arm.
+        # changing arm invalidates joint targets already sent to board;
+        # requiring fresh LOAD prevents RUN executing program computed for
+        # other arm
         self._invalidate_loaded_program(
             reason=f"Arm changed to {cfg} — LOAD again before RUN.")
         self._sync_z_for_both_mode()
-        # The real height is per DECK, so switching arms changes it even
-        # though the typed Z has not moved.
+        # real height is per DECK, switching arms changes it even though
+        # typed Z hasn't moved
         self._refresh_real_heights()
         for c, btn in self.arm_buttons.items():
             if c == cfg:
@@ -61,17 +60,17 @@ class P2PControlMixin:
             self.log(reason, tag="warn")
 
     def _sync_z_for_both_mode(self, *_args):
-        """BOTH mode rides one ZM carriage, so in the HOME frame there is
+        """BOTH mode rides one ZM carriage, so in HOME frame there's
         exactly ONE Z and Z1 simply mirrors Z0.
 
-        This used to subtract ARM2_Z_DROP_MM: Z was an ABSOLUTE height then,
-        and arm 2's deck really does sit 9 mm lower, so the same carriage
-        position was two different absolute numbers. Now that Z is measured
-        from HOME it is the carriage's own travel, identical for both decks,
-        and the 9 mm lives where it belongs — inside z_abs_from_home(),
-        applied per arm when the value crosses into the kinematics.
+        Used to subtract ARM2_Z_DROP_MM: Z was ABSOLUTE height then, and
+        arm 2's deck really sits 9 mm lower, so same carriage position was
+        two different absolute numbers. Now Z measured from HOME it's
+        carriage's own travel, identical for both decks, and 9 mm lives
+        where it belongs — inside z_abs_from_home(), applied per arm when
+        value crosses into kinematics.
 
-        Subtracting it here as well would apply it twice and command arm 2
+        Subtracting it here too would apply it twice, command arm 2
         9 mm low."""
         if getattr(self, "z1_entry", None) is None:
             return
@@ -87,16 +86,16 @@ class P2PControlMixin:
             self.z1_entry.config(state="normal")
 
     def _refresh_workspace_hint(self, *_args):
-        """The reachable band, computed from YOUR taught boundaries.
+        """Reachable band, computed from YOUR taught boundaries.
 
-        There is no structural reach envelope any more — solve_ik refuses
-        only radii the geometry cannot solve at all — so this line is the
-        only place the working envelope is stated, and it has to come from
-        the same numbers that enforce it. A hard-coded 133.2–613.2 would
-        name a boundary nothing applies.
+        No structural reach envelope any more — solve_ik refuses only
+        radii geometry can't solve at all — so this line is the only
+        place working envelope is stated, must come from same numbers
+        that enforce it. Hard-coded 133.2–613.2 would name a boundary
+        nothing applies.
 
-        An axis whose enforcement is switched off says so, rather than
-        showing a band it is not policing.
+        Axis with enforcement switched off says so, rather than showing a
+        band it's not policing.
         """
         if getattr(self, "workspace_hint_v", None) is None:
             return
@@ -125,15 +124,15 @@ class P2PControlMixin:
             f"9 mm less on A2M]")
 
     def _refresh_real_heights(self, *_args):
-        """Shows the deck's REAL height under each Z entry, live.
+        """Shows deck's REAL height under each Z entry, live.
 
-        Z is measured from HOME, so the typed number no longer says
-        anything about where the arm is off the floor. That absolute figure
-        is what gets compared against a cassette slot or a tape measure, so
-        it is shown rather than left as arithmetic for the operator.
+        Z measured from HOME, typed number no longer says anything about
+        where arm is off floor. Absolute figure is what gets compared
+        against cassette slot or tape measure, shown rather than left as
+        arithmetic for operator.
 
-        Per arm, because the two decks are 9 mm apart: in BOTH mode Z0 is
-        arm 1's deck and Z1 is arm 2's, from the SAME carriage position.
+        Per arm, decks are 9 mm apart: in BOTH mode Z0 is arm 1's deck,
+        Z1 is arm 2's, from SAME carriage position.
         """
         if getattr(self, "z0_real_v", None) is None:
             return
@@ -146,8 +145,8 @@ class P2PControlMixin:
             try:
                 z = float(raw)
             except ValueError:
-                # Mid-typing, or empty. Say nothing rather than show a
-                # height computed from a number that is not one yet.
+                # mid-typing, or empty. say nothing rather than show height
+                # computed from a number that isn't one yet
                 out.set("")
                 continue
             out.set(f"real height {arm}: {z_abs_from_home(z, arm):.1f} mm"
@@ -155,7 +154,6 @@ class P2PControlMixin:
                        else f"   ⚠ outside the {Z_INPUT_MIN_MM:.0f}–"
                             f"{Z_INPUT_MAX_MM:.0f} mm stroke"))
 
-    # ── coordinate input ─────────────────────────────────────────────
     def _read_points(self):
         """Returns (x0,y0,z0,x1,y1,z1) or None after showing an error."""
         fields = (("X0", self.x0_v), ("Y0", self.y0_v), ("Z0", self.z0_v),
@@ -166,13 +164,12 @@ class P2PControlMixin:
             try:
                 values.append(float(raw))
             except ValueError:
-                # Name the offending field — the old message just said
-                # "coordinates must be numbers" with no clue which one.
+                # name offending field — old message just said "coordinates
+                # must be numbers" with no clue which one
                 messagebox.showerror("Error", f"“{name}” is not a valid number: {var.get()!r}")
                 return None
         return tuple(values)
 
-    # ── LOAD ─────────────────────────────────────────────────────────
     def p2p_load_parameters(self):
         if self.motion_locked:
             self.log("LOAD ignored — a program is running.", tag="warn")
@@ -186,33 +183,31 @@ class P2PControlMixin:
             return
         x0, y0, z0, x1, y1, z1 = points
 
-        # THE ONE PLACE THE Z FRAME CHANGES.
+        # THE ONE PLACE Z FRAME CHANGES.
         #
-        # The operator types Z as height above HOME (0..285). solve_ik and
-        # the MATLAB parity sweep work in the absolute frame where arm 1's
-        # deck is at 514.3 mm with the lift down, and they must keep doing
-        # so — the sweep is what proves this module still reproduces
-        # mophong_init.m exactly. So the translation happens here, once,
-        # and is per arm because the two decks are 9 mm apart.
+        # operator types Z as height above HOME (0..285). solve_ik and
+        # MATLAB parity sweep work in absolute frame where arm 1's deck is
+        # at 514.3 mm with lift down, must keep doing so — sweep proves
+        # this module still reproduces mophong_init.m exactly. translation
+        # happens here, once, per arm because decks are 9 mm apart.
         arm_for_z = "A1M" if self.arm_config in ("A1M", "BOTH") else "A2M"
         z0_abs = z_abs_from_home(z0, arm_for_z)
         z1_abs = z_abs_from_home(z1, "A2M" if self.arm_config == "BOTH" else arm_for_z)
 
-        # solve_ik works in FROG-LEG degrees; the board, the taught limits
-        # and every readout are in MOTOR degrees. The conversion happens
-        # here, at the single boundary between the two, so nothing
-        # downstream has to know which unit it is holding.
+        # solve_ik works in FROG-LEG degrees; board, taught limits, every
+        # readout in MOTOR degrees. conversion happens here, single
+        # boundary between the two, nothing downstream must know which
+        # unit it holds.
         try:
             if self.arm_config == "BOTH":
                 d1, rot, a1, a2 = solve_ik_both(x0, y0, z0_abs, x1, y1, z1_abs)
                 a1 = motor_deg_from_fold_angle(a1)
                 a2 = motor_deg_from_fold_angle(a2)
             else:
-                # The arm that was NOT selected holds its current angle.
-                # Parking it at home would move an arm the operator never
-                # commanded — a real collision risk if something is on it.
-                # The idle arm's live angle is in motor degrees; solve_ik
-                # wants it as a frog-leg angle.
+                # arm NOT selected holds its current angle. parking it at
+                # home would move an arm the operator never commanded —
+                # real collision risk if something's on it. idle arm's
+                # live angle is motor degrees; solve_ik wants frog-leg.
                 idle_motor = self._idle_arm_angle()
                 idle = (None if idle_motor is None
                         else fold_angle_from_motor_deg(idle_motor))
@@ -228,10 +223,10 @@ class P2PControlMixin:
             self.log(f"IK error: {e}", tag="error")
             return
 
-        # solve_ik only knows the machine's PHYSICAL envelope. The operator's
-        # own working limits are narrower, and a point outside them must be
-        # refused here rather than sent, half-executed, and then stopped
-        # part-way through by the board's limit check.
+        # solve_ik only knows machine's PHYSICAL envelope. operator's own
+        # working limits are narrower, point outside them must be refused
+        # here rather than sent, half-executed, stopped part-way through
+        # by board's limit check.
         targets = ([(d1, rot, a1, a2)] if self.arm_config == "BOTH"
                    else [(d1a, rota, a1a, a2a), (d1b, rotb, a1b, a2b)])
         for label, (td1, trot, ta1, ta2) in zip(("A", "B"), targets):
@@ -246,9 +241,9 @@ class P2PControlMixin:
                 self.log(f"Point {label} rejected: {violation}", tag="error")
                 return
 
-            # PLC sensors are enforced for P2P (jog only warns). Checked
-            # after the taught limits because a sensor is a physical fact
-            # and its message is about the machine, not about a setting.
+            # PLC sensors enforced for P2P (jog only warns). checked after
+            # taught limits because sensor is physical fact, its message
+            # about machine, not a setting.
             blocked = self._sensor_violation(td1, trot, ta1, ta2)
             if blocked:
                 self._invalidate_loaded_program()
@@ -260,8 +255,8 @@ class P2PControlMixin:
                 return
 
         self._set_progress(0)
-        # is_near_singularity() is about the frog-leg geometry, so it must
-        # be handed fold degrees, not the motor degrees stored above.
+        # is_near_singularity() is about frog-leg geometry, must be handed
+        # fold degrees, not motor degrees stored above.
         if self.arm_config == "BOTH":
             self._warn_if_near_singularity(
                 ("A1M", fold_angle_from_motor_deg(a1)),
@@ -275,8 +270,8 @@ class P2PControlMixin:
 
         if self.arm_config == "BOTH":
             self.loaded_program = {"mode": "both", "arm": "BOTH", "target": (d1, rot, a1, a2)}
-            # Both rows show the same shared d1/rot; the A row highlights the
-            # A1M target and the B row the A2M target.
+            # both rows show same shared d1/rot; A row highlights A1M
+            # target, B row A2M target
             self.calc_a_d1_v.set(f"{d1:.2f} mm")
             self.calc_a_rot_v.set(f"{rot:.2f} deg")
             self.calc_a_a1_v.set(f"{base_angle_from_motor_deg(a1):.2f} base deg")
@@ -315,18 +310,17 @@ class P2PControlMixin:
         self.status_var.set("LOADED — Program A → B ready. Press RUN PROGRAM.")
 
     def _sensor_violation(self, d1, rot, a1, a2):
-        """Describes the first PLC sensor a target would drive further into,
+        """Describes first PLC sensor a target would drive further into,
         or None.
 
-        This is where the sensors are ENFORCED. A program runs unattended
-        and the operator is not watching the axis, so a leg that pushes
-        further into a covered sensor must not start. Jog only warns, for
-        the opposite reason — see warn_if_jogging_into_sensor().
+        Where sensors are ENFORCED. Program runs unattended, operator not
+        watching axis, so leg pushing further into covered sensor must
+        not start. Jog only warns, opposite reason — see
+        warn_if_jogging_into_sensor().
 
-        The comparison is against the LIVE pose, so it answers "would this
-        move make it worse", not "is a sensor covered". A target that moves
-        AWAY from a covered sensor is exactly what the operator needs to be
-        able to command.
+        Comparison against LIVE pose, answers "would this move make it
+        worse" not "is a sensor covered". Target moving AWAY from covered
+        sensor is exactly what operator needs to command.
         """
         state = getattr(self, "plc_sensor_state", {})
         target = (d1, rot, a1, a2)
@@ -336,34 +330,33 @@ class P2PControlMixin:
             idx = PLC_SENSOR_JOINT_INDEX[axis]
             now, want = self.current_joints[idx], target[idx]
             if abs(want - now) < 1e-3:
-                continue                     # that axis is not moving
+                continue                     # axis not moving
             if (1 if want > now else -1) != end:
-                continue                     # moving away, which is allowed
+                continue                     # moving away, allowed
             return (f"{label.strip()} is sitting on {bit}, and this point would "
                     f"drive it further in ({now:.2f} → {want:.2f}). Jog it off "
                     f"the sensor first.")
         return None
 
     def _limit_violation(self, d1, rot, a1, a2):
-        """Returns a human description of the first working-limit breach,
-        or None when the pose is inside every limit the operator set.
+        """Returns human description of first working-limit breach, or
+        None when pose inside every limit operator set.
 
         THIS is the reach envelope now. solve_ik no longer carries a
-        structural one — it refuses only radii the geometry cannot solve at
-        all — so the working limit is the operator's taught elbow band and
-        nothing else. One system of record.
+        structural one — refuses only radii geometry can't solve at all —
+        so working limit is operator's taught elbow band and nothing
+        else. One system of record.
 
-        Two things it has to get right, both learned elsewhere in this
+        Two things it has to get right, both learned elsewhere in
         codebase:
 
-        * The pair is read through `_limit_pair()`, which SORTS. Elbow
-          boundaries are stored exactly as taught and may sit in either
-          order; comparing against the raw min/max would reject every pose
-          whenever somebody taught the far stop first.
-        * A switched-off axis is skipped, via `_axis_enforced()`. Refusing
-          a target against a boundary the board has been told to stop
-          applying would mean the GUI and the machine disagreed about
-          whether the axis is protected.
+        * Pair read through `_limit_pair()`, which SORTS. Elbow boundaries
+          stored exactly as taught, may sit in either order; comparing
+          against raw min/max would reject every pose whenever somebody
+          taught far stop first.
+        * Switched-off axis skipped, via `_axis_enforced()`. Refusing a
+          target against boundary board's been told to stop applying
+          would mean GUI and machine disagreed whether axis protected.
         """
         checks = (
             ("ZM (d1)", d1, "z",   "Z",   "mm"),
@@ -378,8 +371,8 @@ class P2PControlMixin:
             if value < lo - 1e-6 or value > hi + 1e-6:
                 extra = ""
                 if axis in ("a1", "a2"):
-                    # The elbow number means little on its own; the radius
-                    # it produces is what the operator was aiming at.
+                    # elbow number means little alone; radius it produces
+                    # is what operator was aiming at
                     r_lo, r_hi = reach_band_from_motor_deg(lo, hi)
                     extra = (f" — that is R = {motor_deg_to_reach(value):.1f} mm, "
                              f"and your taught band allows "
@@ -390,8 +383,8 @@ class P2PControlMixin:
         return None
 
     def _idle_arm_angle(self):
-        """Live elbow angle, in MOTOR degrees, of the arm that is not
-        selected, so a single-arm program leaves it untouched."""
+        """Live elbow angle, MOTOR degrees, of arm not selected, so
+        single-arm program leaves it untouched."""
         if self.arm_config == "A1M":
             return self.current_joints[3]     # A2M holds
         if self.arm_config == "A2M":
@@ -399,10 +392,10 @@ class P2PControlMixin:
         return None
 
     def _warn_if_near_singularity(self, *labelled_angles):
-        """Advisory only. At 120° from home the frog-leg is straight and
-        radial stiffness collapses, so a small elbow error becomes a large
-        radial error. The move is still allowed (the full mathematical
-        envelope was chosen deliberately), but the operator is told."""
+        """Advisory only. At 120° from home frog-leg straight, radial
+        stiffness collapses, small elbow error becomes large radial
+        error. Move still allowed (full mathematical envelope chosen
+        deliberately), operator told."""
         for label, angle in labelled_angles:
             if is_near_singularity(angle):
                 self.log(
@@ -411,7 +404,6 @@ class P2PControlMixin:
                     f"elbow error becomes a large error at the end effector. "
                     f"Move slowly.", tag="warn")
 
-    # ── RUN / STOP ───────────────────────────────────────────────────
     def p2p_run_program(self):
         if self.loaded_program is None:
             messagebox.showwarning("Warning",
@@ -445,13 +437,12 @@ class P2PControlMixin:
     def p2p_stop(self):
         self.send("STOP")
         self.is_running = False
-        self.is_homing = False           # a STOP during HOME must clear it too
+        self.is_homing = False           # STOP during HOME must clear it too
         self._cancel_jobs("anim_job", "_home_sim_job", "_reset_position_sim_job")
         self._set_motion_locked(False)
         self.status_var.set("STOPPED — Program halted.")
         self.log("STOP — P2P program halted.", tag="warn")
 
-    # ── simulated playback ───────────────────────────────────────────
     def _simulate_p2p_run(self):
         prog = self.loaded_program
         start = tuple(self.current_joints)
@@ -460,12 +451,12 @@ class P2PControlMixin:
             legs = [(start, prog["target"])]
             done = "Simultaneous dual-arm move complete."
         else:
-            # HOME -> A -> B -> HOME, four legs, matching the board and
+            # HOME -> A -> B -> HOME, four legs, matching board and
             # mophong_init.m's P_home -> A -> B -> P_home trajectory.
             #
-            # Starting and ending at the reference is what makes the cycle
-            # repeatable: every run begins from the same pose whatever was
-            # done by hand beforehand, and parks where the next one starts.
+            # starting/ending at reference makes cycle repeatable: every
+            # run begins from same pose whatever was done by hand
+            # beforehand, parks where next one starts.
             home = (Z_HOME_MM, ROT_HOME_DEG, ARM_HOME_DEG, ARM_HOME_DEG)
             legs = [(start, home), (home, prog["a"]),
                     (prog["a"], prog["b"]), (prog["b"], home)]
@@ -488,7 +479,7 @@ class P2PControlMixin:
 
         t = step / total_steps
         joints = tuple(s + (e - s) * t for s, e in zip(start_j, target_j))
-        # Progress spans all legs so the bar fills once across the whole run.
+        # progress spans all legs so bar fills once across whole run
         overall = (index + t) / len(legs)
         self._update_p2p_telemetry(*joints, pct=int(round(overall * 100)))
 
@@ -507,7 +498,6 @@ class P2PControlMixin:
         self.status_var.set(f"READY — {done_message}")
         self.log(f"Simulation complete. {done_message}")
 
-    # ── telemetry readouts ───────────────────────────────────────────
     def _set_progress(self, pct):
         pct = max(0, min(100, int(pct)))
         self.progress_var.set(pct)

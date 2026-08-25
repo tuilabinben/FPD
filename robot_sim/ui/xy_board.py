@@ -1,40 +1,36 @@
-"""The Oxy workspace board — a top-down plot of the P2P move.
+"""Oxy workspace board — top-down plot of the P2P move.
 
 WHY A PLOT AT ALL
 -----------------
 Four numbers per point, in a frame whose zero moved twice, is hard to
-picture. A target that is "reachable" arithmetically can still be on the
-far side of the machine from where the operator meant, and the A -> B line
-crossing the unreachable wedge is invisible in a table of coordinates.
-The board answers "where is that, and how does it get there" at a glance.
+picture. A target "reachable" arithmetically can still be on far side of
+machine from where operator meant; A->B line crossing unreachable wedge is
+invisible in a coordinate table. Board answers "where is that, how does it
+get there" at a glance.
 
 WHAT IT DRAWS, and why each piece earns its ink
 -----------------------------------------------
-* The reachable ANNULUS, 133.2..613.2 mm. The inner hole is real: a3 + a6
-  is fixed structure, so the wafer centre can never come closer than
-  133.2 mm to the turntable axis. Operators reasonably expect 0,0 to be
-  reachable — it is the reference — and it is not.
-* The unreachable WEDGE between RM 340 and 360. RM sweeps 340 deg from its
-  CCW stop; the remaining 20 deg is the gap it cannot pass through, from
-  either side.
-* The taught RM band, so a target refused by a boundary rather than by the
-  structure is distinguishable at a glance.
-* A and B, the straight line between them, and HOME.
-* The LIVE tool position, which is the shared pose, so the dot moves during
-  a run and during a jog.
+* Reachable ANNULUS, 133.2..613.2 mm. Inner hole real: a3+a6 is fixed
+  structure, wafer centre never closer than 133.2 mm to turntable axis.
+  Operators reasonably expect 0,0 reachable (it's the reference) — it isn't.
+* Unreachable WEDGE between RM 340 and 360. RM sweeps 340 deg from CCW
+  stop; remaining 20 deg is gap it can't pass through, either side.
+* Taught RM band — target refused by boundary vs by structure,
+  distinguishable at a glance.
+* A and B, straight line between them, HOME.
+* LIVE tool position, from shared pose — dot moves during run and jog.
 
 THE LINE IS A CHORD, NOT THE PATH
 ---------------------------------
-The A -> B line is drawn straight because it shows the OPERATOR'S INTENT.
-The machine's actual tool path is a joint-space move — RM sweeps an arc
-while the elbow changes radius — so the tool bulges away from this line.
-That is stated on the board rather than hidden, because someone checking
-clearance between two points needs to know the swept path is not the chord.
-See the P2P section of CLAUDE.md: a true straight-line tool path needs
-on-board interpolation.
+A->B line drawn straight because it shows OPERATOR'S INTENT. Machine's
+actual tool path is joint-space move — RM sweeps arc while elbow changes
+radius — tool bulges away from this line. Stated on board not hidden:
+checking clearance between two points needs to know swept path isn't chord.
+See P2P section of CLAUDE.md: true straight-line tool path needs on-board
+interpolation.
 
-Geometry note: screen Y grows downwards, so plot Y is negated. RM 0 points
-along +X, which is drawn to the right.
+Geometry note: screen Y grows downwards, plot Y negated. RM 0 points +X,
+drawn to the right.
 """
 
 import math
@@ -64,45 +60,41 @@ from ..theme import (
     TEXT_MUTED,
 )
 
-#: Canvas size. Square, because a round workspace in a wide box wastes the
-#: width and makes equal radii look unequal — the plot is CENTRED in its
-#: own column instead of being stretched.
+#: Canvas size. Square: round workspace in wide box wastes width, makes
+#: equal radii look unequal — plot is CENTRED in own column, not stretched.
 #:
-#: 560: the left column's coordinate cards are now pinned to their
-#: compact natural width (see p2p_panel.py's grid-based split and
-#: make_coord_card's compact=True), which freed up enough room to grow
-#: the board again without crowding it — was 480, before that 380 (the
-#: 133.2 mm inner circle was only 24 px across at 380 and the A/B labels
-#: collided with HOME).
+#: 560: left column's coordinate cards now pinned to compact natural width
+#: (see p2p_panel.py's grid-based split, make_coord_card's compact=True),
+#: freed enough room to grow board without crowding — was 480, before that
+#: 380 (133.2 mm inner circle only 24 px across at 380, A/B labels collided
+#: with HOME).
 BOARD_PX = 560
 
-#: Margin inside the canvas, in pixels. Holds the axis labels and the radius
-#: ring captions, which need more room than the axis names alone. Scaled
-#: with BOARD_PX so the margin stays proportional.
+#: Margin inside canvas, px. Holds axis labels + radius ring captions,
+#: need more room than axis names alone. Scaled with BOARD_PX to stay
+#: proportional.
 BOARD_PAD = 38
 
-#: Radius rings, in mm, drawn and labelled so the plot can be read as a
-#: measurement rather than only as a shape. Anything outside the reachable
-#: annulus is skipped.
+#: Radius rings, mm, drawn/labelled so plot reads as measurement not just
+#: shape. Anything outside reachable annulus skipped.
 BOARD_RINGS_MM = (200.0, 300.0, 400.0, 500.0, 600.0)
 
 
 class XYBoardMixin:
     def _build_xy_board(self, parent):
-        """The board plus its legend. Returns the containing frame."""
+        """Board plus its legend. Returns containing frame."""
         wrap = tk.Frame(parent, bg=PANEL_BG)
 
-        # Centred in its row rather than stretched: a circle in a wide box
-        # would either distort or leave the radii unequal on screen.
+        # Centred in row not stretched: circle in wide box would distort
+        # or leave radii unequal on screen.
         self.xy_canvas = tk.Canvas(wrap, width=BOARD_PX, height=BOARD_PX,
                                    bg=LED_BG, highlightthickness=1,
                                    highlightbackground=BORDER_SOFT)
         self.xy_canvas.pack(pady=(4, 2))
 
         self.xy_hint_v = tk.StringVar(value="")
-        # The caption is one line at this width. It used to wrap to the
-        # narrow side column and ran to six lines, which pushed the board
-        # further out of view.
+        # Caption one line at this width. Used to wrap to narrow side
+        # column, ran six lines, pushed board further out of view.
         tk.Label(wrap, textvariable=self.xy_hint_v, bg=PANEL_BG, fg=TEXT_MUTED,
                  font=FONT_HINT, justify="center").pack()
 
@@ -111,9 +103,9 @@ class XYBoardMixin:
 
     # ── scaling ──────────────────────────────────────────────────────
     def _xy_scale(self):
-        """(centre_x, centre_y, px per mm). The full outer reach always fits,
-        so the picture never changes scale as points move — a plot that
-        rescales itself makes two runs impossible to compare by eye."""
+        """(centre_x, centre_y, px per mm). Full outer reach always fits,
+        picture never changes scale as points move — self-rescaling plot
+        would make two runs impossible to compare by eye."""
         half = BOARD_PX / 2.0
         return half, half, (half - BOARD_PAD) / ARM_MAX_REACH_MM
 

@@ -1,23 +1,18 @@
-"""Where the app's persisted files live.
+"""Where app's persisted files live.
 
-A leaf module — no imports from the rest of robot_sim, and none of its own
-beyond the standard library. palettes.py in particular loads before
-anything else (see its own docstring) and needs this to stay that way.
+Leaf module — no imports from rest of robot_sim, none beyond stdlib. palettes.py loads before
+anything else (see its docstring), needs this to stay that way.
 
-DEV RUN: next to this package, exactly as it always was — `machine_settings
-.json`, `keybinds.json`, `limit_presets.json` and `appearance.json` sit
-alongside the .py files, which is convenient to find and is what every
-existing install already has on disk.
+DEV RUN: next to this package, as always — machine_settings.json, keybinds.json,
+limit_presets.json, appearance.json sit alongside .py files, convenient to find, matches every
+existing install on disk.
 
-FROZEN (PyInstaller or similar): a onefile build extracts the whole
-package into a FRESH temporary directory every launch (`sys._MEIPASS`), so
-a file written next to `__file__` there is gone the moment the process
-exits — settings, taught boundaries and keybinds would silently reset on
-every restart. `%APPDATA%\\RobotMotionController` is used instead: it is
-writable without admin rights regardless of where the exe itself was
-installed (unlike a Program Files copy of the app folder), and it is the
-SAME path across onefile and onedir builds, so packaging mode is not
-something the rest of the app has to know about.
+FROZEN (PyInstaller etc): onefile build extracts whole package into FRESH temp dir every launch
+(sys._MEIPASS) — file written next to __file__ there gone the moment process exits, settings/
+taught boundaries/keybinds would silently reset every restart. %APPDATA%\\RobotMotionController
+used instead: writable w/o admin rights regardless of exe install location (unlike Program
+Files copy), SAME path across onefile/onedir builds — packaging mode not something rest of app
+has to know.
 """
 
 import os
@@ -27,10 +22,10 @@ APP_DIR_NAME = "RobotMotionController"
 
 
 def user_data_dir():
-    """Directory the settings/keybinds/preset/appearance files live in.
+    """Directory settings/keybinds/preset/appearance files live in.
 
-    Created if missing — callers join a filename onto this and open()
-    it directly, so the directory has to already exist.
+    Created if missing — callers join filename onto this and open() directly, directory must
+    already exist.
     """
     if getattr(sys, "frozen", False):
         base = os.environ.get("APPDATA") or os.path.expanduser("~")

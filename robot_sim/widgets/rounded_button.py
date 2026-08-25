@@ -1,8 +1,8 @@
 """Flat canvas button with anti-aliased rounded corners.
 
-Depth is carried entirely by the fill: hover lightens it, press darkens
-it. No shadow stack, because faking a blur on a Tk canvas costs six
-stacked shapes and produces visible banding — see widgets/draw.py.
+Depth carried entirely by fill: hover lightens, press darkens. No shadow
+stack — faking blur on Tk canvas costs six stacked shapes, visible
+banding — see widgets/draw.py.
 """
 
 import tkinter as tk
@@ -24,8 +24,8 @@ from ..theme import (
 from ..hidpi import px
 from .draw import clear, paint_rounded
 
-#: Font objects are expensive to build and get rebuilt on every hover,
-#: so they are cached by their spec tuple.
+#: Font objects expensive to build, rebuilt every hover — cached by spec
+#: tuple.
 _FONT_CACHE = {}
 
 
@@ -45,11 +45,10 @@ class RoundedButton(tk.Canvas):
                  bg_color=ACCENT_MINT, fg_color=INK_DARK, hover_color=None,
                  width=160, height=38, font=FONT_BUTTON):
         surface = _parent_bg(parent)
-        # Pixel dimensions are written for 96 DPI; px() maps them onto the
-        # display's real grid so the button is the intended physical size.
-        # Pixel dimensions scale; the FONT does not. Tk resolves point
-        # sizes against the real DPI once `tk scaling` is set, so scaling
-        # the size here too was double-scaling — see hidpi.font().
+        # Pixel dims written for 96 DPI; px() maps onto display's real grid
+        # so button is intended physical size. Pixel dims scale; FONT does
+        # not — Tk resolves point sizes against real DPI once `tk scaling`
+        # set, so scaling size here too was double-scaling — see hidpi.font().
         width, height, radius = px(width), px(height), px(radius)
         super().__init__(parent, width=width, height=height, bg=surface,
                          highlightthickness=0, bd=0, cursor="hand2")
@@ -73,11 +72,10 @@ class RoundedButton(tk.Canvas):
         self.bind("<ButtonPress-1>", self._on_press)
         self.bind("<ButtonRelease-1>", self._on_release)
 
-    # ── rendering ────────────────────────────────────────────────────
     def _is_neutral(self):
-        """Neutral buttons are a surface tone; accent buttons carry a
-        colour. The two need different hover and text treatment, so the
-        distinction is made in one place."""
+        """Neutral buttons = surface tone; accent buttons carry colour.
+        Two need different hover/text treatment — distinction made in
+        one place."""
         return self.base_color in (SURFACE, SURFACE_HI, self.surface, PANEL_BG)
 
     def _fill_for_state(self):
@@ -94,16 +92,15 @@ class RoundedButton(tk.Canvas):
         return (self.hover_color or shade(base, 1.10)) if self._hovering else base
 
     def _fit_to_text(self, display):
-        """Grows the button if its label would not fit.
+        """Grows button if label would not fit.
 
-        A fixed width plus a variable label is a clipping bug waiting to
-        happen: "SETTINGS ESC", "LINK: OFF" and "BOOST: OFF" all render
-        wider than the widths they were given, and set_config() can make a
-        label longer at runtime. Measuring is the only way to be sure.
+        Fixed width + variable label = clipping bug waiting to happen:
+        "SETTINGS ESC", "LINK: OFF", "BOOST: OFF" all render wider than
+        widths given, and set_config() can make label longer at runtime.
+        Measuring only way to be sure.
 
-        It only ever grows. Shrinking would make a row of buttons jump
-        around as their labels change, which is worse than a little extra
-        padding.
+        Only ever grows. Shrinking would make row of buttons jump around
+        as labels change — worse than a little extra padding.
         """
         try:
             key = tuple(self.font)
@@ -112,7 +109,7 @@ class RoundedButton(tk.Canvas):
                 f = _FONT_CACHE[key] = tkfont.Font(font=self.font)
             needed = f.measure(display) + px(30)
         except Exception:
-            # No Tk font engine (headless tests) — leave the width alone.
+            # no Tk font engine (headless tests) — leave width alone
             return
         if needed > self.w:
             self.w = needed
@@ -124,8 +121,8 @@ class RoundedButton(tk.Canvas):
         self._fit_to_text(display)
 
         fill = self._fill_for_state()
-        # A single hairline, one step off the fill. Enough to define the
-        # edge against the card behind it without reading as a border.
+        # single hairline, one step off fill — defines edge against card
+        # behind it w/o reading as border
         border = mix(fill, "#ffffff", 0.07) if self.enabled else None
         paint_rounded(self, 0, 0, self.w, self.h, self.radius,
                       fill, self.surface, border=border, border_w=1)
@@ -143,7 +140,6 @@ class RoundedButton(tk.Canvas):
     def _refresh(self):
         self._draw()
 
-    # ── public API ───────────────────────────────────────────────────
     def set_config(self, text, bg_color, icon="", fg_color=None):
         self.text_str = text
         self.icon_str = icon
@@ -161,7 +157,6 @@ class RoundedButton(tk.Canvas):
         self.configure(cursor="hand2" if enabled else "arrow")
         self._refresh()
 
-    # ── events ───────────────────────────────────────────────────────
     def _on_enter(self, _event=None):
         self._hovering = True
         if self.enabled:
@@ -179,8 +174,8 @@ class RoundedButton(tk.Canvas):
             self._refresh()
 
     def _on_release(self, _event=None):
-        # Fire only if the press started here AND the pointer is still
-        # inside, so dragging off the button cancels the click.
+        # fire only if press started here AND pointer still inside —
+        # dragging off button cancels click
         was_pressed, self._pressed = self._pressed, False
         if self.enabled:
             self._refresh()

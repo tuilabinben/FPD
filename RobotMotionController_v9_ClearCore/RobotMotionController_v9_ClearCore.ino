@@ -25,9 +25,6 @@ enum RunPhase { PHASE_NONE, PHASE_TO_HOME_FIRST, PHASE_TO_A, PHASE_TO_B,
 
 enum HomeState { HOME_IDLE, HOME_REQUESTED, HOME_COMPLETE, HOME_FAILED };
 
-void plcAssertHomeRequest();
-bool plcHomeDoneAsserted();
-void plcClearHomeRequest();
 void plcNetworkInit();
 void servicePlc();
 double armFoldFromMotor(double motorDeg);
@@ -36,11 +33,10 @@ double pulsesPerMmZ();
 float currentA1Fold();
 float currentA2Fold();
 String plcStatusSummary();
-bool plcAnyRunBit();
 bool plcBit(int number);
-bool plcAllHomeSensors();
 bool plcHomeStateActive();
-bool runLegBlockedBySensor(float d1, float rot, float a1, float a2, String &why);
+extern bool plcLimitSensorEnabled[3];   // order Z/ROT/A2 — defined near plcLimitBitFor()
+bool runLegBlockedByLimit(float d1, float rot, float a2, String &why);
 void applyMotionParams();
 void applyJogVelocities();
 void reportMotionProfile();
@@ -65,9 +61,9 @@ bool axisLimited(const String &axis);
 // GEOMETRY — mirrors robot_sim/config.py and mophong_init.m.
 // ══════════════════════════════════════════════════════════════
 const double A3_MM = 45.0;
-const double A4_MM = 160.0;
-const double A5_MM = 160.0;
-const double A6_MM = 248.2;
+const double A4_MM = 91.25;
+const double A5_MM = 91.25;
+const double A6_MM = 377.5;
 
 const double D_BASE_MM  = 388.0;
 const double D3_ARM1_MM = 50.0;
@@ -85,15 +81,15 @@ const double ARM_RADIAL_OFFSET_MM = A3_MM + A6_MM;
 
 const double I_RM_TOTAL = 1 * 6.5;
 
-const double ARM_ZERO_CAD_DEG = 60.0;
+const double ARM_ZERO_CAD_DEG = 0.0;
 
 const double FOLD_ANGLE_HOME_DEG     = 0.0;
-const double FOLD_ANGLE_SPEC_MAX_DEG = 91.72;
+const double FOLD_ANGLE_SPEC_MAX_DEG = 146.68;
 const double FOLD_ANGLE_MIN_DEG      = FOLD_ANGLE_HOME_DEG;
-const double FOLD_ANGLE_MAX_DEG      = 120.0;
-const double FOLD_SINGULARITY_WARN_DEG = 110.0;
+const double FOLD_ANGLE_MAX_DEG      = 180.0;
+const double FOLD_SINGULARITY_WARN_DEG = 170.0;
 
-const double ARM_GEAR_RATIO_DEF = 2.0;
+const double ARM_GEAR_RATIO_DEF = 7.80;
 const double ARM_GEAR_RATIO_MIN = 0.01, ARM_GEAR_RATIO_MAX = 1000.0;
 double armGearRatio = ARM_GEAR_RATIO_DEF;
 
@@ -189,19 +185,19 @@ double pulsesPerDegRot() { return (PULSES_PER_MOTOR_REV * rotGearRatio) / 360.0;
 // AM1/AM2 elbow gearing — *** STILL A PLACEHOLDER. MEASURE IT. ***  [notes §13]
 const double PULSES_PER_DEG_ARM_MOTOR = PULSES_PER_MOTOR_REV / 360.0;
 
-// ══════════════════════════════════════════════════════════════
-// ZM LEAD — MEASURE THIS.
-// ══════════════════════════════════════════════════════════════
-const double Z_MM_PER_REV_DEF = 80.0;
+const double Z_MICROSTEPS_PER_STEP  = 4.0;
+const double PULSES_PER_MOTOR_REV_Z = MOTOR_STEPS_PER_REV * Z_MICROSTEPS_PER_STEP;
+
+const double Z_MM_PER_REV_DEF = 20.0;
 const double Z_MM_PER_REV_MIN = 0.1, Z_MM_PER_REV_MAX = 500.0;
 double zMmPerRev = Z_MM_PER_REV_DEF;
 
-double pulsesPerMmZ() { return PULSES_PER_MOTOR_REV / zMmPerRev; }
+double pulsesPerMmZ() { return PULSES_PER_MOTOR_REV_Z / zMmPerRev; }
 
 const double Z_MM_PER_MOTOR_REV = Z_MM_PER_REV_DEF;
 
 const bool INVERT_Z    = false;
-const bool INVERT_ROT  = false;
+const bool INVERT_ROT  = true;   // RM ran backwards on the machine: D gave CCW
 const bool INVERT_ARM1 = false;
 const bool INVERT_ARM2 = false;
 
@@ -282,7 +278,7 @@ const float ESTOP_DECEL_MULTIPLIER = 3.0;
 float boostMultiplier = 1.0;
 const float BOOST_MAX = 3.0;
 
-// PLC LINK — MELSEC MC PROTOCOL 3E, ASCII FRAMES, TCP 192.168.3.101:1025  [notes §20]
+// PLC LINK — MELSEC MC PROTOCOL 3E, TCP 192.168.3.101:1025  [notes §20]
 #define PLC_LINK_PLACEHOLDER 0
 #define PLC_LINK_ETHERNET    1
 #define PLC_LINK_DIGITAL_IO  2
@@ -301,29 +297,38 @@ const uint16_t PLC_PORT = 1025;
 #define CC_IP_2 3
 #define CC_IP_3 200
 
-const int PLC_M_DONE     = 1;
-const int PLC_M_HOME_Z   = 5;
-const int PLC_M_HOME_ROT = 6;
-const int PLC_M_HOME_A1  = 7;
-const int PLC_M_HOME_A2  = 8;
-const int PLC_M_RUN_Z    = 10;
-const int PLC_M_RUN_ROT  = 11;
-const int PLC_M_RUN_A1   = 12;
-const int PLC_M_RUN_A2   = 13;
+// M30..M32 ARE THE ONLY DEVICES THIS BOARD READS.
+// M1 (DONE), M5..M8 (home sensors) and M10..M13 (run) were all polled and
+// reported once. They gated nothing - HOME completes on M30..M32 and the
+// home-state latch is the same three bits - so reporting them only invited
+// the operator to read a lamp that decides nothing. The panel showed M5..M8
+// while M30 was the bit actually refusing a jog.
+
+// TRAVEL LIMIT SWITCHES. Unlike the old M5..M8 these DO stop an axis.
+// A1M has no switch fitted, so there is deliberately no PLC_M_LIMIT_A1.
+//
+// ZM AND A2M ARE SWAPPED FROM THE OBVIOUS ORDER, measured on the machine:
+// M32 is the device that tracks ZM (covered at the bottom of the stroke,
+// clearing as Z rises), and M30 is A2M's. The board originally assumed the
+// tidy M30=ZM / M32=A2M order, so ZM watched M30 — which sits at 1 — and
+// with its switch at the minimum end every Z_DOWN was refused wherever the
+// carriage actually was. That is the jog fault chased through soft limits,
+// gear ratios and poll rates for a whole session; none of those could have
+// fixed it, because the bit being read was never ZM's.
+const int PLC_M_LIMIT_Z   = 32;
+const int PLC_M_LIMIT_ROT = 31;
+const int PLC_M_LIMIT_A2  = 30;
 
 #define PLC_POLL_DEVICE_CODE  "M*"
 const long     PLC_POLL_DEVICE_NUM = 0;
-const uint16_t PLC_POLL_WORDS      = 1;
+const uint16_t PLC_POLL_WORDS      = 3;   // M0..M47, so M30..M32 are covered
 
-#define PLC_HOME_REQ_PIN_NAME  "IO-0"
-
-const bool          PLC_HOME_ACTIVE_HIGH = true;
 const unsigned long PLC_HOME_TIMEOUT_MS  = 30000;
 
-const unsigned long PLC_POLL_IDLE_DEF_MS = 5000;
+const unsigned long PLC_POLL_IDLE_DEF_MS = 20;
 unsigned long plcPollIdleMs = PLC_POLL_IDLE_DEF_MS;
 const unsigned long PLC_POLL_IDLE_MS   = PLC_POLL_IDLE_DEF_MS;
-const unsigned long PLC_POLL_HOMING_MS = 200;
+const unsigned long PLC_POLL_HOMING_MS = 10;
 const unsigned long PLC_POLL_MS        = PLC_POLL_IDLE_MS;
 const unsigned long PLC_TXN_TIMEOUT_MS     = 800;
 const unsigned long PLC_CONNECT_TIMEOUT_MS = 2000;
@@ -357,13 +362,19 @@ const uint8_t  PLC_MC_DEVICE_CODE_M_B  = 0x90;
 const int PLC_MC_RES_HEADER_UNITS = 7;
 #endif
 
-// M5..M8 ARE HOME SENSORS, NOT LIMIT SWITCHES  [notes §26]
-const int PLC_SENSOR_END_Z   = -1;
-const int PLC_SENSOR_END_ROT = -1;
-const int PLC_SENSOR_END_A1  = +1;
-const int PLC_SENSOR_END_A2  = +1;
+// M30..M32 limit lamps
+#define PLC_LIMIT_LED_Z_PIN    IO3
+#define PLC_LIMIT_LED_ROT_PIN  IO4
+#define PLC_LIMIT_LED_A2_PIN   IO5
+#define PLC_LIMIT_LED_PIN_NAMES "IO-3/IO-4/IO-5"
+const unsigned long PLC_LIMIT_LED_BLINK_MS = 250;
 
-#define PLC_HOME_REQ_PIN  IO0
+// -1 = axis minimum, +1 = axis maximum
+// ZM sits at the BOTTOM of the stroke, so it stops Z_DOWN and Z_UP comes
+// off it. RM is mounted inverted: its switch stops ROT_CW, not ROT_CCW.
+const int PLC_LIMIT_END_Z   = -1;
+const int PLC_LIMIT_END_ROT = +1;
+const int PLC_LIMIT_END_A2  = -1;
 
 #if PLC_LINK_MODE == PLC_LINK_DIGITAL_IO
   #define PLC_HOME_DONE_PIN DI6
@@ -413,6 +424,9 @@ int rotDir = 0, a1Dir = 0, a2Dir = 0, jzDir = 0;
 unsigned long lastJogReportTime = 0;
 
 bool isHoming = false;
+// Which axes HOME is still driving. Declared here, not beside
+// beginHoming(), because cancelHoming() above needs it too.
+bool homeAxisActive[3] = {false, false, false};
 unsigned long lastHomeReportTime = 0;
 unsigned long homeRequestedAt = 0;
 HomeState homeState = HOME_IDLE;
@@ -834,7 +848,15 @@ void cancelRun() {
   runPhase = PHASE_NONE;
 }
 
-void cancelHoming() { isHoming = false; }
+// HOME drives the motors itself now, so cancelling has to STOP them. When
+// it only cleared the flag, an interrupted home left the axes running at
+// half speed toward their switches with nothing watching for arrival.
+void cancelHoming() {
+  isHoming = false;
+  for (int i = 0; i < 3; i++) homeAxisActive[i] = false;
+  jzDir = rotDir = a2Dir = 0;
+  applyJogVelocities();
+}
 
 
 // ══════════════════════════════════════════════════════════════
@@ -1027,12 +1049,11 @@ void beginRun() {
     runTargetA1 = ARM_HOME_MOTOR_DEG; runTargetA2 = ARM_HOME_MOTOR_DEG;
     sendFeedback("[RUN] Leg 1/4 — returning to HOME before Point A...");
   }
-  String whySensor;
-  if (runLegBlockedBySensor(runTargetD1, runTargetRot, runTargetA1, runTargetA2,
-                            whySensor)) {
+  String whyLimit;
+  if (runLegBlockedByLimit(runTargetD1, runTargetRot, runTargetA2, whyLimit)) {
     runPhase = PHASE_NONE;
-    sendFeedback("[ERROR] RUN refused — " + whySensor + ".");
-    sendFeedback("[WARN] Jog that axis off its sensor, then RUN again.");
+    sendFeedback("[ERROR] RUN refused — " + whyLimit + ".");
+    sendFeedback("[WARN] Jog that axis off its limit, then RUN again.");
     return;
   }
   moveJointsAbsolute(runTargetD1, runTargetRot, runTargetA1, runTargetA2);
@@ -1043,12 +1064,12 @@ void beginRun() {
 void beginRunLeg(RunPhase phase, float d1, float rot, float a1, float a2,
                  bool skipSensorBlock = false) {
   if (!skipSensorBlock) {
-    String why;
-    if (runLegBlockedBySensor(d1, rot, a1, a2, why)) {
+    String whyLimit;
+    if (runLegBlockedByLimit(d1, rot, a2, whyLimit)) {
       isMoving = false;
       runPhase = PHASE_NONE;
-      sendFeedback("[ERROR] RUN stopped — " + why + ".");
-      sendFeedback("[WARN] Jog that axis off its sensor, then RUN again.");
+      sendFeedback("[ERROR] RUN stopped — " + whyLimit + ".");
+      sendFeedback("[WARN] Jog that axis off its limit, then RUN again.");
       return;
     }
   }
@@ -1132,10 +1153,38 @@ void serviceRun() {
 // ══════════════════════════════════════════════════════════════
 // JOG
 // ══════════════════════════════════════════════════════════════
+// Homing drives the axes onto their own switches at a QUARTER jog speed.
+// The switch state arrives over Ethernet, polled every PLC_POLL_HOMING_MS,
+// so the axis keeps moving for up to one poll after the switch closes —
+// at speed, momentum carries it past the switch before MoveVelocity(0)
+// actually brakes it. Slow speed shrinks both the poll-latency overshoot
+// and the stopping distance itself; it is not a comfort setting.
+const float HOME_SPEED_SCALE = 0.25f;
+
+// WHICH WAY HOME DRIVES, per axis. Deliberately NOT PLC_LIMIT_END_*.
+//
+// Those two look like one fact and are not: PLC_LIMIT_END_* says which
+// direction a covered switch REFUSES, this says which direction HOME
+// travels to go and find it. They agreed until the device mapping turned
+// out to be wrong, and sharing one constant meant a wrong end sent HOME the
+// wrong way with no separate place to correct it. Both must still point at
+// the SAME physical switch, so HOME_DIR_* == PLC_LIMIT_END_* here, axis by
+// axis: ZM down and A2M retract are negative, but RM is mounted inverted
+// (see PLC_LIMIT_END_ROT) and its switch sits at the +1/CW end, not -1.
+const int HOME_DIR_Z   = -1;
+const int HOME_DIR_ROT = +1;
+const int HOME_DIR_A2  = -1;
+
+int homeDirFor(int i) {
+  const int dirs[3] = {HOME_DIR_Z, HOME_DIR_ROT, HOME_DIR_A2};
+  return dirs[i];
+}
+
 void applyJogVelocities() {
-  int32_t rotV = (int32_t)(rotVelPulses * boostMultiplier);
-  int32_t armV = (int32_t)(armVelPulses * boostMultiplier);
-  int32_t zV   = (int32_t)(zVelPulses   * boostMultiplier);
+  float scale = isHoming ? HOME_SPEED_SCALE : 1.0f;
+  int32_t rotV = (int32_t)(rotVelPulses * boostMultiplier * scale);
+  int32_t armV = (int32_t)(armVelPulses * boostMultiplier * scale);
+  int32_t zV   = (int32_t)(zVelPulses   * boostMultiplier * scale);
 
   MOTOR_ROT.MoveVelocity(rotDir * rotV * (INVERT_ROT ? -1 : 1));
   MOTOR_A1.MoveVelocity(a1Dir * armV * (INVERT_ARM1 ? -1 : 1));
@@ -1150,6 +1199,28 @@ bool softLimitsActive() { return limitsEnabled; }
 
 bool axisLimited(const String &axis) {
   return softLimitsActive() && axisEnforced(axis);
+}
+
+// HOME is the minimum of every axis, so a FACTORY-DEFAULT floor sits at 0.
+// Without a reference the counter reads 0 wherever the board powered up,
+// not at the bottom of travel, so the axis sits exactly ON that floor and
+// every inward jog is refused - pinned, with nothing to escape from. The
+// far end cannot collide with the counter origin, so it still applies.
+//
+// Only an UNTOUCHED default is relaxed. A taught floor applies with or
+// without a reference: it was captured against the same counters it is
+// compared with. Mirrors _axis_bounds() in the GUI; the two must agree.
+bool axisFloorIsDefault(const String &axis) {
+  if (axis == "Z")   return limD1Min  == D1_MIN_MM;
+  if (axis == "ROT") return limRotMin == ROT_MIN_DEG;
+  if (axis == "A1")  return limA1Min  == armMotorFromFold(FOLD_ANGLE_MIN_DEG);
+  if (axis == "A2")  return limA2Min  == armMotorFromFold(FOLD_ANGLE_MIN_DEG);
+  return false;
+}
+
+bool axisLowerLimited(const String &axis) {
+  if (!axisLimited(axis)) return false;
+  return isHomed || !axisFloorIsDefault(axis);
 }
 
 void warnUnreferencedOnce() {
@@ -1167,7 +1238,8 @@ void serviceArmSoftLimit(int &dir, float angle, int whichArm) {
   double loLim, hiLim; armBand(whichArm, loLim, hiLim);
 
   bool atMax = (dir > 0 && angle >= hiLim);
-  bool atMin = (dir < 0 && angle <= loLim);
+  bool atMin = (dir < 0 && angle <= loLim
+                && axisLowerLimited(whichArm == 1 ? "A1" : "A2"));
   if (!atMax && !atMin) return;
 
   dir = 0;
@@ -1191,7 +1263,7 @@ void serviceJogSoftLimits() {
       jzDir = 0; MOTOR_Z.MoveVelocity(0);
       sendFeedback("[LIMIT] Z_UP");
     }
-    if (jzDir < 0 && currentD1() <= limD1Min) {
+    if (jzDir < 0 && currentD1() <= limD1Min && axisLowerLimited("Z")) {
       jzDir = 0; MOTOR_Z.MoveVelocity(0);
       sendFeedback("[LIMIT] Z_DOWN");
     }
@@ -1201,7 +1273,7 @@ void serviceJogSoftLimits() {
       rotDir = 0; MOTOR_ROT.MoveVelocity(0);
       sendFeedback("[LIMIT] ROT_CW");
     }
-    if (rotDir < 0 && currentRot() <= limRotMin) {
+    if (rotDir < 0 && currentRot() <= limRotMin && axisLowerLimited("ROT")) {
       rotDir = 0; MOTOR_ROT.MoveVelocity(0);
       sendFeedback("[LIMIT] ROT_CCW");
     }
@@ -1220,6 +1292,12 @@ void serviceJogReporting() {
 void serviceJogWatchdog() {
 #if ENABLE_JOG_WATCHDOG
   if (!anyJogActive()) return;
+  // HOME drives the same direction variables a jog does, but it is NOT a
+  // jog: no host is holding a button, so no keep-alive arrives and this
+  // watchdog cancelled the move 700 ms in. That is why HOME looked like it
+  // did nothing at all. HOME has its own timeout and its own stop
+  // condition (each axis's switch), so leave it alone.
+  if (isHoming) return;
   if (millis() - lastJogKeepAlive < JOG_WATCHDOG_MS) return;
   cancelJog();
   sendFeedback("[WATCHDOG] Jog stopped — no keep-alive from host for "
@@ -1229,7 +1307,7 @@ void serviceJogWatchdog() {
 
 void startJog(int &axisDir, int dir) {
   if (isMoving)  { cancelRun();    sendFeedback("[WARN] RUN canceled by jog command."); }
-  if (isHoming)  { cancelHoming(); plcClearHomeRequest();
+  if (isHoming)  { cancelHoming();
                    sendFeedback("[WARN] Homing canceled by jog command."); }
   axisDir = dir;
   lastJogKeepAlive = millis();
@@ -1238,7 +1316,7 @@ void startJog(int &axisDir, int dir) {
 
 void startArmJogLinked(int dir) {
   if (isMoving)  { cancelRun();    sendFeedback("[WARN] RUN canceled by jog command."); }
-  if (isHoming)  { cancelHoming(); plcClearHomeRequest();
+  if (isHoming)  { cancelHoming();
                    sendFeedback("[WARN] Homing canceled by jog command."); }
   a1Dir = dir;
   a2Dir = dir;
@@ -1252,42 +1330,39 @@ void stopArmJog(bool arm1, bool arm2) {
 }
 
 
-// PLC TRANSPORT — MC PROTOCOL 3E, ASCII  [notes §44]
+// PLC TRANSPORT — MC PROTOCOL 3E  [notes §44]
 
 // ---- Polled state, shared by every mode ----
-uint16_t      plcStatusWord   = 0;
+// Three words, M0..M47. One word was enough while every device lived in
+// M0..M15; the limit bits are M30..M32, which straddle the second and
+// third word, so the poll has to cover all three or they are invisible.
+const int PLC_STATUS_WORDS = 3;
+uint16_t      plcStatusWords[PLC_STATUS_WORDS] = {0, 0, 0};
+uint16_t      plcStatusWord   = 0;   // M0..M15, kept for the existing readouts
 bool          plcStatusValid  = false;
 unsigned long plcLastPollOk   = 0;
 unsigned long plcLastPollSent = 0;
 bool          plcLinkUp       = false;
 bool          plcLinkEnabled  = true;
-bool plcHomeSensorPrev[4] = {false, false, false, false};
-bool plcHomeRequested = false;
-bool plcSawRunDuringHome = false;
-
 bool plcBit(int number) {
-  if (number < 0 || number > 15) return false;
-  return (plcStatusWord >> number) & 1;
-}
-bool plcAnyRunBit() {
-  return plcBit(PLC_M_RUN_Z) || plcBit(PLC_M_RUN_ROT)
-      || plcBit(PLC_M_RUN_A1) || plcBit(PLC_M_RUN_A2);
+  if (number < 0 || number >= PLC_STATUS_WORDS * 16) return false;
+  return (plcStatusWords[number / 16] >> (number % 16)) & 1;
 }
 
 String plcStatusSummary() {
   if (!plcStatusValid) {
-    return String("NO DEVICE DATA | M1(DONE)=? home Z/R/A1/A2=???? "
-                  "run Z/R/A1/A2=????");
+    return String("NO DEVICE DATA | limit Z/R/A2=???");
   }
-  String s = "M1(DONE)=" + String(plcBit(PLC_M_DONE) ? 1 : 0);
-  s += " home Z/R/A1/A2=" + String(plcBit(PLC_M_HOME_Z) ? 1 : 0)
-     + String(plcBit(PLC_M_HOME_ROT) ? 1 : 0)
-     + String(plcBit(PLC_M_HOME_A1) ? 1 : 0)
-     + String(plcBit(PLC_M_HOME_A2) ? 1 : 0);
-  s += " run Z/R/A1/A2=" + String(plcBit(PLC_M_RUN_Z) ? 1 : 0)
-     + String(plcBit(PLC_M_RUN_ROT) ? 1 : 0)
-     + String(plcBit(PLC_M_RUN_A1) ? 1 : 0)
-     + String(plcBit(PLC_M_RUN_A2) ? 1 : 0);
+  // M30..M32, the only bits read, and the ones that stop an axis.
+  String s = "limit Z/R/A2=" + String(plcBit(PLC_M_LIMIT_Z) ? 1 : 0)
+     + String(plcBit(PLC_M_LIMIT_ROT) ? 1 : 0)
+     + String(plcBit(PLC_M_LIMIT_A2) ? 1 : 0);
+  // Per-sensor boundary switch — SET_PLC_SENSOR_ENFORCE. A 0 here means
+  // that bit above is cosmetic: it no longer stops the axis or counts
+  // toward HOME.
+  s += " enforce Z/R/A2=" + String(plcLimitSensorEnabled[0] ? 1 : 0)
+     + String(plcLimitSensorEnabled[1] ? 1 : 0)
+     + String(plcLimitSensorEnabled[2] ? 1 : 0);
   return s;
 }
 
@@ -1340,72 +1415,74 @@ String plcFrameReadWords(const char *deviceCode, long deviceNum,
                      + plcHex(words, 4));
 }
 #else
-void plcAppendByte(String &s, uint8_t b) { s += (char)b; }
-void plcAppendU16LE(String &s, uint16_t v) {
-  plcAppendByte(s, (uint8_t)(v & 0xFF));
-  plcAppendByte(s, (uint8_t)((v >> 8) & 0xFF));
-}
-void plcAppendU24LE(String &s, uint32_t v) {
-  plcAppendByte(s, (uint8_t)(v & 0xFF));
-  plcAppendByte(s, (uint8_t)((v >> 8) & 0xFF));
-  plcAppendByte(s, (uint8_t)((v >> 16) & 0xFF));
-}
 uint8_t plcByteAt(const String &s, int i) { return (uint8_t)s.charAt(i); }
 uint16_t plcU16At(const String &s, int i) {
   return (uint16_t)plcByteAt(s, i) | ((uint16_t)plcByteAt(s, i + 1) << 8);
 }
-String plcHexDump(const String &raw) {
+uint16_t plcU16AtBytes(const uint8_t *b, int i) {
+  return (uint16_t)b[i] | ((uint16_t)b[i + 1] << 8);
+}
+String plcHexDumpBytes(const uint8_t *buf, int len) {
   String out;
-  for (int i = 0; i < (int)raw.length(); i++) {
+  for (int i = 0; i < len; i++) {
     if (i) out += ' ';
-    out += plcHex(plcByteAt(raw, i), 2);
+    out += plcHex(buf[i], 2);
   }
   return out;
 }
 
-String plcBuildFrame(const String &body) {
-  String payload;
-  plcAppendU16LE(payload, PLC_MC_MONITOR_TIMER_B);
-  payload += body;
-  String frame;
-  plcAppendByte(frame, PLC_MC_SUBHEADER_REQ_B0);
-  plcAppendByte(frame, PLC_MC_SUBHEADER_REQ_B1);
-  plcAppendByte(frame, PLC_MC_NETWORK_B);
-  plcAppendByte(frame, PLC_MC_PC_B);
-  plcAppendByte(frame, PLC_MC_DEST_IO_LO);
-  plcAppendByte(frame, PLC_MC_DEST_IO_HI);
-  plcAppendByte(frame, PLC_MC_DEST_STATION_B);
-  plcAppendU16LE(frame, (uint16_t)payload.length());
-  frame += payload;
-  return frame;
-}
-
-String plcFrameReadWordsBin(uint8_t deviceCodeByte, long deviceNum,
-                            uint16_t words) {
-  String body;
-  plcAppendU16LE(body, PLC_MC_CMD_READ_B);
-  plcAppendU16LE(body, PLC_MC_SUB_WORD_B);
-  plcAppendU24LE(body, (uint32_t)deviceNum);
-  plcAppendByte(body, deviceCodeByte);
-  plcAppendU16LE(body, words);
-  return plcBuildFrame(body);
+// Frames are built in a raw byte buffer, never an Arduino String: the
+// request is half NUL bytes (subcommand, device number) and String is
+// NUL-terminated, so a String-built frame can be truncated on the wire.
+void plcBuildReadFrameBin(uint8_t *buf, int &len, uint8_t deviceCode,
+                          uint32_t deviceNum, uint16_t numWords) {
+  const uint16_t dataLen = 12;
+  len = 0;
+  buf[len++] = PLC_MC_SUBHEADER_REQ_B0;
+  buf[len++] = PLC_MC_SUBHEADER_REQ_B1;
+  buf[len++] = PLC_MC_NETWORK_B;
+  buf[len++] = PLC_MC_PC_B;
+  buf[len++] = PLC_MC_DEST_IO_LO;
+  buf[len++] = PLC_MC_DEST_IO_HI;
+  buf[len++] = PLC_MC_DEST_STATION_B;
+  buf[len++] = (uint8_t)(dataLen & 0xFF);
+  buf[len++] = (uint8_t)((dataLen >> 8) & 0xFF);
+  buf[len++] = (uint8_t)(PLC_MC_MONITOR_TIMER_B & 0xFF);
+  buf[len++] = (uint8_t)((PLC_MC_MONITOR_TIMER_B >> 8) & 0xFF);
+  buf[len++] = (uint8_t)(PLC_MC_CMD_READ_B & 0xFF);
+  buf[len++] = (uint8_t)((PLC_MC_CMD_READ_B >> 8) & 0xFF);
+  buf[len++] = (uint8_t)(PLC_MC_SUB_WORD_B & 0xFF);
+  buf[len++] = (uint8_t)((PLC_MC_SUB_WORD_B >> 8) & 0xFF);
+  buf[len++] = (uint8_t)(deviceNum & 0xFF);
+  buf[len++] = (uint8_t)((deviceNum >> 8) & 0xFF);
+  buf[len++] = (uint8_t)((deviceNum >> 16) & 0xFF);
+  buf[len++] = deviceCode;
+  buf[len++] = (uint8_t)(numWords & 0xFF);
+  buf[len++] = (uint8_t)((numWords >> 8) & 0xFF);
 }
 #endif
 
-String plcBuildPollFrame() {
 #if PLC_MC_ASCII
+String plcBuildPollFrame() {
   return plcFrameReadWords(PLC_POLL_DEVICE_CODE, PLC_POLL_DEVICE_NUM,
                            false, PLC_POLL_WORDS);
-#else
-  return plcFrameReadWordsBin(PLC_MC_DEVICE_CODE_M_B, PLC_POLL_DEVICE_NUM,
-                              PLC_POLL_WORDS);
-#endif
 }
+#else
+uint8_t plcTxBytes[64];
+int     plcTxCount = 0;
+void plcBuildPollFrame() {
+  plcBuildReadFrameBin(plcTxBytes, plcTxCount, PLC_MC_DEVICE_CODE_M_B,
+                       (uint32_t)PLC_POLL_DEVICE_NUM, PLC_POLL_WORDS);
+}
+#endif
 
 // *** THERE IS NO WRITE FRAME BUILDER, ON PURPOSE ***  [notes §48]
 
 #if PLC_LINK_MODE == PLC_LINK_ETHERNET
 String        plcRxBuf;
+const int     PLC_RX_CAP = 256;
+uint8_t       plcRxBytes[PLC_RX_CAP];
+int           plcRxCount = 0;
 bool          plcTxnActive   = false;
 unsigned long plcTxnSentAt   = 0;
 unsigned long plcTxnTimeouts   = 0;
@@ -1441,6 +1518,7 @@ bool plcEnsureConnected() {
   plcClient.stop();
   plcTxnActive = false;
   plcRxBuf = "";
+  plcRxCount = 0;
   plcConnectTries++;
   if (plcClient.connect(plcTargetIp, PLC_PORT)) {
     plcReportedError = false;
@@ -1469,36 +1547,55 @@ bool plcEnsureConnected() {
   return false;
 }
 
-bool plcSend(const String &frame) {
+// Send the frame as RAW BYTES with an explicit length. Never print().
+void plcWriteFrame(const String &frame) {
+  plcClient.write((const uint8_t *)frame.c_str(), frame.length());
+}
+
+bool plcSendPoll() {
   if (!plcEnsureConnected()) return false;
   plcSendAttempts++;
-  if (plcDebug) {
 #if PLC_MC_ASCII
-    sendFeedback("[PLC_TX] " + frame);
+  String frame = plcBuildPollFrame();
+  if (plcDebug) sendFeedback("[PLC_TX] " + frame);
+  plcWriteFrame(frame);
 #else
-    sendFeedback("[PLC_TX] " + plcHexDump(frame));
+  plcBuildPollFrame();
+  if (plcDebug) sendFeedback("[PLC_TX] " + plcHexDumpBytes(plcTxBytes, plcTxCount));
+  plcClient.write(plcTxBytes, plcTxCount);
 #endif
-  }
-  plcClient.print(frame);
   plcClient.flush();
   plcRxBuf = "";
+  plcRxCount = 0;
   plcTxnActive = true;
   plcTxnSentAt = millis();
   return true;
 }
 
-void plcOnGoodRead(uint16_t word) {
+void plcOnGoodRead(const uint16_t *words, int count) {
   bool first = !plcStatusValid;
-  uint16_t previous = plcStatusWord;
-  plcStatusWord  = word;
+  uint16_t previous[PLC_STATUS_WORDS];
+  for (int i = 0; i < PLC_STATUS_WORDS; i++) previous[i] = plcStatusWords[i];
+
+  bool changed = false;
+  for (int i = 0; i < PLC_STATUS_WORDS; i++) {
+    uint16_t v = (i < count) ? words[i] : 0;
+    if (plcStatusWords[i] != v) changed = true;
+    plcStatusWords[i] = v;
+  }
+  plcStatusWord  = plcStatusWords[0];
   plcStatusValid = true;
   plcLastPollOk  = millis();
   plcGoodReads++;
-  if (first || plcStatusWord != previous) {
+  (void)previous;
+
+  if (first || changed) {
     sendFeedback("[PLC_STATE] link=UP socket=OPEN data=" + String(plcDataState())
                + " conn=" + String((unsigned long)plcConnectsOk) + "/"
                + String((unsigned long)plcConnectTries)
-               + " word=" + plcHex(plcStatusWord, 4)
+               + " word=" + plcHex(plcStatusWords[0], 4)
+               + " w1=" + plcHex(plcStatusWords[1], 4)
+               + " w2=" + plcHex(plcStatusWords[2], 4)
                + " timeouts=" + String((unsigned long)plcTxnTimeouts)
                + " | " + plcStatusSummary());
   }
@@ -1535,41 +1632,59 @@ bool plcConsumeResponse() {
     return true;
   }
 
-  long w = plcParseHex(frame, PLC_MC_RES_HEADER_UNITS + 8, 4);
-  if (w < 0) {
-    sendFeedback("[ERROR] PLC returned unreadable device data.");
-    return true;
+  int avail = ((int)dataLen - 4) / 4;          // words after the end code
+  if (avail > PLC_STATUS_WORDS) avail = PLC_STATUS_WORDS;
+  uint16_t words[PLC_STATUS_WORDS] = {0, 0, 0};
+  for (int i = 0; i < avail; i++) {
+    long w = plcParseHex(frame, PLC_MC_RES_HEADER_UNITS + 8 + i * 4, 4);
+    if (w < 0) {
+      sendFeedback("[ERROR] PLC returned unreadable device data.");
+      return true;
+    }
+    words[i] = (uint16_t)w;
   }
-  plcOnGoodRead((uint16_t)w);
+  plcOnGoodRead(words, avail);
   return true;
 }
 #else
 bool plcConsumeResponse() {
-  if ((int)plcRxBuf.length() < PLC_MC_RES_HEADER_UNITS + 2) return false;
-  int dataLen = (int)plcU16At(plcRxBuf, PLC_MC_RES_HEADER_UNITS);
+  if (plcRxCount < PLC_MC_RES_HEADER_UNITS + 4) return false;
+  int dataLen = (int)plcU16AtBytes(plcRxBytes, PLC_MC_RES_HEADER_UNITS);
   int total = PLC_MC_RES_HEADER_UNITS + 2 + dataLen;
-  if ((int)plcRxBuf.length() < total) return false;
+  if (plcRxCount < total) return false;
 
-  String frame = plcRxBuf.substring(0, total);
-  plcRxBuf = plcRxBuf.substring(total);
+  bool bad = (plcRxBytes[0] != PLC_MC_SUBHEADER_RES_B0
+           || plcRxBytes[1] != PLC_MC_SUBHEADER_RES_B1);
+  uint16_t endCode = plcU16AtBytes(plcRxBytes, PLC_MC_RES_HEADER_UNITS + 2);
 
-  if (plcByteAt(frame, 0) != PLC_MC_SUBHEADER_RES_B0
-   || plcByteAt(frame, 1) != PLC_MC_SUBHEADER_RES_B1) {
+  int avail = (dataLen - 2) / 2;               // words after the end code
+  if (avail > PLC_STATUS_WORDS) avail = PLC_STATUS_WORDS;
+  uint16_t words[PLC_STATUS_WORDS] = {0, 0, 0};
+  for (int i = 0; i < avail; i++) {
+    words[i] = plcU16AtBytes(plcRxBytes, PLC_MC_RES_HEADER_UNITS + 4 + i * 2);
+  }
+
+  int leftover = plcRxCount - total;
+  for (int i = 0; i < leftover; i++) plcRxBytes[i] = plcRxBytes[total + i];
+  plcRxCount = leftover;
+
+  if (bad) {
     sendFeedback("[ERROR] PLC response subheader was not D0 00 — the port is "
                  "probably not speaking MC protocol 3E BINARY.");
     return true;
   }
-
-  uint16_t endCode = plcU16At(frame, PLC_MC_RES_HEADER_UNITS + 2);
   if (endCode != 0) {
     sendFeedback("[ERROR] PLC end code " + plcHex((unsigned long)endCode, 4)
                + " — the read was refused. Check that M0 exists and that MC "
                  "protocol is enabled on the port.");
     return true;
   }
-
-  uint16_t w = plcU16At(frame, PLC_MC_RES_HEADER_UNITS + 4);
-  plcOnGoodRead(w);
+  if (avail <= 0) {
+    sendFeedback("[ERROR] PLC returned no device words (data length "
+               + String(dataLen) + ").");
+    return true;
+  }
+  plcOnGoodRead(words, avail);
   return true;
 }
 #endif
@@ -1577,24 +1692,29 @@ bool plcConsumeResponse() {
 void plcServiceRx() {
   bool got = false;
   while (plcClient.available() > 0) {
-    char c = (char)plcClient.read();
-    if (plcRxBuf.length() < 200) plcRxBuf += c;
+    uint8_t v = (uint8_t)plcClient.read();
+#if PLC_MC_ASCII
+    if (plcRxBuf.length() < 200) plcRxBuf += (char)v;
+#else
+    if (plcRxCount < PLC_RX_CAP) plcRxBytes[plcRxCount++] = v;
+#endif
     got = true;
   }
   if (got && plcDebug) {
 #if PLC_MC_ASCII
     sendFeedback("[PLC_RX] " + plcRxBuf);
 #else
-    sendFeedback("[PLC_RX] " + plcHexDump(plcRxBuf));
+    sendFeedback("[PLC_RX] " + plcHexDumpBytes(plcRxBytes, plcRxCount));
 #endif
   }
-  if (!plcTxnActive) { plcRxBuf = ""; return; }
+  if (!plcTxnActive) { plcRxBuf = ""; plcRxCount = 0; return; }
 
   if (plcConsumeResponse()) { plcTxnActive = false; return; }
 
   if (millis() - plcTxnSentAt >= PLC_TXN_TIMEOUT_MS) {
     plcTxnActive = false;
     plcRxBuf = "";
+    plcRxCount = 0;
     plcTxnTimeouts++;
     plcClient.stop();
     if (plcTxnTimeouts == 1 || plcTxnTimeouts % 100 == 0) {
@@ -1613,20 +1733,15 @@ void plcServiceRx() {
   }
 }
 
+#if PLC_MC_ASCII
 void plcTestReport(const String &raw) {
   if (raw.length() == 0) {
     sendFeedback("[PLC_TEST] RX nothing. The socket is open but the PLC did not "
                  "answer a device read — this is almost always MC protocol not "
                  "enabled on that port, or the Communication Data Code set to "
-#if PLC_MC_ASCII
-                 "BINARY while this board speaks ASCII."
-#else
-                 "ASCII while this board speaks BINARY."
-#endif
-                );
+                 "BINARY while this board speaks ASCII.");
     return;
   }
-#if PLC_MC_ASCII
   sendFeedback("[PLC_TEST] RX " + raw);
   if (!raw.startsWith(String(PLC_MC_SUBHEADER_RES))) {
     sendFeedback("[PLC_TEST] Subheader is not " PLC_MC_SUBHEADER_RES
@@ -1642,85 +1757,152 @@ void plcTestReport(const String &raw) {
   }
   long w = plcParseHex(raw, PLC_MC_RES_HEADER_UNITS + 8, 4);
   plcStatusWord = (uint16_t)w;
+  plcStatusWords[0] = plcStatusWord;
+  plcStatusValid = true;
+  plcLastPollOk = millis();
+  sendFeedback("[PLC_TEST] OK — M0..M15 = " + plcHex((unsigned long)plcStatusWord, 4)
+             + " | " + plcStatusSummary());
+}
 #else
-  sendFeedback("[PLC_TEST] RX " + plcHexDump(raw));
-  if ((int)raw.length() < PLC_MC_RES_HEADER_UNITS + 2
-   || plcByteAt(raw, 0) != PLC_MC_SUBHEADER_RES_B0
-   || plcByteAt(raw, 1) != PLC_MC_SUBHEADER_RES_B1) {
+void plcTestReport(const uint8_t *raw, int rawLen) {
+  if (rawLen == 0) {
+    sendFeedback("[PLC_TEST] RX nothing. The socket is open but the PLC did not "
+                 "answer a device read — this is almost always MC protocol not "
+                 "enabled on that port, or the Communication Data Code set to "
+                 "ASCII while this board speaks BINARY.");
+    return;
+  }
+  sendFeedback("[PLC_TEST] RX " + plcHexDumpBytes(raw, rawLen));
+  if (rawLen < PLC_MC_RES_HEADER_UNITS + 4
+   || raw[0] != PLC_MC_SUBHEADER_RES_B0
+   || raw[1] != PLC_MC_SUBHEADER_RES_B1) {
     sendFeedback("[PLC_TEST] Subheader is not D0 00 — the port is answering, but "
                  "not with MC protocol 3E BINARY.");
     return;
   }
-  uint16_t endCode = plcU16At(raw, PLC_MC_RES_HEADER_UNITS + 2);
+  uint16_t endCode = plcU16AtBytes(raw, PLC_MC_RES_HEADER_UNITS + 2);
   if (endCode != 0) {
     sendFeedback("[PLC_TEST] End code " + plcHex((unsigned long)endCode, 4)
                + " — the PLC refused the read. Check that M0..M15 exist and that "
                  "the module permits reads.");
     return;
   }
-  plcStatusWord = plcU16At(raw, PLC_MC_RES_HEADER_UNITS + 4);
-#endif
+  int dataLen = (int)plcU16AtBytes(raw, PLC_MC_RES_HEADER_UNITS);
+  int avail = (dataLen - 2) / 2;
+  if (avail > PLC_STATUS_WORDS) avail = PLC_STATUS_WORDS;
+  for (int i = 0; i < PLC_STATUS_WORDS; i++) {
+    plcStatusWords[i] = (i < avail)
+        ? plcU16AtBytes(raw, PLC_MC_RES_HEADER_UNITS + 4 + i * 2) : 0;
+  }
+  plcStatusWord = plcStatusWords[0];
   plcStatusValid = true;
   plcLastPollOk = millis();
-  sendFeedback("[PLC_TEST] OK — M0..M15 = " + plcHex((unsigned long)plcStatusWord, 4)
+  sendFeedback("[PLC_TEST] OK — words " + plcHex(plcStatusWords[0], 4) + " "
+             + plcHex(plcStatusWords[1], 4) + " " + plcHex(plcStatusWords[2], 4)
              + " | " + plcStatusSummary());
 }
 #endif
+#endif
 
-bool plcAllHomeSensors() {
-  return plcBit(PLC_M_HOME_Z) && plcBit(PLC_M_HOME_ROT)
-      && plcBit(PLC_M_HOME_A1) && plcBit(PLC_M_HOME_A2);
+// M30..M32 travel limits — stop the axis
+bool plcLimitLedBlink = false;
+unsigned long plcLimitLedLastBlink = 0;
+bool plcLimitWarned[3] = {false, false, false};
+
+// Per-sensor boundary switch, index order Z/ROT/A2 throughout this file.
+// For ONE broken switch: a stuck or noisy sensor should not have to take
+// HOME and the other two axes' protection down with it. Separate from
+// plcLinkEnabled, which stops the whole PLC socket. Disabled -> the axis
+// is never stopped by that switch, AND it stops counting toward the
+// M30+M31+M32 HOME condition in plcHomeStateActive() below — otherwise a
+// broken switch blocks HOME forever with no way to say "trust the rest".
+bool plcLimitSensorEnabled[3] = {true, true, true};
+
+int plcLimitBitFor(int i) {
+  const int bits[3] = {PLC_M_LIMIT_Z, PLC_M_LIMIT_ROT, PLC_M_LIMIT_A2};
+  return bits[i];
+}
+int plcLimitEndFor(int i) {
+  const int ends[3] = {PLC_LIMIT_END_Z, PLC_LIMIT_END_ROT, PLC_LIMIT_END_A2};
+  return ends[i];
+}
+// -1 if the axis token isn't one of the three PLC-sensored axes.
+int plcLimitSensorIndexFor(const String &axis) {
+  if (axis == "Z")   return 0;
+  if (axis == "ROT") return 1;
+  if (axis == "A2")  return 2;
+  return -1;
+}
+// True when this axis's PLC switch either agrees (tripped) or has been
+// told not to matter. Used ONLY for HOME — jog/run stops still need the
+// real bit, since "satisfied" here is not "safe to drive into".
+bool plcLimitSensorSatisfied(int i) {
+  return !plcLimitSensorEnabled[i] || plcBit(plcLimitBitFor(i));
 }
 
-bool plcJogWarned[4] = {false, false, false, false};
+void plcServiceLimitLeds() {
+  if (millis() - plcLimitLedLastBlink >= PLC_LIMIT_LED_BLINK_MS) {
+    plcLimitLedLastBlink = millis();
+    plcLimitLedBlink = !plcLimitLedBlink;
+  }
+  bool z   = plcStatusValid && plcBit(PLC_M_LIMIT_Z);
+  bool rot = plcStatusValid && plcBit(PLC_M_LIMIT_ROT);
+  bool a2  = plcStatusValid && plcBit(PLC_M_LIMIT_A2);
+  digitalWrite(PLC_LIMIT_LED_Z_PIN,   z   ? HIGH : (plcLimitLedBlink ? HIGH : LOW));
+  digitalWrite(PLC_LIMIT_LED_ROT_PIN, rot ? HIGH : (plcLimitLedBlink ? HIGH : LOW));
+  digitalWrite(PLC_LIMIT_LED_A2_PIN,  a2  ? HIGH : (plcLimitLedBlink ? HIGH : LOW));
+}
 
-void plcServiceSensorJogWarning() {
-  const int  bits[4] = {PLC_M_HOME_Z, PLC_M_HOME_ROT, PLC_M_HOME_A1, PLC_M_HOME_A2};
-  const int  ends[4] = {PLC_SENSOR_END_Z, PLC_SENSOR_END_ROT,
-                        PLC_SENSOR_END_A1, PLC_SENSOR_END_A2};
-  int       *dirs[4] = {&jzDir, &rotDir, &a1Dir, &a2Dir};
-  const char *names[4] = {"ZM", "RM", "A1M", "A2M"};
-  const char *sensor[4] = {"M5 MinZ", "M6 OutR", "M7 OutR1", "M8 OutR2"};
+void plcServiceLimitStops() {
+  int *dirs[3] = {&jzDir, &rotDir, &a2Dir};
+  const char *names[3] = {"ZM", "RM", "A2M"};
+  const char *devs[3]  = {"M32", "M31", "M30"};   // order Z/ROT/A2 — see the swap note above
 
-  for (int i = 0; i < 4; i++) {
-    bool into = plcBit(bits[i]) && *dirs[i] == ends[i];
-    if (into && !plcJogWarned[i]) {
-      plcJogWarned[i] = true;
-      sendFeedback("[WARN] " + String(names[i]) + " is jogging INTO "
-                 + String(sensor[i]) + ", which is covered. Jog is not blocked "
-                   "— watch the machine.");
-    } else if (!into) {
-      plcJogWarned[i] = false;
+  for (int i = 0; i < 3; i++) {
+    bool tripped = plcLimitSensorEnabled[i] && plcStatusValid && plcBit(plcLimitBitFor(i));
+    if (!tripped) { plcLimitWarned[i] = false; continue; }
+    if (*dirs[i] == plcLimitEndFor(i)) {
+      *dirs[i] = 0;
+      if (i == 0)      MOTOR_Z.MoveVelocity(0);
+      else if (i == 1) MOTOR_ROT.MoveVelocity(0);
+      else             MOTOR_A2.MoveVelocity(0);
+      if (!plcLimitWarned[i]) {
+        plcLimitWarned[i] = true;
+        sendFeedback("[PLC_LIMIT] " + String(names[i]) + " stopped — "
+                   + String(devs[i]) + " is ON. Jog the other way to come off it.");
+      }
     }
   }
 }
 
-bool runLegBlockedBySensor(float d1, float rot, float a1, float a2, String &why) {
-  const int  bits[4] = {PLC_M_HOME_Z, PLC_M_HOME_ROT, PLC_M_HOME_A1, PLC_M_HOME_A2};
-  const int  ends[4] = {PLC_SENSOR_END_Z, PLC_SENSOR_END_ROT,
-                        PLC_SENSOR_END_A1, PLC_SENSOR_END_A2};
-  const char *names[4] = {"ZM", "RM", "A1M", "A2M"};
-  const char *sensor[4] = {"M5 MinZ", "M6 OutR", "M7 OutR1", "M8 OutR2"};
-  float now[4]  = {currentD1(), currentRot(), currentA1(), currentA2()};
-  float want[4] = {d1, rot, a1, a2};
+// True when a run leg would drive an axis further into a tripped limit.
+bool runLegBlockedByLimit(float d1, float rot, float a2, String &why) {
+  const char *names[3] = {"ZM", "RM", "A2M"};
+  const char *devs[3]  = {"M32", "M31", "M30"};   // order Z/ROT/A2 — see the swap note above
+  float now[3]  = {currentD1(), currentRot(), currentA2()};
+  float want[3] = {d1, rot, a2};
 
-  for (int i = 0; i < 4; i++) {
-    if (!plcBit(bits[i])) continue;
+  for (int i = 0; i < 3; i++) {
+    if (!(plcLimitSensorEnabled[i] && plcStatusValid && plcBit(plcLimitBitFor(i)))) continue;
     float delta = want[i] - now[i];
     if (fabs(delta) < 1e-3) continue;
     int dir = (delta > 0) ? 1 : -1;
-    if (dir != ends[i]) continue;
-    why = String(names[i]) + " is on " + String(sensor[i])
-        + " and the leg would drive it further in (" + String(now[i], 2)
+    if (dir != plcLimitEndFor(i)) continue;
+    why = String(names[i]) + " is on its travel limit (" + String(devs[i])
+        + ") and the leg would drive it further in (" + String(now[i], 2)
         + " -> " + String(want[i], 2) + ")";
     return true;
   }
   return false;
 }
 
+// HOME state = M30 && M31 && M32, EXCEPT a switch whose boundary has been
+// disabled (SET_PLC_SENSOR_ENFORCE:<axis>,0) counts as already satisfied —
+// a broken switch must not be able to block HOME forever.
 bool plcHomeStateActive() {
-  return plcBit(PLC_M_HOME_Z) && plcBit(PLC_M_HOME_ROT)
-      && !plcBit(PLC_M_HOME_A1) && !plcBit(PLC_M_HOME_A2);
+  if (!plcStatusValid) return false;
+  return plcLimitSensorSatisfied(0) && plcLimitSensorSatisfied(1)
+      && plcLimitSensorSatisfied(2);
 }
 
 bool plcHomeStatePrev = false;
@@ -1744,30 +1926,11 @@ void plcServiceHomeState() {
   MOTOR_A2.PositionRefSet(0);
   isHomed = true;
   homeState = HOME_COMPLETE;
-  if (isHoming) { isHoming = false; plcClearHomeRequest(); }
-  sendFeedback("[PLC_HOME] HOME STATE — M5 and M6 covered, M7/M8 clear.");
+  if (isHoming) { isHoming = false; }
+  sendFeedback("[PLC_HOME] HOME STATE — M30, M31 and M32 all true.");
   sendFeedback("[COORD_RESET] Coordinates reset to the standard home pose: "
                "d1=0.00 mm, ROT=0.00 deg, A1M=0.00 motor deg, A2M=0.00 motor deg.");
   reportJogPosition();
-}
-
-void plcServiceHomeSensors() {
-  const int  bitNums[4]   = {PLC_M_HOME_Z, PLC_M_HOME_ROT,
-                             PLC_M_HOME_A1, PLC_M_HOME_A2};
-  const char *axisName[4] = {"ZM", "RM", "A1M", "A2M"};
-  const char *bitName[4]  = {"M5 MinZ", "M6 OutR", "M7 OutR1", "M8 OutR2"};
-
-  for (int i = 0; i < 4; i++) {
-    bool on = plcBit(bitNums[i]);
-    if (on != plcHomeSensorPrev[i]) {
-      plcHomeSensorPrev[i] = on;
-      const int ends[4] = {PLC_SENSOR_END_Z, PLC_SENSOR_END_ROT,
-                           PLC_SENSOR_END_A1, PLC_SENSOR_END_A2};
-      sendFeedback("[PLC_HOME] " + String(axisName[i]) + " sensor "
-                 + String(bitName[i]) + (on ? " REACHED" : " left")
-                 + (ends[i] > 0 ? " (far end)" : " (home end)"));
-    }
-  }
 }
 
 void plcServicePoll() {
@@ -1778,7 +1941,7 @@ void plcServicePoll() {
   unsigned long interval = isHoming ? PLC_POLL_HOMING_MS : plcPollIdleMs;
   if (plcLastPollSent != 0 && (now - plcLastPollSent) < interval) return;
   plcLastPollSent = now;
-  plcSend(plcBuildPollFrame());
+  plcSendPoll();
 #endif
 }
 
@@ -1795,58 +1958,18 @@ void servicePlc() {
 
   static unsigned long lastActedOn = 0;
   plcServicePoll();
+  // Lamps and limit stops run EVERY pass, not only on a fresh poll: the
+  // blink has to keep ticking between polls, and a jog started after the
+  // last reply must still be stopped by an already-tripped switch.
+  plcServiceLimitLeds();
+  plcServiceLimitStops();
   if (plcStatusValid && plcLastPollOk != lastActedOn) {
     lastActedOn = plcLastPollOk;
-    plcServiceHomeSensors();
-    plcServiceSensorJogWarning();
     plcServiceHomeState();
   }
 #endif
 }
 
-void plcAssertHomeRequest() {
-  plcHomeRequested = true;
-  plcSawRunDuringHome = false;
-
-  digitalWrite(PLC_HOME_REQ_PIN, PLC_HOME_ACTIVE_HIGH ? HIGH : LOW);
-
-#if PLC_LINK_MODE == PLC_LINK_ETHERNET
-  plcStatusValid = false;
-  sendFeedback("[PLC] HOME request asserted on " PLC_HOME_REQ_PIN_NAME
-               " -> X0 (hard-wired) — held until M1 (DONE).");
-#elif PLC_LINK_MODE == PLC_LINK_DIGITAL_IO
-  sendFeedback("[PLC] HOME request asserted on " PLC_HOME_REQ_PIN_NAME " -> X0.");
-#else
-  sendFeedback("[PLC] PLACEHOLDER: HOME request raised — no PLC wired.");
-#endif
-}
-
-bool plcHomeDoneAsserted() {
-#if PLC_LINK_MODE == PLC_LINK_ETHERNET
-  if (!plcStatusValid) return false;
-  if (plcAnyRunBit()) { plcSawRunDuringHome = true; return false; }
-  if (!plcSawRunDuringHome) return false;
-  if (!plcBit(PLC_M_DONE)) return false;
-  if (!plcAllHomeSensors()) {
-    sendFeedback("[WARN] PLC returned DONE but not all home sensors are covered "
-                 "(M5..M8). Check the sensor wiring — the reference may be wrong.");
-  }
-  return true;
-#elif PLC_LINK_MODE == PLC_LINK_DIGITAL_IO
-  int lvl = digitalRead(PLC_HOME_DONE_PIN);
-  return PLC_HOME_ACTIVE_HIGH ? (lvl == HIGH) : (lvl == LOW);
-#else
-  return PLC_SIM_DONE_MS > 0 &&
-         (millis() - homeRequestedAt) >= PLC_SIM_DONE_MS;
-#endif
-}
-
-void plcClearHomeRequest() {
-  if (!plcHomeRequested) return;
-  plcHomeRequested = false;
-  digitalWrite(PLC_HOME_REQ_PIN, PLC_HOME_ACTIVE_HIGH ? LOW : HIGH);
-  sendFeedback("[PLC] HOME request cleared (" PLC_HOME_REQ_PIN_NAME " off).");
-}
 
 void plcNetworkInit() {
 #if PLC_LINK_MODE == PLC_LINK_ETHERNET
@@ -1855,7 +1978,8 @@ void plcNetworkInit() {
              + String(CC_IP_2) + "." + String(CC_IP_3)
              + " -> PLC " + String(PLC_IP_0) + "." + String(PLC_IP_1) + "."
              + String(PLC_IP_2) + "." + String(PLC_IP_3) + ":" + String((int)PLC_PORT)
-             + " (MC protocol 3E, ASCII, READ-ONLY, polling M0..M15 every "
+             + " (MC protocol 3E, " + String(PLC_MC_ASCII ? "ASCII" : "BINARY")
+             + ", READ-ONLY, polling M0..M47 every "
              + String((int)(PLC_POLL_IDLE_MS / 1000)) + " s idle / "
              + String((int)PLC_POLL_HOMING_MS) + " ms while homing)");
   if (Ethernet.linkStatus() == LinkOFF) {
@@ -1865,6 +1989,17 @@ void plcNetworkInit() {
 #endif
 }
 
+// HOME IS DRIVEN BY THIS BOARD, NOT REQUESTED FROM THE PLC.  [notes §61]
+//
+// It used to assert IO-0 into the PLC's X0 and wait for the PLC's own home
+// sequence to finish. Nothing on the PLC side ever ran, so HOME sat there
+// and timed out. The board already knows where every switch is (M30..M32)
+// and already owns the motors, so it drives each axis onto its own switch
+// itself. No device is written and no request line is raised.
+//
+// All three move AT ONCE, each stopping independently the moment its own
+// bit reads covered. A1M has no switch fitted and is therefore never moved
+// by HOME — if it is extended, it stays extended while RM turns.
 void beginHoming() {
   cancelJog();
   cancelRun();
@@ -1877,22 +2012,50 @@ void beginHoming() {
   lastHomeReportTime = homeRequestedAt;
 
 #if PLC_LINK_MODE == PLC_LINK_ETHERNET
-  if (plcGoodReads == 0) {
-    sendFeedback("[WARN] No PLC device read has succeeded yet, so DONE and the run "
-                 "bits cannot be seen and this HOME will time out. The request line "
-                 "still goes out. Run PLC_TEST to find out why the read fails.");
+  if (!plcStatusValid) {
+    isHoming = false;
+    homeState = HOME_FAILED;
+    sendFeedback("[HOME] FAILED — no PLC device data, so the switches cannot be "
+                 "seen. HOME drives the axes onto M30..M32 and would have no way "
+                 "to know when to stop. Fix the link first — PLC_TEST.");
+    sendFeedback("[ERROR] HOME refused: the switch states are unknown.");
+    return;
   }
 #endif
 
-  plcAssertHomeRequest();
-  sendFeedback("[HOME] Homing started. HOME request asserted on "
-               PLC_HOME_REQ_PIN_NAME " -> X0, waiting for the run bits "
-               "M10..M13 to finish and M1 (DONE) — timeout "
+  int  *dirs[3]        = {&jzDir, &rotDir, &a2Dir};
+  const char *names[3] = {"ZM", "RM", "A2M"};
+  String moving, already;
+  for (int i = 0; i < 3; i++) {
+    // Already sitting on its switch: nothing to do, and driving further in
+    // is the one direction that must never be commanded. A DISABLED switch
+    // (SET_PLC_SENSOR_ENFORCE:<axis>,0 — broken sensor) is treated the
+    // same way: never driven, since there would be nothing to stop it
+    // arriving at its mechanical end blind.
+    if (!plcLimitSensorEnabled[i] || plcBit(plcLimitBitFor(i))) {
+      homeAxisActive[i] = false;
+      *dirs[i] = 0;
+      already += String(already.length() ? ", " : "") + names[i];
+      continue;
+    }
+    homeAxisActive[i] = true;
+    *dirs[i] = homeDirFor(i);            // backward until this axis's switch trips
+    moving += String(moving.length() ? ", " : "") + names[i];
+  }
+  applyJogVelocities();
+
+  sendFeedback("[HOME] Homing started — this board drives the axes, the PLC is "
+               "not asked. Moving: " + String(moving.length() ? moving : "nothing")
+             + (already.length() ? " | already on switch: " + already : "")
+             + " | at " + String((int)(HOME_SPEED_SCALE * 100)) + "% speed, timeout "
              + String((int)(PLC_HOME_TIMEOUT_MS / 1000)) + "s.");
+  if (!moving.length()) {
+    sendFeedback("[HOME] Every switch is already covered.");
+  }
+  sendFeedback("[HOME] A1M has no switch and is NOT moved by HOME.");
 }
 
 void finishHoming(bool ok, const String &reason) {
-  plcClearHomeRequest();
   isHoming = false;
   homeState = ok ? HOME_COMPLETE : HOME_FAILED;
 
@@ -1917,19 +2080,17 @@ void finishHoming(bool ok, const String &reason) {
 #endif
   } else {
     sendFeedback("[HOME] FAILED — " + reason);
-    sendFeedback("[ERROR] HOME timeout: PLC did not return DONE.");
+    sendFeedback("[ERROR] HOME timeout: this board drives the axes itself and never "
+                 "saw one or more of M30..M32 come ON.");
 #if PLC_LINK_MODE == PLC_LINK_ETHERNET
     if (plcGoodReads == 0) {
       sendFeedback("[ERROR] Root cause: this board has never read a device from the "
-                   "PLC, so it could not have seen DONE. Fix the MC-protocol link "
-                   "first — PLC_TEST.");
-    } else if (!plcSawRunDuringHome) {
-      sendFeedback("[ERROR] Device reads work, but M10..M13 never came ON — the PLC "
-                   "never started homing. Check the IO-0 -> X0 wire, its 24 V "
-                   "return, and the PLC's own home sequence.");
+                   "PLC, so it could not have seen the switches at all. Fix the "
+                   "MC-protocol link first — PLC_TEST.");
     } else {
-      sendFeedback("[ERROR] The PLC ran the axes but never set M1 (DONE). Check the "
-                   "end of its home sequence.");
+      sendFeedback("[ERROR] Device reads work, so a switch is stuck, broken, or the "
+                   "axis is mechanically obstructed. If a switch is known broken, "
+                   "SET_PLC_SENSOR_ENFORCE:<axis>,0 excludes it from HOME.");
     }
 #endif
   }
@@ -1944,13 +2105,34 @@ void serviceHoming() {
     reportJogPosition();
   }
 
-  if (plcHomeDoneAsserted()) {
+  // Stop each axis the instant ITS OWN switch reads covered. They finish
+  // independently — one axis arriving must not halt the other two.
+  int  *dirs[3]        = {&jzDir, &rotDir, &a2Dir};
+  const char *names[3] = {"ZM", "RM", "A2M"};
+  bool changed = false;
+  for (int i = 0; i < 3; i++) {
+    if (!homeAxisActive[i]) continue;
+    if (!plcBit(plcLimitBitFor(i))) continue;
+    homeAxisActive[i] = false;
+    *dirs[i] = 0;
+    changed = true;
+    sendFeedback("[HOME] " + String(names[i]) + " reached its switch.");
+  }
+  if (changed) applyJogVelocities();
+
+  if (plcHomeStateActive()) {
     finishHoming(true, "");
     return;
   }
   if (now - homeRequestedAt >= PLC_HOME_TIMEOUT_MS) {
-    finishHoming(false, "no DONE from PLC within "
-               + String((int)(PLC_HOME_TIMEOUT_MS / 1000)) + "s");
+    String stuck;
+    for (int i = 0; i < 3; i++) {
+      if (homeAxisActive[i]) stuck += String(stuck.length() ? ", " : "") + names[i];
+    }
+    jzDir = rotDir = a2Dir = 0;
+    applyJogVelocities();
+    finishHoming(false, "never reached: " + (stuck.length() ? stuck : String("?"))
+               + " within " + String((int)(PLC_HOME_TIMEOUT_MS / 1000)) + "s");
   }
 }
 
@@ -2095,6 +2277,39 @@ void handleCommand(String cmd) {
     }
     plcLinkEnabled = want;
     sendFeedback(String("[PLC_LINK] ") + (plcLinkEnabled ? "1 — ENABLED" : "0 — DISABLED"));
+    if (!plcLinkEnabled) {
+      // Instant lamp update — otherwise the GUI shows whatever state it
+      // last had (often CONNECTED) for up to one heartbeat, which reads
+      // as a fault rather than "off on purpose".
+      sendFeedback("[PLC_STATE] link=DISABLED socket=CLOSED data=NONE conn=0/0 "
+                   "word=---- timeouts=0 | LINK DISABLED — SET_PLC_LINK:1 to "
+                   "re-enable | limit Z/R/A2=???");
+    }
+    return;
+  }
+
+  if (upper.startsWith("SET_PLC_SENSOR_ENFORCE:")) {
+    String payload = cmd.substring(23);
+    int comma = payload.indexOf(',');
+    if (comma < 0) {
+      sendFeedback("[ERROR] SET_PLC_SENSOR_ENFORCE needs axis,0|1 (axis = Z, ROT, A2)");
+      return;
+    }
+    String axis = payload.substring(0, comma); axis.trim(); axis.toUpperCase();
+    int i = plcLimitSensorIndexFor(axis);
+    if (i < 0) {
+      sendFeedback("[ERROR] SET_PLC_SENSOR_ENFORCE axis must be Z, ROT or A2 — got \""
+                 + axis + "\"");
+      return;
+    }
+    bool want = payload.substring(comma + 1).toInt() != 0;
+    if (!want && plcLimitSensorEnabled[i]) {
+      sendFeedback("[WARN] " + axis + "'s PLC travel-limit switch DISABLED. It will "
+                   "not stop the axis, and HOME will complete without waiting for it.");
+    }
+    plcLimitSensorEnabled[i] = want;
+    sendFeedback(String("[PLC_SENSOR_ENFORCE] ") + axis
+               + (plcLimitSensorEnabled[i] ? " 1 — ENFORCED" : " 0 — NOT ENFORCED"));
     return;
   }
 
@@ -2181,13 +2396,13 @@ void handleCommand(String cmd) {
 
   // ---- emergency / stop first, so they can never be starved ----
   if (upper == "ESTOP") {
-    cancelJog(); cancelRun(); cancelHoming(); plcClearHomeRequest();
+    cancelJog(); cancelRun(); cancelHoming();
     decelStopAll(true);
     sendFeedback("[ESTOP] EMERGENCY STOP");
     return;
   }
   if (upper == "STOP") {
-    cancelJog(); cancelRun(); cancelHoming(); plcClearHomeRequest();
+    cancelJog(); cancelRun(); cancelHoming();
     decelStopAll(false);
     sendFeedback("[ESTOP] EMERGENCY STOP");
     return;
@@ -2440,16 +2655,32 @@ void handleCommand(String cmd) {
 
   if (upper == "PLC_STATUS") {
 #if PLC_LINK_MODE == PLC_LINK_ETHERNET
+    if (!plcLinkEnabled) {
+      // A raw socket/data dump here would show the leftover state from
+      // before SET_PLC_LINK:0, which reads as a fault (NO REPLY,
+      // UNREACHABLE) rather than "off on purpose". "limit Z/R/A2=???"
+      // reuses the existing unknown-sensor path on the GUI side — no
+      // separate handling needed there to mark the sensors unknown too.
+      sendFeedback("[PLC_STATE] link=DISABLED socket=CLOSED data=NONE conn=0/0 "
+                   "word=---- timeouts=0 | LINK DISABLED — SET_PLC_LINK:1 to "
+                   "re-enable | limit Z/R/A2=???");
+      return;
+    }
     sendFeedback("[PLC_COUNTS] connects " + String((unsigned long)plcConnectTries)
                + " (failed " + String((unsigned long)plcConnectFails) + ") | frames sent "
                + String((unsigned long)plcSendAttempts) + " | good reads "
                + String((unsigned long)plcGoodReads) + " | timeouts "
                + String((unsigned long)plcTxnTimeouts) + " | rx buffer \""
-               + plcRxBuf + "\" | poll " + String((unsigned long)plcPollIdleMs)
+#if PLC_MC_ASCII
+               + plcRxBuf
+#else
+               + plcHexDumpBytes(plcRxBytes, plcRxCount)
+#endif
+               + "\" | poll " + String((unsigned long)plcPollIdleMs)
                + " ms idle");
     if (plcGoodReads == 0) {
       sendFeedback("[PLC] NO device read has EVER succeeded. HOME cannot complete "
-                   "without it (DONE is gated on the run bits), and every sensor "
+                   "without it (HOME completes on M30..M32), and every sensor "
                    "lamp will read unknown. Run PLC_TEST for the reason.");
     }
     sendFeedback("[PLC_STATE] link=" + String(plcLinkUp ? "UP" : "DOWN")
@@ -2460,10 +2691,29 @@ void handleCommand(String cmd) {
                + " word=" + (plcStatusValid ? plcHex(plcStatusWord, 4) : String("----"))
                + " timeouts=" + String((unsigned long)plcTxnTimeouts)
                + " | " + plcStatusSummary());
+    // Name the layer that is actually failing. A socket that has NEVER
+    // opened cannot be an MC-protocol problem: no frame has left the board,
+    // so the encoding and the port's protocol setting have not been tested
+    // at all. Saying "or MC protocol is misconfigured" here sent someone
+    // to the GX Works3 screens while the fault was below TCP.
     if (!plcStatusValid) {
-      sendFeedback("[PLC] No device data yet. Either the socket is not open, or the "
-                   "Ethernet module is not configured for MC protocol on port "
-                 + String((int)PLC_PORT) + " in ASCII.");
+      if (plcConnectsOk == 0) {
+        sendFeedback("[PLC] TCP connect has NEVER succeeded ("
+                   + String((unsigned long)plcConnectFails) + " failed), so no "
+                     "frame has been sent and MC protocol is NOT the suspect yet. "
+                     "This is cable, addressing, or the PLC not listening on port "
+                   + String((int)PLC_PORT) + ". Run PLC_TEST — it reports the PHY "
+                     "link separately.");
+      } else if (plcSendAttempts == 0) {
+        sendFeedback("[PLC] The socket has opened before, but no frame has been "
+                     "sent yet. Nothing is wrong with the link — wait one poll.");
+      } else {
+        sendFeedback("[PLC] Frames are going out and the socket opens, but no reply "
+                     "has ever landed. THAT is the MC-protocol case: check the "
+                     "Ethernet module has MC protocol on port "
+                   + String((int)PLC_PORT) + " with Communication Data Code = "
+                   + String(PLC_MC_ASCII ? "ASCII" : "BINARY") + ".");
+      }
     }
 #else
     sendFeedback("[PLC_STATE] link mode " + String(PLC_LINK_MODE)
@@ -2486,8 +2736,8 @@ void handleCommand(String cmd) {
   if (upper.startsWith("SET_PLC_POLL:")) {
 #if PLC_LINK_MODE == PLC_LINK_ETHERNET
     long ms = cmd.substring(13).toInt();
-    if (ms < 20 || ms > 60000) {
-      sendFeedback("[ERROR] PLC poll interval must be 20..60000 ms, got " + String(ms));
+    if (ms < 1 || ms > 60000) {
+      sendFeedback("[ERROR] PLC poll interval must be 1..60000 ms, got " + String(ms));
       return;
     }
     plcPollIdleMs = (unsigned long)ms;
@@ -2520,14 +2770,11 @@ void handleCommand(String cmd) {
                  + String((int)PLC_PORT) + ".");
       return;
     }
-    String frame = plcBuildPollFrame();
 #if PLC_MC_ASCII
+    String frame = plcBuildPollFrame();
     sendFeedback("[PLC_TEST] TX " + frame);
-#else
-    sendFeedback("[PLC_TEST] TX " + plcHexDump(frame));
-#endif
     plcRxBuf = "";
-    plcClient.print(frame);
+    plcWriteFrame(frame);
     plcClient.flush();
     unsigned long t0 = millis();
     while (millis() - t0 < PLC_TXN_TIMEOUT_MS * 2) {
@@ -2535,9 +2782,24 @@ void handleCommand(String cmd) {
         char c = (char)plcClient.read();
         if (plcRxBuf.length() < 200) plcRxBuf += c;
       }
-      if ((int)plcRxBuf.length() >= PLC_MC_RES_HEADER_UNITS + (PLC_MC_ASCII ? 4 : 2)) break;
+      if ((int)plcRxBuf.length() >= PLC_MC_RES_HEADER_UNITS + 4) break;
     }
     plcTestReport(plcRxBuf);
+#else
+    plcBuildPollFrame();
+    sendFeedback("[PLC_TEST] TX " + plcHexDumpBytes(plcTxBytes, plcTxCount));
+    plcRxCount = 0;
+    plcClient.write(plcTxBytes, plcTxCount);
+    plcClient.flush();
+    unsigned long t0 = millis();
+    while (millis() - t0 < PLC_TXN_TIMEOUT_MS * 2) {
+      while (plcClient.available() > 0) {
+        if (plcRxCount < PLC_RX_CAP) plcRxBytes[plcRxCount++] = (uint8_t)plcClient.read();
+      }
+      if (plcRxCount >= PLC_MC_RES_HEADER_UNITS + 4) break;
+    }
+    plcTestReport(plcRxBytes, plcRxCount);
+#endif
 #else
     sendFeedback("[PLC_TEST] No Ethernet client compiled in (link mode "
                + String(PLC_LINK_MODE) + ").");
@@ -2651,9 +2913,9 @@ void setup() {
   pinMode(Z_LIMIT_UP_PIN,    INPUT);
   pinMode(Z_LIMIT_DOWN_PIN,  INPUT);
 #endif
-  pinMode(PLC_HOME_REQ_PIN, OUTPUT);
-  plcHomeRequested = true;
-  plcClearHomeRequest();
+  pinMode(PLC_LIMIT_LED_Z_PIN,   OUTPUT);
+  pinMode(PLC_LIMIT_LED_ROT_PIN, OUTPUT);
+  pinMode(PLC_LIMIT_LED_A2_PIN,  OUTPUT);
 #if PLC_LINK_MODE == PLC_LINK_DIGITAL_IO
   pinMode(PLC_HOME_DONE_PIN, INPUT);
 #endif
@@ -2675,16 +2937,13 @@ void setup() {
              + String(PLC_IP_0) + "." + String(PLC_IP_1) + "." + String(PLC_IP_2) + "."
              + String(PLC_IP_3) + ":" + String((int)PLC_PORT)
              + " | link mode " + String(PLC_LINK_MODE)
-             + " | HOME req " PLC_HOME_REQ_PIN_NAME " -> X0 (WIRE)"
-             + " | DONE M" + String(PLC_M_DONE)
-             + " | home sensors M" + String(PLC_M_HOME_Z) + "..M" + String(PLC_M_HOME_A2)
-             + " | run M" + String(PLC_M_RUN_Z) + "..M" + String(PLC_M_RUN_A2)
+             + " | HOME drives axes onto M" + String(PLC_M_LIMIT_Z) + "/M"
+             + String(PLC_M_LIMIT_ROT) + "/M" + String(PLC_M_LIMIT_A2) + " itself"
              + " | timeout " + String((int)(PLC_HOME_TIMEOUT_MS / 1000)) + "s");
 #if PLC_LINK_MODE == PLC_LINK_ETHERNET
-  sendFeedback("[BOOT] PLC Ethernet is READ-ONLY (batch read M0..M15). The HOME "
-               "request is a wire: " PLC_HOME_REQ_PIN_NAME " -> X0. If HOME never "
-               "starts, check that wire and the 24 V return first — the network "
-               "cannot start a home and never could.");
+  sendFeedback("[BOOT] PLC Ethernet is READ-ONLY (batch read M0..M47). Nothing is "
+               "ever written to the PLC — HOME reads M30..M32 and drives the axes "
+               "itself. If HOME never starts, check the Ethernet link — PLC_TEST.");
 #endif
 #if PLC_LINK_MODE == PLC_LINK_PLACEHOLDER
   sendFeedback("[BOOT] PLC link is in PLACEHOLDER mode — set PLC_LINK_MODE to "

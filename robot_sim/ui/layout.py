@@ -1,4 +1,4 @@
-"""Window shell: ttk styles, the scrollable body, and sections 1, 2 and 4."""
+"""Window shell: ttk styles, scrollable body, sections 1, 2, 4."""
 
 import tkinter as tk
 from tkinter import ttk
@@ -39,7 +39,6 @@ from .scrolling import touchpad_scroll, wheel_scroll
 
 
 class LayoutMixin:
-    # ── ttk styles ───────────────────────────────────────────────────
     def _configure_styles(self):
         style = ttk.Style(self.root)
         style.theme_use("clam")
@@ -63,7 +62,6 @@ class LayoutMixin:
                         troughcolor=BG, bordercolor=BG, arrowcolor=TEXT_MUTED,
                         relief="flat")
 
-    # ── main build ───────────────────────────────────────────────────
     def _build_ui(self):
         self.status_var = tk.StringVar(value="READY — Hardware Offline")
         tk.Label(self.root, textvariable=self.status_var, anchor="w",
@@ -82,9 +80,9 @@ class LayoutMixin:
                  f"Timeout {PING_TIMEOUT_MS // 1000}s | Lost after {MISSED_BEAT_LIMIT} misses")
 
     def _build_scroll_body(self):
-        """The window content is taller than some screens, so everything
-        below the status bar lives in a scrollable canvas — otherwise
-        section 4 silently overflows off the bottom."""
+        """Window content taller than some screens, so everything below
+        status bar lives in scrollable canvas — else section 4 silently
+        overflows off bottom."""
         container = tk.Frame(self.root, bg=BG)
         container.pack(side="top", fill="both", expand=True)
 
@@ -103,16 +101,14 @@ class LayoutMixin:
         canvas.bind("<Configure>",
                     lambda e: canvas.itemconfig(window_id, width=e.width))
 
-        # bind_all, then filter in the handler. Binding only the canvas
-        # doesn't work: the canvas is covered by its own child widgets, so
-        # it almost never sees the pointer and the page would only scroll
-        # over the few bare gaps between panels.
+        # bind_all, filter in handler. Binding only canvas doesn't work:
+        # canvas covered by own child widgets, rarely sees pointer — page
+        # would only scroll over bare gaps between panels.
         self.root.bind_all("<MouseWheel>", self._on_mousewheel)
         self.root.bind_all("<Button-4>", self._on_mousewheel)
         self.root.bind_all("<Button-5>", self._on_mousewheel)
-        # A two-finger trackpad swipe is NOT a MouseWheel event under
-        # Tk 9 — it arrives as TouchpadScroll, which Tk 8.6 doesn't have
-        # at all, hence the guard.
+        # Two-finger trackpad swipe is NOT a MouseWheel event under Tk 9 —
+        # arrives as TouchpadScroll, which Tk 8.6 lacks entirely, hence guard.
         try:
             self.root.bind_all("<TouchpadScroll>", self._on_touchpad_scroll)
         except tk.TclError:
@@ -120,10 +116,10 @@ class LayoutMixin:
         return main
 
     def _wheel_target_is_ours(self, widget):
-        """False when something else owns the wheel where the pointer is.
+        """False when something else owns the wheel where pointer is.
 
-        Two cases: a dialog on top (Settings scrolls its own tab), and the
-        event log, which scrolls its own content via the Text class binding.
+        Two cases: dialog on top (Settings scrolls own tab), event log
+        (scrolls own content via Text class binding).
         """
         try:
             if widget.winfo_toplevel() is not self.root:
@@ -151,11 +147,11 @@ class LayoutMixin:
         return "break"
 
     def _wheel_scrolls_page(self, widget):
-        """Scroll the page over a widget whose class eats the wheel.
+        """Scroll page over a widget whose class eats the wheel.
 
-        A readonly Combobox changes its own value on a wheel event — spin
-        the BAUD field just by scrolling past it. A binding on the widget
-        itself runs before the class binding and can cancel it.
+        Readonly Combobox changes its own value on wheel event — spins BAUD
+        field just by scrolling past it. Binding on widget itself runs
+        before class binding, can cancel it.
         """
         for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             widget.bind(seq, self._on_mousewheel)
@@ -164,7 +160,6 @@ class LayoutMixin:
         except tk.TclError:
             pass
 
-    # ── section 1 ────────────────────────────────────────────────────
     def _build_connection_section(self, main):
         s0, _ = make_section(main, "1. HARDWARE CONNECTION (SERIAL PORT)", 0)
         row = tk.Frame(s0, bg=PANEL_BG)
@@ -197,8 +192,8 @@ class LayoutMixin:
                       width=90, height=34, command=self.manual_ping).pack(side="left", padx=(0, 10))
 
         # Same neutral surface colour as SETTINGS: neither is a motion
-        # command, and colouring RESTART like one would put it in the same
-        # visual class as CONNECT and PING, which do talk to the machine.
+        # command; colouring RESTART like one would group it visually with
+        # CONNECT/PING, which do talk to the machine.
         RoundedButton(row, text="RESTART", icon="⟳", bg_color=SURFACE, fg_color=TEXT_LIGHT,
                       width=120, height=34,
                       command=self.restart_app).pack(side="left", padx=(0, 10))
@@ -213,15 +208,13 @@ class LayoutMixin:
         self.com_led_card["frame"].pack(side="left", padx=(0, 8))
         self.hw_led_card = make_status_led(leds, "CLEARCORE IO0", "NO SIGNAL", ACCENT_RED)
         self.hw_led_card["frame"].pack(side="left", padx=(0, 8))
-        # Was HEARTBEAT (3s). The heartbeat still runs — it is what detects
-        # a dead board — but its state duplicates the two lamps to the left.
-        # PLC reachability is not shown anywhere else and decides whether
-        # HOME can work at all.
+        # Was HEARTBEAT (3s). Heartbeat still runs — detects dead board —
+        # but its state duplicated the two lamps to the left. PLC
+        # reachability shown nowhere else, decides whether HOME can work.
         self.plc_led_card = make_status_led(
             leds, f"PLC {PLC_IP}", PLC_LED_STATES["unknown"][0], TEXT_MUTED)
         self.plc_led_card["frame"].pack(side="left")
 
-    # ── section 2 ────────────────────────────────────────────────────
     def _build_mode_section(self, main):
         s_mode, _ = make_section(main, "2. CONTROL MODE", 1)
         row = tk.Frame(s_mode, bg=PANEL_BG)
@@ -249,7 +242,6 @@ class LayoutMixin:
             self.btn_mode_p2p.set_config("POINT TO POINT", SURFACE, icon="🎯", fg_color=TEXT_LIGHT)
             self.btn_mode_jog.set_config("JOYSTICK", ACCENT_MINT, icon="🕹", fg_color=INK_DARK)
 
-    # ── section 3 ────────────────────────────────────────────────────
     def _build_motion_section(self, main):
         s_motion, self.motion_title_label = make_section(
             main, "3. MOTION CONTROL — POINT TO POINT", 2)
@@ -260,7 +252,6 @@ class LayoutMixin:
         self.p2p_frame.pack(fill="both", expand=True)
         self.motion_lock_widgets += [self.btn_mode_p2p, self.btn_mode_jog]
 
-    # ── section 4 ────────────────────────────────────────────────────
     def _build_log_section(self, main):
         section, _ = make_section(main, "4. EVENT LOG", 3, expand_vertically=True)
         wrap = RoundedFrame(section, bg=LED_BG, radius=RADIUS_MD,
@@ -282,3 +273,17 @@ class LayoutMixin:
         self.log_text.tag_config("warn", foreground=ACCENT_ORANGE)
         self.log_text.tag_config("error", foreground=ACCENT_RED)
         self.log_text.tag_config("default", foreground=TEXT_LIGHT)
+
+        # Right-click the log for a raw command prompt (PLC_TEST etc).
+        # No visible UI change — nothing added to the layout, only a
+        # context menu on a widget that already exists.
+        menu = tk.Menu(self.log_text, tearoff=0)
+        menu.add_command(label="Send command...", command=self._prompt_send_command)
+        self.log_text.bind("<Button-3>", lambda e: menu.tk_popup(e.x_root, e.y_root))
+
+    def _prompt_send_command(self):
+        from tkinter import simpledialog
+        cmd = simpledialog.askstring("Send command", "Command to send to the board:",
+                                     parent=self.root)
+        if cmd and cmd.strip():
+            self.send(cmd.strip())

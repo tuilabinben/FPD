@@ -10,29 +10,26 @@ from ..theme import ACCENT_RED, TEXT_MUTED
 
 
 class SafetyMixin:
-    # ── reset coordinates ────────────────────────────────────────────
     def reset_coordinates(self, axis=None):
         """Declares "the machine is at its reference right now" and zeroes
         every axis counter there.
 
-        This is the bench substitute for PLC homing. It is confirmed
-        rather than instant, and refused while anything is moving, for one
-        reason: it does not measure anything. It trusts that the operator
-        has jogged the machine to the pose they mean. Get it wrong and
-        every later absolute move — and every soft limit — is offset by
-        the same amount, silently.
+        Bench substitute for PLC homing. Confirmed rather than instant,
+        refused while anything is moving, for one reason: it measures
+        nothing. Trusts operator jogged machine to the pose they mean. Get
+        it wrong and every later absolute move — and every soft limit —
+        is offset by the same amount, silently.
 
         `axis` selects ONE axis ("Z", "ROT", "A1", "A2"); None means all
         four. One at a time is useful because the four axes are referenced
         by different means and rarely at the same moment — ZM and RM have
-        optical stops, the elbows are set by eye — so being forced to
-        re-declare all four to correct one of them meant either lying about
-        three axes or leaving the wrong one wrong.
+        optical stops, elbows set by eye — so being forced to re-declare
+        all four to correct one meant either lying about three axes or
+        leaving the wrong one wrong.
 
-        A single-axis reset deliberately does NOT set is_homed. The
-        reference is only complete when every axis has one, and claiming it
-        early would switch the soft limits on against three counters that
-        are still meaningless.
+        Single-axis reset deliberately does NOT set is_homed. Reference
+        only complete when every axis has one; claiming it early would
+        switch soft limits on against three counters still meaningless.
         """
         axis = None if axis in (None, "", "ALL") else str(axis).upper()
         if axis is not None and axis not in ("Z", "ROT", "A1", "A2"):
@@ -70,7 +67,7 @@ class SafetyMixin:
         self.send("RESET_COORD" if axis is None else f"RESET_COORD:{axis}")
 
         if axis is not None:
-            # Mirror the single axis, and nothing else.
+            # Mirror the single axis, nothing else.
             if axis == "Z":
                 self.sim_z = Z_HOME_MM
                 self.z_limit = {k: False for k in self.z_limit}
@@ -96,9 +93,9 @@ class SafetyMixin:
                         "stay suspended."))
             return
 
-        # Mirror it locally so the readouts, the simulation and the soft
-        # limits all agree with the board from this instant. Leaving the
-        # GUI on the old numbers is how the two drift apart.
+        # Mirror it locally so readouts, simulation and soft limits all
+        # agree with the board from this instant. Leaving GUI on old
+        # numbers is how the two drift apart.
         self.sim_rot = ROT_HOME_DEG
         self.sim_a1 = ARM_HOME_DEG
         self.sim_a2 = ARM_HOME_DEG
@@ -116,7 +113,6 @@ class SafetyMixin:
                  f"A1M=A2M={ARM_HOME_DEG:.0f} motor° (fold 0°, R = 133.2 mm). "
                  f"Soft limits are now ACTIVE.")
 
-    # ── motion lock ──────────────────────────────────────────────────
     def _set_motion_locked(self, locked):
         """Disables everything except STOP/ESTOP during RUN/HOME."""
         self.motion_locked = bool(locked)
@@ -125,7 +121,6 @@ class SafetyMixin:
         for pad in self.jog_pads.values():
             pad.set_enabled(not locked)
 
-    # ── HOME ─────────────────────────────────────────────────────────
     def home(self):
         if self.motion_locked:
             self.log("HOME ignored — a motion is already running.", tag="warn")
@@ -142,7 +137,7 @@ class SafetyMixin:
         self.jog_status_var.set("Homing...")
         self.status_var.set("HOMING — waiting for the PLC to return DONE...")
         # HOME is now a request to the PLC, which owns the reference
-        # position — this controller does not drive the axes itself.
+        # position — this controller doesn't drive the axes itself.
         self.log("HOME sent. ClearCore holds its IO-0 output ON into the PLC's X0 "
                  "input — a wire, not a network message — and waits for DONE (M1). "
                  "Every other motion control is locked except ESTOP.")
@@ -156,11 +151,10 @@ class SafetyMixin:
         self._home_sim_job = None
         self._on_home_complete(simulated=True)
 
-    # ── RESET POSITION ──────────────────────────────────────────────
     def reset_position(self):
         """Drives to (0,0,0,0) under the board's own motor control.
 
-        NOT the PLC HOME cycle: it never touches is_homing or any
+        NOT the PLC HOME cycle: never touches is_homing or any
         PLC-specific state, like reset_coordinates() — but unlike
         reset_coordinates() it actually moves the machine, like home().
         """
@@ -172,7 +166,7 @@ class SafetyMixin:
                 "Reset position",
                 "Drive the machine to (0,0,0,0) under its own motor control?\n\n"
                 "This is NOT the PLC HOME cycle — it does not wait for the PLC, "
-                "and it skips the M5..M8 sensor block a normal P2P leg respects. "
+                "and it skips the M30..M32 limit block a normal P2P leg respects. "
                 "Taught soft limits still apply.\n\nContinue?"):
             return
 
@@ -183,7 +177,7 @@ class SafetyMixin:
         self.send("RESET_POSITION")
 
         self.status_var.set("RESETTING POSITION — driving to (0,0,0,0)...")
-        self.log("RESET_POSITION sent — no PLC handshake, M5..M8 sensor block "
+        self.log("RESET_POSITION sent — no PLC handshake, M30..M32 limit block "
                  "skipped.")
 
         if not self._hardware_live():
@@ -194,18 +188,17 @@ class SafetyMixin:
         self._reset_position_sim_job = None
         self._on_reset_position_complete(simulated=True)
 
-    # ── restart ──────────────────────────────────────────────────────
     def restart_app(self):
         """Relaunches the application in place.
 
         Refused while anything is moving, for the same reason the theme
-        switch is: the process is about to be replaced, and an axis under
-        power with no controller attached is a runaway that nothing in
-        this app can stop. The board's own jog watchdog would eventually
-        catch it, but "eventually" is not a stop button.
+        switch is: process is about to be replaced, and an axis under
+        power with no controller attached is a runaway nothing in this
+        app can stop. Board's own jog watchdog would eventually catch it,
+        but "eventually" is not a stop button.
 
-        On the way out it sends BYE and closes the port, so the board sees
-        a clean disconnect rather than a host that simply vanished.
+        On the way out sends BYE and closes the port, so board sees a
+        clean disconnect rather than a host that simply vanished.
         """
         if self.motion_locked or self.is_running or self.is_homing or self.jog_active:
             self.log("Restart refused — the machine is moving. Stop first.",
@@ -237,12 +230,11 @@ class SafetyMixin:
         except Exception:
             pass
 
-        # execv REPLACES this process, so nothing after it runs. Using the
-        # same interpreter and argv is what makes it a restart rather than
-        # a second instance fighting for the same COM port.
+        # execv REPLACES this process, nothing after it runs. Same
+        # interpreter and argv is what makes it a restart rather than a
+        # second instance fighting for the same COM port.
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
-    # ── emergency stop ───────────────────────────────────────────────
     def emergency_stop_all(self):
         """The only ESTOP code path in the app."""
         for _ in range(3):
@@ -259,7 +251,6 @@ class SafetyMixin:
         self.status_var.set("STOPPED — Emergency Stop Triggered!")
         self.log("EMERGENCY STOP (ESTOP x3) — all motion halted.", tag="warn")
 
-    # ── mode switch ──────────────────────────────────────────────────
     def set_mode(self, mode):
         if mode == self.mode:
             return
@@ -290,7 +281,6 @@ class SafetyMixin:
         self._release_all_jog_axes()
         self.jog_dot.itemconfig(self._jog_dot_id, fill=TEXT_MUTED)
 
-    # ── shutdown ─────────────────────────────────────────────────────
     def on_close(self):
         self.send("BYE", log_tx=False)
         self._rx_generation += 1

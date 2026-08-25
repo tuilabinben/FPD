@@ -8,6 +8,16 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "tkstub"))
 sys.path.insert(0, os.path.dirname(HERE))
 
+# A Windows console defaults to cp1252, which cannot encode the arrows and
+# degree signs in the messages the code under test produces. Printing one
+# raised UnicodeEncodeError and killed the run mid-suite, which reads as a
+# test failure but is only the terminal. Replace what will not encode.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 FAIL = []
 def check(cond, msg):
     print(("  OK   " if cond else "  FAIL ") + msg)
@@ -31,32 +41,51 @@ KB.KEYBINDS_FILE = os.path.join(TMP, "keybinds.json")
 KB._active = None
 from robot_sim.kinematics import (fold_angle_to_reach, reach_to_fold_angle,
                                   is_near_singularity, solve_ik)
+import robot_sim.kinematics as K
 
 
 # ══════════════════════════════════════════════════════════════════════
 print("\n=== 1. THE ARM ANGLE IS ROTATION FROM HOME ===")
 check(C.ARM_HOME_DEG == 0.0, "home is 0°, not 60°")
-check(C.FOLD_ANGLE_MIN_DEG == 0.0 and C.FOLD_ANGLE_MAX_DEG == 120.0,
-      "travel is 0..120° (was 60..180°)")
-check(C.ARM_ZERO_CAD_DEG == 60.0, "0° from home is th3_cad 60°")
-check(abs(C.FOLD_ANGLE_SPEC_MAX_DEG - 91.72) < 0.01,
-      "the JEL drawing limit moved with the frame (91.72°, was 151.72°)")
-check(C.FOLD_ANGLE_SINGULARITY_WARN_DEG == 110.0,
-      "so did the singularity warning (110°, was 170°)")
+check(C.FOLD_ANGLE_MIN_DEG == 0.0 and C.FOLD_ANGLE_MAX_DEG == 180.0,
+      "travel is 0..180° frog-leg (base 0..90°)")
+check(C.ARM_ZERO_CAD_DEG == 0.0,
+      "HOME IS frog-leg 0 — measured, not the .m's th3_cad 60")
+check(abs(C.FOLD_ANGLE_SPEC_MAX_DEG - 146.68) < 0.01,
+      "the rated 575 mm reach is fold 146.68°, inside the 180° travel")
+check(C.FOLD_ANGLE_SINGULARITY_WARN_DEG == 170.0,
+      "singularity warning 10° short of straight, as before")
 
-print("\n  -- the reach curve is unchanged, only its labels moved --")
-check(abs(fold_angle_to_reach(0.0) - 133.2) < 0.05, "0°   -> 133.2 mm (retracted)")
-check(abs(fold_angle_to_reach(120.0) - 613.2) < 0.05, "120° -> 613.2 mm (straight)")
+print("\n  -- the reach curve is the MEASURED one, not mophong_init.m's --")
+# Two bench measurements define the whole curve: HOME 240 mm and the arm
+# straight at 605 mm. mophong_init.m's 133.2..613.2 was found to be wrong
+# on the machine and is no longer the reference.
+check(abs(fold_angle_to_reach(0.0) - 240.0) < 0.05, "0°   -> 240 mm (retracted, measured)")
+check(abs(fold_angle_to_reach(180.0) - 605.0) < 0.05, "180° -> 605 mm (straight, measured)")
 check(abs(fold_angle_to_reach(C.FOLD_ANGLE_SPEC_MAX_DEG) - 575.0) < 0.5,
-      "91.72° -> 575 mm (the JEL drawing figure is still the JEL figure)")
-check(abs(reach_to_fold_angle(133.2) - 0.0) < 0.05, "133.2 mm -> 0°")
-check(abs(reach_to_fold_angle(613.2) - 120.0) < 0.05, "613.2 mm -> 120°")
+      "146.68° -> 575 mm (the rated working reach)")
+check(abs(reach_to_fold_angle(240.0) - 0.0) < 0.05, "240 mm -> 0°")
+check(abs(reach_to_fold_angle(605.0) - 180.0) < 0.05, "605 mm -> 180°")
 check(all(abs(reach_to_fold_angle(fold_angle_to_reach(a)) - a) < 1e-9
-          for a in (0.0, 12.5, 60.0, 91.72, 119.9)), "the pair round-trips")
-check(abs(C.ARM_MIN_REACH_MM - 133.2) < 0.05 and abs(C.ARM_MAX_REACH_MM - 613.2) < 0.05,
-      "the reach envelope is numerically identical to before")
-check(is_near_singularity(115.0) and not is_near_singularity(105.0),
-      "the singularity warning fires in the new frame")
+          for a in (0.0, 12.5, 60.0, 146.68, 179.9)), "the pair round-trips")
+check(abs(C.ARM_MIN_REACH_MM - 240.0) < 0.05 and abs(C.ARM_MAX_REACH_MM - 605.0) < 0.05,
+      "the reach envelope is the measured 240..605 mm")
+check(is_near_singularity(175.0) and not is_near_singularity(165.0),
+      "the singularity warning fires just short of straight")
+
+print("\n  -- the base angle is a linear map onto the RATED travel --")
+# NOT fold/2. That identity came from the derived 2:1 knee gearing; the
+# bench-measured arm reaches its rated 575 mm at fold 146.68°, and THAT is
+# the angle that maps to base 90°. Anything past it extrapolates.
+check(abs(K.base_angle_from_fold_angle(0.0) - 0.0) < 1e-12, "fold 0   -> base 0° (HOME)")
+check(abs(K.base_angle_from_fold_angle(C.FOLD_ANGLE_SPEC_MAX_DEG) - 90.0) < 1e-12,
+      "fold 146.68 -> base 90° (rated working reach)")
+check(all(abs(K.base_angle_from_fold_angle(f)
+              - f * (90.0 / C.FOLD_ANGLE_SPEC_MAX_DEG)) < 1e-12
+          for f in (0.0, 37.0, 90.0, 146.68, 180.0)),
+      "base is linear in fold across the travel, exactly")
+check(all(abs(K.fold_angle_from_base_angle(K.base_angle_from_fold_angle(f)) - f) < 1e-9
+          for f in (0.0, 37.0, 90.0, 180.0)), "  ...and it round-trips")
 
 print("\n  -- the angle counts UP as the arm turns out --")
 prev = -1e9
@@ -73,8 +102,8 @@ check(abs(fold_angle_to_reach(a1) - 300.0) < 0.5,
 
 print("\n  -- the elbow boundary DEFAULTS are in MOTOR degrees --")
 check([C.LIMIT_FIELDS[k][6] for k in C.ARM_FRAME_V2_RESET_KEYS]
-      == [0.0, 230.0, 0.0, 230.0],
-      "default elbow band is 0..230 MOTOR° — inset at the far end only")
+      == [C.DEFAULT_LIM_A_MIN, C.DEFAULT_LIM_A_MAX] * 2,
+      "default elbow band is 0..1394 MOTOR° — inset at the far end only")
 check(all(C.LIMIT_FIELDS[k][3] == "motor °" for k in C.ARM_FRAME_V2_RESET_KEYS),
       "  ...and they are labelled as motor degrees, not bare degrees")
 
@@ -99,7 +128,8 @@ write({"lim_a1_min": 60.0, "lim_a1_max": 180.0,
        "lim_z_min": 5.0, "lim_z_max": 250.0, "arm_pct": 111.0})
 ld = Loader()
 notes = " ".join(n[0] for n in ld._pending_settings_notes)
-check(ld.settings["lim_a1_min"] == 0.0 and ld.settings["lim_a1_max"] == 230.0,
+check(ld.settings["lim_a1_min"] == C.DEFAULT_LIM_A_MIN
+      and ld.settings["lim_a1_max"] == C.DEFAULT_LIM_A_MAX,
       "old-frame elbow limits are DROPPED, not read in the new unit")
 check("teach them again" in notes, "  ...and the operator is told to re-teach")
 check(ld.settings["lim_z_min"] == 5.0 and ld.settings["lim_z_max"] == 250.0,
@@ -136,8 +166,11 @@ class Coll:
     _read_number = staticmethod(SD.SettingsDialogMixin._read_number)
     _collect_limits = SD.SettingsDialogMixin._collect_limits
     def __init__(self, over=None):
-        self._limit_vars = {k: tk.StringVar(value=repr(C.LIMIT_FIELDS[k][6]))
-                            for k in C.LIMIT_KEYS}
+        # RM's two keys show 0..-340, not native 0..340 — same transform
+        # _build_limits_tab applies when it first populates the entries.
+        self._limit_vars = {
+            k: tk.StringVar(value=repr(SD._rot_limit_to_display(k, C.LIMIT_FIELDS[k][6])))
+            for k in C.LIMIT_KEYS}
         for k, v in (over or {}).items():
             self._limit_vars[k].set(v)
 
@@ -163,7 +196,8 @@ class Pair:
     _axis_bounds = JC.JogControlMixin._axis_bounds
 pr = Pair()
 check(pr._limit_pair("z") == (0.0, 280.0), "ZM pair reads the settings")
-check(pr._limit_pair("a1") == (0.0, 230.0), "A1 pair defaults to 0..230 motor°")
+check(pr._limit_pair("a1") == (C.DEFAULT_LIM_A_MIN, C.DEFAULT_LIM_A_MAX),
+      "A1 pair defaults to the factory motor° band")
 pr.settings["lim_a1_min"], pr.settings["lim_a1_max"] = 800.0, 100.0
 check(pr._limit_pair("a1") == (100.0, 800.0),
       "an inverted stored pair reads back SORTED (matches firmware armBand)")
@@ -229,6 +263,9 @@ class App(SD.SettingsDialogMixin):
         for ek in C.LIMIT_ENFORCE_KEYS:
             self.settings[ek] = C.DEFAULT_LIMIT_ENFORCED
         self.settings[C.LIMITS_ENABLED_KEY] = C.DEFAULT_LIMITS_ENABLED
+        self.settings[C.PLC_LINK_ENABLED_KEY] = C.DEFAULT_PLC_LINK_ENABLED
+        for ek in C.PLC_SENSOR_ENFORCE_KEYS:
+            self.settings[ek] = C.DEFAULT_PLC_SENSOR_ENFORCED
         for k, spec in C.SPEED_FIELDS.items():
             self.settings[k] = spec[2]
         for k, spec in C.ACCEL_FIELDS.items():
@@ -328,26 +365,29 @@ check("void armBand(" in fw, "  ...and sorts the taught pair at point of use")
 
 
 # ══════════════════════════════════════════════════════════════════════
-print("\n=== 7. P2P maths is still mophong_init.m's maths ===")
+print("\n=== 7. P2P maths is self-consistent on the MEASURED geometry ===")
 import math
 
-# solve_ik_frogleg from MATLAB_v4_final/mophong_init.m, transcribed. Kept
-# here rather than in robot_sim so production code has ONE implementation:
-# this is the reference the real one is measured against, and if it ever
-# drifts the build says so instead of somebody noticing on the machine.
-def matlab_ik(X, Y, Z):
-    a3, a4, a5, a6 = 45.0, 160.0, 160.0, 248.2
-    z_offset = 388.0 + 50.0 + 46.5 + 24.8 + 5.0          # 514.3
-    d1 = Z - z_offset
-    d1 = 0.0 if d1 < 0 else (285.0 if d1 > 285 else d1)
-    th2 = math.degrees(math.atan2(Y, X))
-    R = math.hypot(X, Y)
-    c = max(-1.0, min(1.0, (R - (a3 + a6)) / (a4 + a5)))
-    return d1, th2, 180.0 - math.degrees(math.acos(c))   # th3_cad
-
-worst = [0.0, 0.0, 0.0]
+# NO MATLAB PARITY SWEEP HERE ANY MORE, ON PURPOSE.
+#
+# mophong_init.m's solve_ik_frogleg was the reference this section measured
+# against, pose for pose. It was dropped because the .m's own calculation is
+# wrong for this machine: its a4/a5/a6 (160/160/248.2) are not the arm's,
+# which measured 91.25/91.25/377.5 on the bench. Checking against a model
+# that does not describe the machine proves nothing, and a red build nobody
+# can fix teaches people to ignore the suite.
+#
+# MATLAB_v4_final stays read-only reference for the FRAME — the Z chain and
+# the d1 stroke, which never depended on link length and are still asserted
+# below. Do not reinstate the elbow comparison without first correcting the
+# .m, which is not ours to edit.
+#
+# What replaces it is a round trip: every pose IK solves must come back out
+# of FK in the same place. That catches the drift the parity sweep existed
+# to catch, without an external reference to disagree with.
+worst = 0.0
 compared = 0
-for r_mm in range(140, 611, 10):
+for r_mm in range(240, 606, 10):
     for a_deg in range(0, 341, 20):
         for dz in (0, 70, 140, 210, 280):
             x = r_mm * math.cos(math.radians(a_deg))
@@ -358,32 +398,21 @@ for r_mm in range(140, 611, 10):
             except ValueError:
                 continue
             compared += 1
-            md1, mrot, mth3 = matlab_ik(x, y, z)
-            worst[0] = max(worst[0], abs(d1 - md1))
-            # RM's zero moved to its CCW stop, so this reports [0, 360)
-            # where MATLAB's atan2 reports (-180, 180]. Same geometry, so
-            # they may differ only by a whole turn.
-            d_rot = abs(rot - mrot) % 360.0
-            worst[1] = max(worst[1], min(d_rot, 360.0 - d_rot))
-            # The GUI reports rotation from home; MATLAB reports th3_cad.
-            # ARM_ZERO_CAD_DEG is the entire difference between the frames.
-            worst[2] = max(worst[2], abs((a1 + C.ARM_ZERO_CAD_DEG) - mth3))
+            fx, fy, fz = K.forward_kinematics(d1, rot, a1, 0.0, arm="A1M")
+            worst = max(worst, math.hypot(fx - x, fy - y), abs(fz - z))
 
-print("       %d poses compared, worst error d1=%.2e rot=%.2e th3=%.2e"
-      % (compared, worst[0], worst[1], worst[2]))
+print("       %d poses round-tripped, worst error %.2e mm" % (compared, worst))
 check(compared > 500, "the sweep really solved a few hundred poses")
-check(worst[0] < 1e-9, "d1  == mophong_init.m to machine precision")
-check(worst[1] < 1e-9, "th2 == mophong_init.m modulo a whole turn")
-check(worst[2] < 1e-9, "th3 == mophong_init.m, once ARM_ZERO_CAD_DEG is added back")
+check(worst < 1e-6, "IK -> FK returns the pose it was given, to machine precision")
 
-# The geometry constants themselves, so a typo in one link length cannot
-# pass the sweep by cancelling out.
-check(abs(C.Z_OFFSET_ARM1_MM - 514.3) < 1e-9, "Z_offset(arm 1) = 514.3, as in the .m")
-check((C.A3_MM, C.A4_MM, C.A5_MM, C.A6_MM) == (45.0, 160.0, 160.0, 248.2),
-      "a3/a4/a5/a6 = 45/160/160/248.2")
-check(C.D1_MIN_MM == 0.0 and C.D1_MAX_MM == 285.0, "d1 stroke 0..285, as in the .m")
-check(abs(C.ARM_MIN_REACH_MM - (45.0 + 248.2 + 320.0 * math.cos(math.radians(120)))) < 1e-9,
-      "R_home matches the .m's a3 + a6 + (a4+a5)*cos(pi - th3_home_cad)")
+# The frame constants, which the .m and the machine still agree on.
+check(abs(C.Z_OFFSET_ARM1_MM - 514.3) < 1e-9, "Z_offset(arm 1) = 514.3")
+check(C.D1_MIN_MM == 0.0 and C.D1_MAX_MM == 285.0, "d1 stroke 0..285")
+# The measured links, named outright so a change to them is a visible diff.
+check((C.A3_MM, C.A4_MM, C.A5_MM, C.A6_MM) == (45.0, 91.25, 91.25, 377.5),
+      "a3/a4/a5/a6 are the MEASURED 45/91.25/91.25/377.5")
+check(abs(C.ARM_MIN_REACH_MM - 240.0) < 1e-9 and abs(C.ARM_MAX_REACH_MM - 605.0) < 1e-9,
+      "the measured links give the measured 240..605 mm envelope")
 
 print("\n  -- the two documented departures from the .m are still documented --")
 # 1. MATLAB clamps an unsolvable target silently; a machine must refuse it.
@@ -395,20 +424,28 @@ try:
 except ValueError:
     raised = True
 check(raised, "an unsolvable radius RAISES here where MATLAB would clamp")
-# But a radius that is merely inside the OLD structural floor is now
-# accepted: 133.2 mm was R(fold = 0°), and that assumed the elbow's zero
-# really is the folded home pose on an unmeasured gear ratio. The working
-# limit is the operator's taught band, checked at LOAD, not here.
+# The only floor left is arithmetic: with the MEASURED links the frog-leg
+# spans 422.5 ± 182.5 mm, so 240 mm is the shortest radius any elbow angle
+# reaches. There is no SEPARATE structural floor on top of that — the old
+# 133.2 mm one was R(fold = 0°) on an unmeasured gear ratio and is gone.
+# The working limit is the operator's taught band, checked at LOAD.
+raised = False
 try:
-    d1, rot, a1f, _ = solve_ik(50.0, 0.0, 560.0, "A1M", idle_deg=0.0)
-    check(a1f < 0.0,
-          "r = 50 mm now SOLVES, to a negative fold angle — no structural floor")
-except ValueError as e:
-    check(False, "r = 50 mm now solves (got: %s)" % e)
+    solve_ik(50.0, 0.0, 560.0, "A1M", idle_deg=0.0)
+except ValueError:
+    raised = True
+check(raised, "r = 50 mm is refused — below the arithmetic span, not a taught limit")
+# Just inside the span solves, and lands where FK agrees.
+d1s, _rs, a1s, _as = solve_ik(C.ARM_MIN_REACH_MM + 1.0, 0.0, 560.0, "A1M",
+                              idle_deg=0.0)
+check(abs(K.fold_angle_to_reach(a1s) - (C.ARM_MIN_REACH_MM + 1.0)) < 1e-6,
+      "  ...while 1 mm inside the span solves and round-trips")
+# clamp_like_matlab still CLAMPS instead of raising — that switch is about
+# the failure MODE, which is unchanged, not about the .m's link lengths.
 d1c, _rc, a1c, _ac = solve_ik(50.0, 0.0, 560.0, "A1M", idle_deg=0.0,
                               clamp_like_matlab=True)
-check(abs((a1c + C.ARM_ZERO_CAD_DEG) - matlab_ik(50.0, 0.0, 560.0)[2]) < 1e-9,
-      "  ...and clamp_like_matlab=True reproduces the .m exactly, for comparison")
+check(abs(K.fold_angle_to_reach(a1c) - C.ARM_MIN_REACH_MM) < 1e-6,
+      "  ...and clamp_like_matlab=True clamps to the span instead of raising")
 # 2. Per-arm deck heights: the .m uses arm 1's offset for both.
 check(abs(C.Z_OFFSET_ARM1_MM - C.Z_OFFSET_ARM2_MM - 9.0) < 1e-9,
       "arm 2's deck is modelled 9 mm lower (the .m uses arm 1's offset for both)")
@@ -426,13 +463,23 @@ check(dict((d, dirn) for d, _c, dirn in C.PLC_DEVICE_MAP)["X0"] == "wire",
       "  ...so X0's direction in the device map is 'wire', never 'write'")
 check(not any(dirn == "write" for _d, _c, dirn in C.PLC_DEVICE_MAP),
       "  ...and NO device in the map is written at all")
-check(C.PLC_HOME_DONE_DEVICE == "M1", "DONE comes back on M1")
-check([b for b in C.PLC_HOME_SENSOR_BITS] == ["M5", "M6", "M7", "M8"],
-      "the optical HOME sensors are M5..M8")
-check([v[0] for v in C.PLC_HOME_SENSOR_BITS.values()] == ["Z", "ROT", "A1", "A2"],
-      "  ...mapped to ZM, RM, A1M, A2M in that order")
-runs = [d for d, _c, _dir in C.PLC_DEVICE_MAP if d in ("M10", "M11", "M12", "M13")]
-check(runs == ["M10", "M11", "M12", "M13"], "the run bits M10..M13 are all mapped")
+# M5..M8 (home sensors), M1 (DONE) and M10..M13 (run) are gone from BOTH
+# sides now, not just muted -- see PLC_SENSOR_PANEL below. They lit a lamp
+# and decided nothing, while M30 was the bit actually refusing a jog.
+check(not hasattr(C, "PLC_HOME_SENSOR_BITS"),
+      "the old M5..M8 sensor-bit map is gone from config.py, not just unused")
+check([d for d, _c, _dir in C.PLC_DEVICE_MAP if d in ("M10", "M11", "M12", "M13")] == [],
+      "the run bits M10..M13 are not in the device map either")
+# ZM and A2M are SWAPPED from the tidy numeric order, measured on the
+# machine: M32 follows ZM, M30 follows A2M.
+check(C.PLC_SENSOR_PANEL == (
+        ("M32", "ZM  lift",      "Z",   "Z_DOWN",  -1),
+        ("M31", "RM  turntable", "ROT", "ROT_CW",  +1),
+        ("M30", "A2M arm 2",     "A2",  "A2_BACK", -1),
+      ), "the sensor panel IS the three travel limits, nothing else")
+check("const int PLC_M_LIMIT_Z   = 32;" in fw
+      and "const int PLC_M_LIMIT_A2  = 30;" in fw,
+      "  ...and the firmware agrees ZM is M32 and A2M is M30")
 
 print("\n  -- the GUI and the firmware must agree on the endpoint --")
 check(('#define PLC_IP_3 %s' % C.PLC_IP.split(".")[-1]) in fw,
@@ -442,41 +489,70 @@ check("const uint16_t PLC_PORT = %d;" % C.PLC_PORT in fw,
 check("#define PLC_LINK_MODE PLC_LINK_ETHERNET" in fw,
       "  ...and the Ethernet link is the compiled default, not the placeholder")
 
-print("\n  -- the Ethernet link is READ-ONLY; HOME is a wire on IO-0 --")
-# X devices are refreshed from their input terminals every PLC scan, so a
-# written X0 was overwritten within one scan and HOME silently never
-# started. The request is a physical output into that same input now.
-check("#define PLC_HOME_REQ_PIN  IO0" in fw,
-      "the HOME request is driven from IO-0")
+print("\n  -- the Ethernet link is READ-ONLY; HOME talks to no PLC device --")
+# HOME used to assert a wire (ClearCore IO-0 -> PLC X0) and wait for the
+# PLC's own home sequence to answer. Nothing on the PLC side ever ran it,
+# so HOME just sat there and timed out. The board already owns the motors
+# and already reads M30..M32, so it drives each axis onto its own switch
+# itself now — no request line, no DONE, no PLC-side sequence to wait on.
+check("plcAssertHomeRequest" not in fw, "there is no HOME-request wire any more")
+check("plcClearHomeRequest" not in fw, "  ...nothing to clear, either")
+check("plcHomeDoneAsserted" not in fw, "  ...and no DONE-style completion check")
+check("PLC_HOME_REQ_PIN" not in fw, "  ...the dedicated request pin is gone")
 check("PLC_HOME_REQ_CODE" not in fw and "PLC_HOME_REQ_NUM" not in fw,
-      "  ...and no MC-protocol device is named for it any more")
+      "  ...and no MC-protocol device was ever named for it")
 check("String plcFrameWriteBit(" not in fw,
       "there is NO write-frame builder — not even an unused one")
 check("PLC_MC_CMD_WRITE" not in fw and "PLC_MC_SUB_BIT" not in fw,
       "  ...and the write command / bit subcommand codes are gone with it")
 check("PLC_MC_CMD_READ" in fw, "the read command is all that remains")
-check("bool plcSend(const String &frame) {" in fw,
-      "plcSend has no isRead flag — every transaction is a read")
-# A HOME that cannot be cleared is the failure the wire removes: the old
-# Ethernet clear could be refused by a dead socket, leaving the PLC latched
-# and re-homing the machine when the link returned.
-clear_body = fw.split("void plcClearHomeRequest() {")[1].split("\n}")[0]
-check("digitalWrite" in clear_body and "plcSend" not in clear_body,
-      "  ...and clearing the request is a digitalWrite, which cannot fail")
+check("bool plcSendPoll() {" in fw,
+      "the send path has no isRead flag — every transaction is a read")
 check("PLC_CMD_HOME" not in fw,
       "the old ad-hoc \"M2\"/\"DONE\" text protocol is gone")
+# HOME drives the axes with the SAME jog primitive as an operator holding
+# a key, and stops each one independently the instant its own switch
+# reads covered — the request in this session, in the firmware's own words.
+home_body = fw.split("void beginHoming() {")[1].split("\nvoid ")[0]
+check("homeDirFor(i)" in home_body,
+      "beginHoming drives each axis in the direction HOME_DIR_* names")
+# NOT PLC_LIMIT_END_*. Which way a covered switch refuses and which way HOME
+# goes looking for it are separate facts; sharing one constant meant a wrong
+# end sent HOME the wrong way with nowhere separate to correct it.
+check("plcLimitEndFor" not in home_body,
+      "  ...and NOT from the limit-blocking end, which is a different fact")
+# RM is mounted inverted (see PLC_LIMIT_END_ROT), so its switch sits at
+# the +1/CW end, not -1 — HOME_DIR_* must match PLC_LIMIT_END_* per axis,
+# not carry one blanket sign.
+check("const int HOME_DIR_Z   = -1;" in fw and "const int HOME_DIR_ROT = +1;" in fw
+      and "const int HOME_DIR_A2  = -1;" in fw,
+      "  ...ZM/A2M back off NEGATIVE, RM backs off POSITIVE — it is inverted")
+# HOME is not a jog, so no keep-alive arrives: the jog watchdog cancelled
+# the move 700 ms in, which is why HOME looked like it did nothing at all.
+wd_body = fw.split("void serviceJogWatchdog() {")[1].split("\n}")[0]
+check("if (isHoming) return;" in wd_body,
+      "the jog watchdog does NOT cancel a HOME-driven move")
+check("applyJogVelocities()" in home_body,
+      "  ...through the ordinary jog velocity path, nothing PLC-specific")
+service_body = fw.split("void serviceHoming() {")[1].split("\nvoid ")[0]
+check("plcBit(plcLimitBitFor(i))" in service_body,
+      "serviceHoming stops each axis by reading its own switch bit directly")
+check("plcHomeStateActive()" in service_body,
+      "  ...and completion is M30&&M31&&M32 (via the enforce flags), not a DONE bit")
 
-print("\n  -- M5..M8 are HOME SENSORS and set NO boundary --")
-# They sit AT the reference. Stopping on one would make it impossible to
-# jog off home, and writing its trip point into a limit would overwrite a
-# taught boundary with a position that is not a boundary.
+print("\n  -- M30..M32 are the only PLC devices read, and set NO boundary --")
+# M5..M8 (home sensors), M1 (DONE) and M10..M13 (run) are gone entirely now,
+# not just muted: they lit a lamp and decided nothing, while M30 was the bit
+# actually refusing a jog. Nothing the board reports over PLC ever writes a
+# taught boundary either way — that stays the operator's alone.
 src_pr_early = open(os.path.join(os.path.dirname(HERE), "robot_sim", "core",
                                  "protocol.py"), encoding="utf-8").read()
 check("PLC_LIMIT_SET" not in fw, "the board has no PLC_LIMIT_SET message any more")
 check("PLC_LIMIT_DIR" not in fw, "  ...no per-bit blocking direction")
 check("PLC_LIMITS_REGISTER_POSITION" not in fw, "  ...and no registration switch")
-check("plcServiceHomeSensors" in fw, "the sensors are serviced read-only")
-check("[PLC_HOME]" in fw, "  ...reporting REACHED / left, nothing else")
+check("plcServiceHomeSensors" not in fw,
+      "the M5..M8 sensor-service function is gone, not just unused")
+check("[PLC_HOME]" in fw, "  ...the M30..M32 HOME STATE message is still reported")
 check("PLC_LIMIT_SET" not in src_pr_early,
       "the GUI no longer has an adoption path for a board-set boundary")
 check("_on_plc_limit_set" not in src_pr_early, "  ...and the handler is gone")
@@ -492,31 +568,39 @@ from robot_sim.kinematics import motor_deg_to_reach as _mdr
 from robot_sim.kinematics import (fold_angle_from_motor_deg, motor_deg_from_fold_angle,
                                   motor_deg_to_reach, reach_to_motor_deg)
 
-check(C.ARM_GEAR_RATIO == 2.0,
-      "the ratio is 2 — the knee turns twice the driven link (Simscape -2 gain)")
-check(abs(fold_angle_from_motor_deg(240.0) - 120.0) < 1e-9,
-      "240 motor° is 120 fold° — a straight arm")
-check(abs(motor_deg_from_fold_angle(120.0) - 240.0) < 1e-9, "and back again")
+# BENCH-MEASURED, not the model's derived 2.0: the arm reaches its rated
+# 575 mm where the old ratio put it at 498 mm.
+check(C.ARM_GEAR_RATIO == 7.80,
+      "the ratio is the measured 7.80, not the model's derived 2.0")
+check(abs(fold_angle_from_motor_deg(180.0 * C.ARM_GEAR_RATIO) - 180.0) < 1e-9,
+      "motor° / ratio is fold°, at the straight-arm end")
+check(abs(motor_deg_from_fold_angle(180.0) - 180.0 * C.ARM_GEAR_RATIO) < 1e-9,
+      "and back again")
 check(all(abs(fold_angle_from_motor_deg(motor_deg_from_fold_angle(a)) - a) < 1e-12
           for a in (0.0, 17.5, 91.72, 120.0)), "the pair round-trips")
 
 print("\n  -- reach is a function of the FROG-LEG angle, not the motor's --")
-check(abs(motor_deg_to_reach(0.0) - 133.2) < 0.05, "0 motor° -> 133.2 mm (retracted)")
-check(abs(motor_deg_to_reach(240.0) - 613.2) < 0.05, "240 motor° -> 613.2 mm (straight)")
+check(abs(motor_deg_to_reach(0.0) - C.ARM_MIN_REACH_MM) < 0.05,
+      "0 motor° -> 240 mm (retracted)")
+check(abs(motor_deg_to_reach(C.ARM_MOTOR_MAX_DEG) - C.ARM_MAX_REACH_MM) < 0.05,
+      "the far end of motor travel -> 605 mm (straight)")
 # This is the actual bug being fixed: treating the motor number as the arm
 # angle put the reported reach at the wrong place entirely.
-check(abs(motor_deg_to_reach(120.0) - fold_angle_to_reach(60.0)) < 1e-9,
-      "120 motor° is fold 60°, R = %.1f mm" % fold_angle_to_reach(60.0))
-check(abs(motor_deg_to_reach(120.0) - fold_angle_to_reach(120.0)) > 100.0,
-      "  ...and NOT fold 120°, which is 160 mm further out — the old bug")
-check(abs(reach_to_motor_deg(575.0) - motor_deg_from_fold_angle(91.72)) < 0.01,
-      "575 mm maps back to 183.44 motor° (the JEL drawing figure)")
+_m = 60.0 * C.ARM_GEAR_RATIO
+check(abs(motor_deg_to_reach(_m) - fold_angle_to_reach(60.0)) < 1e-9,
+      "%.0f motor° is fold 60°, R = %.1f mm" % (_m, fold_angle_to_reach(60.0)))
+check(abs(motor_deg_to_reach(_m) - fold_angle_to_reach(60.0 * C.ARM_GEAR_RATIO)) > 100.0,
+      "  ...and NOT fold %.0f°, far further out — the old bug" % _m)
+check(abs(reach_to_motor_deg(575.0)
+          - motor_deg_from_fold_angle(C.FOLD_ANGLE_SPEC_MAX_DEG)) < 0.01,
+      "575 mm maps back to the rated 146.68 fold° (the JEL drawing figure)")
 
 print("\n  -- the speed figures split the same way --")
 check(abs(C.arm_motor_speed_deg_s(150, 125) - 1125.0) < 0.01,
       "AM at 125% of 150 RPM is 1125 MOTOR °/s (exact, no ratio)")
-check(abs(C.arm_speed_deg_s(150, 125) - 562.5) < 0.01,
-      "  ...which is 562.5 frog-leg °/s at ratio 2")
+check(abs(C.arm_speed_deg_s(150, 125) - 1125.0 / C.ARM_GEAR_RATIO) < 0.01,
+      "  ...which is %.1f frog-leg °/s at ratio %.2f"
+      % (1125.0 / C.ARM_GEAR_RATIO, C.ARM_GEAR_RATIO))
 check(abs(C.arm_motor_rpm(150, 125) - 187.5) < 0.01,
       "  ...and 187.5 motor RPM, unchanged and still ratio-free")
 check(C.SPEED_PREVIEW_BY_KEY["arm_pct"][4] == "motor °/s",
@@ -526,16 +610,18 @@ print("\n  -- taught limits survive a re-calibration --")
 # The whole reason limits are stored in motor degrees: changing the ratio
 # must not move a boundary the operator taught off the physical stop.
 saved_ratio = C.ARM_GEAR_RATIO
-taught_motor = 183.44                      # captured at the 575 mm stop
+# Captured at the 575 mm stop, i.e. the rated fold angle times the ratio.
+taught_motor = C.FOLD_ANGLE_SPEC_MAX_DEG * C.ARM_GEAR_RATIO
 before = motor_deg_to_reach(taught_motor)
 import robot_sim.kinematics as KIN
-KIN.ARM_GEAR_RATIO = 4.0                   # pretend the bench says 4, not 2
+KIN.ARM_GEAR_RATIO = saved_ratio / 2.0     # pretend the bench says half
 after = KIN.motor_deg_to_reach(taught_motor)
 KIN.ARM_GEAR_RATIO = saved_ratio
-check(abs(before - 575.0) < 0.5, "a boundary taught at 183.44 motor° reads 575 mm")
+check(abs(before - 575.0) < 0.5,
+      "a boundary taught at %.2f motor° reads 575 mm" % taught_motor)
 check(abs(after - before) > 50.0,
       "  ...and after re-calibration the SAME stored number means a new reach")
-check(taught_motor == 183.44,
+check(taught_motor == C.FOLD_ANGLE_SPEC_MAX_DEG * C.ARM_GEAR_RATIO,
       "  ...but the stored number itself never had to be touched")
 
 print("\n  -- the settings schema was bumped for the unit change --")
@@ -604,8 +690,10 @@ check(C.DEFAULT_LIM_Z_MIN == 0.0 and C.DEFAULT_LIM_Z_MAX == 280.0,
       "ZM defaults to 0..280 mm — 5 mm clear of the TOP, home at the bottom")
 check(C.DEFAULT_LIM_ROT_MIN == 0.0 and C.DEFAULT_LIM_ROT_MAX == 335.0,
       "RM defaults to 0..335° — 5° clear of the CW stop, home at the CCW one")
-check(C.DEFAULT_LIM_A_MIN == 0.0 and C.DEFAULT_LIM_A_MAX == 230.0,
-      "the elbows default to 0..230 motor° (fold 0..115°)")
+check(C.DEFAULT_LIM_A_MIN == 0.0
+      and abs(C.DEFAULT_LIM_A_MAX
+              - (C.ARM_MOTOR_MAX_DEG - C.LIMIT_SAFETY_MARGIN["A1"])) < 1e-9,
+      "the elbows default to the full motor travel, inset at the far end only")
 
 print("\n  -- and the HOME pose is inside the default envelope --")
 # Otherwise a run, which is HOME -> A -> B -> HOME, is refused before it
@@ -617,8 +705,9 @@ for _axis, _lo, _hi, _home in (("ZM", C.DEFAULT_LIM_Z_MIN, C.DEFAULT_LIM_Z_MAX, 
     check(_lo <= _home <= _hi,
           "%s home %.2f is inside its default limits [%.2f, %.2f]"
           % (_axis, _home, _lo, _hi))
-check(C.ARM_MOTOR_MIN_DEG == 0.0 and C.ARM_MOTOR_MAX_DEG == 240.0,
-      "  ...while the factory envelope itself is untouched at 0..240 motor°")
+check(C.ARM_MOTOR_MIN_DEG == 0.0
+      and abs(C.ARM_MOTOR_MAX_DEG - 180.0 * C.ARM_GEAR_RATIO) < 1e-9,
+      "  ...while the factory envelope is the full fold travel times the ratio")
 
 print("\n  -- RM's zero is its CCW stop, which is HOME --")
 check(C.ROT_MIN_DEG == 0.0 and C.ROT_MAX_DEG == 340.0,
@@ -679,6 +768,8 @@ check(send_body.index("SET_LIMIT:{axis}")
       < send_body.index("SET_LIMIT_ENFORCE:{axis}")
       < send_body.index("SET_LIMITS_ENABLED:"),
       "  ...values FIRST, then the per-axis switches, then the master one")
+check("SET_PLC_SENSOR_ENFORCE:" in send_body,
+      "_send_limits also re-syncs each PLC sensor's boundary on handshake")
 check("Locked boundaries were left untouched" not in src_sd,
       "APPLY no longer refuses a pair — a switched-off axis is exactly when "
       "you teach it")
@@ -712,6 +803,31 @@ check(not [c for c in messagebox.CALLS if c[0] == "ask"],
 messagebox.ANSWER = False
 app._toggle_limit_enforce(_ek)
 check(app.settings[_ek] is True, "  ...and answering No leaves it enforced")
+messagebox.ANSWER = True; messagebox.CALLS.clear()
+
+print("\n  -- PLC sensor boundaries: ONE switch, separate from PLC LINK --")
+# Separate from _toggle_limit_enforce (taught soft limits) and from
+# _toggle_plc_link (whole socket, HOME included). This is for one
+# physically BROKEN switch — the other two axes must be untouched.
+plc_toggle_body = src_sd.split("def _toggle_plc_sensor_enforce")[1].split("def ")[0]
+check("askyesno" in plc_toggle_body,
+      "disabling a PLC sensor's boundary is confirmed, like the others")
+_pek = C.PLC_SENSOR_ENFORCE_BY_AXIS["Z"]
+check(app.settings.get(_pek, True) is True, "ZM's PLC switch starts enforced")
+app._toggle_plc_sensor_enforce(_pek, "M32", "Z")
+check(app.settings[_pek] is False, "  ...one click switches it off")
+check([c for c in messagebox.CALLS if c[0] == "ask"],
+      "  ...after asking first — this removes real protection")
+check(app.settings[C.PLC_SENSOR_ENFORCE_BY_AXIS["ROT"]] is True,
+      "  ...and RM's switch is untouched — the whole point of per-sensor")
+messagebox.CALLS.clear()
+app._toggle_plc_sensor_enforce(_pek, "M32", "Z")
+check(app.settings[_pek] is True, "  ...clicking again switches it back on")
+check(not [c for c in messagebox.CALLS if c[0] == "ask"],
+      "  ...with no confirmation, same as re-enabling a soft limit")
+messagebox.ANSWER = False
+app._toggle_plc_sensor_enforce(_pek, "M32", "Z")
+check(app.settings[_pek] is True, "  ...and answering No leaves it enforced")
 messagebox.ANSWER = True; messagebox.CALLS.clear()
 
 print("\n  -- the GUI's own jog simulation obeys the same switches --")
@@ -768,7 +884,7 @@ check("RESET COORDINATES" in open(os.path.join(os.path.dirname(HERE), "robot_sim
         "ui", "p2p_panel.py"), encoding="utf-8").read(),
       "the motion panel offers the reset buttons")
 check('upper.startsWith("RESET_COORD:")' in fw, "the board parses RESET_COORD:<axis>")
-check("A SINGLE-axis reset does NOT set isHomed" in fw,
+check("a single-axis reset does not" in fw,
       "  ...and does NOT claim a full reference from one axis")
 # The dangerous version of this feature would be a single-axis reset that
 # switches the soft limits on against three meaningless counters.
@@ -789,11 +905,12 @@ check("th3_cad, 60 deg = retracted" not in fw,
 check("HOME IS 0" in fw, "  ...it says HOME IS 0")
 check(C.ARM_HOME_DEG == 0.0 and C.FOLD_ANGLE_HOME_DEG == 0.0,
       "home is 0 in both the motor frame and the fold frame")
-# 60 is still the CAD offset and must stay - it is what makes R_home 133.2.
-check(C.ARM_ZERO_CAD_DEG == 60.0,
-      "ARM_ZERO_CAD_DEG stays 60 (it is what makes R at home 133.2 mm)")
-check(abs(fold_angle_to_reach(0.0) - 133.2) < 0.05,
-      "  ...and fold 0° really is 133.2 mm, so 60 is geometry, not a label")
+# The CAD offset went to 0 with the measured geometry: fold 0 IS the
+# retracted pose, so there is no frame shift left to carry.
+check(C.ARM_ZERO_CAD_DEG == 0.0,
+      "ARM_ZERO_CAD_DEG is 0 — fold 0 is the retracted pose outright")
+check(abs(fold_angle_to_reach(0.0) - C.ARM_MIN_REACH_MM) < 0.05,
+      "  ...and fold 0° really is the 240 mm retracted reach")
 
 
 
@@ -1013,8 +1130,9 @@ check('make_status_led(leds, "HEARTBEAT' not in src_lay,
       "no HEARTBEAT lamp is constructed any more")
 check("plc_led_card" in src_lay and 'f"PLC {PLC_IP}"' in src_lay,
       "  ...replaced by a lamp labelled with the PLC's address")
-check(set(C.PLC_LED_STATES) == {"unknown", "connected", "no_reply", "unreachable"},
-      "four states: unknown / connected / no_reply / unreachable")
+check(set(C.PLC_LED_STATES)
+      == {"unknown", "connected", "no_reply", "unreachable", "disabled"},
+      "five states: unknown / connected / no_reply / unreachable / disabled")
 
 # No module may still write to the retired lamp.
 import glob as _g
@@ -1077,6 +1195,13 @@ cases = [
     ("[PLC_STATE] link=UP socket=OPEN data=OK word=0082 timeouts=0 | M1(DONE)=1",
      "connected"),
     ("[ERROR] PLC unreachable at 192.168.3.101:1025 — check the cable", "unreachable"),
+    # SET_PLC_LINK:0 — must read as "off on purpose", not as a fault, even
+    # though socket=CLOSED and data=NONE look identical to a dead cable.
+    ("[PLC_STATE] link=DISABLED socket=CLOSED data=NONE conn=0/0 word=---- "
+     "timeouts=0 | LINK DISABLED", "disabled"),
+    # And a real fault afterward must still overrule "disabled" — the state
+    # is derived fresh from each line's own link= field, not sticky.
+    ("[PLC_STATE] link=DOWN socket=CLOSED word=---- timeouts=0", "unreachable"),
 ]
 for line, want in cases:
     L._parse_hardware_response(line)
@@ -1205,37 +1330,44 @@ estop_block = src_jog.split("EMERGENCY STOP")[1].split("def ")[0]
 check("motion_lock_widgets" not in estop_block,
       "  ...and it is NOT motion-locked: it must work while the machine moves")
 
-print("\n=== 23. the PLC poll is slow when idle, fast while homing ===")
-check(C.PLC_POLL_IDLE_MS == 5000, "idle polling is 5 s, so the PLC has time to reply")
+print("\n=== 23. the PLC poll is fast always, and even faster while homing ===")
+# 20 ms idle / 10 ms homing is a DELIBERATE operator choice, made after an
+# earlier widening got silently reverted back to 5000/200 on the theory
+# that 20 ms had once overloaded the FX5U link (conn=0/N, UNREACHABLE). The
+# operator asked for it a second time and said explicitly not to revert it
+# again. Do not "fix" this back down — if the link genuinely cannot sustain
+# it, that's SET_PLC_POLL on the live machine, not a silent default change.
+check(C.PLC_POLL_IDLE_MS == 20,
+      "idle polling defaults to the operator's 20 ms")
 check(C.PLC_POLL_HOMING_MS < C.PLC_POLL_IDLE_MS,
-      "  ...and homing polls faster")
+      "  ...and homing polls even faster")
 check(C.PLC_POLL_MS == C.PLC_POLL_IDLE_MS,
       "  ...with PLC_POLL_MS still naming the idle rate")
-check("PLC_POLL_IDLE_DEF_MS = 5000;" in fw,
+check("PLC_POLL_IDLE_DEF_MS = 20;" in fw,
       "the firmware agrees on the idle rate as its DEFAULT")
-# Runtime-adjustable, because 5 s is slow when you are standing at the
-# machine waving a hand over a sensor. Not persisted: a power cycle returns
-# to the deliberate default.
-check("SET_PLC_POLL:" in fw, "  ...and it can be sped up without a re-flash")
+# Still runtime-adjustable — SLOWER, if a given PLC ever needs it — and not
+# persisted: a power cycle returns to the deliberate default.
+check("SET_PLC_POLL:" in fw, "  ...and it can still be changed without a re-flash")
 check("not persisted" in fw, "  ...without becoming the new default")
-check("const unsigned long PLC_POLL_HOMING_MS = 200;" in fw,
+check("const unsigned long PLC_POLL_HOMING_MS = 10;" in fw,
       "  ...and on the homing rate")
-# The fast rate is a correctness requirement: the completion gate must SEE
-# M10..M13 come on and go off, and a home shorter than one idle interval
-# would finish entirely between two polls.
+# Homing still polls faster: HOME completes the moment M30..M32 all read
+# true, and the sooner that lands the sooner the axes stop.
 check("isHoming ? PLC_POLL_HOMING_MS : plcPollIdleMs" in fw,
       "  ...and picks between them on isHoming, covering the whole cycle")
 check(C.PLC_POLL_IDLE_MS < 30000,
       "the idle poll stays well inside the 30 s HOME timeout")
+check("if (ms < 1 || ms > 60000)" in fw,
+      "SET_PLC_POLL accepts 1 ms..60 s, so the rate is tuned on the machine")
 
 
 print("\n=== 24. the reach envelope is YOURS, not a structural guess ===")
 # The 133.2 mm floor was R(fold = 0): it assumed the elbow's zero really is
 # the folded home pose, measured through an unverified ARM_GEAR_RATIO. The
 # IK now refuses only radii the geometry cannot solve at all.
-check(abs(K.REACH_SOLVABLE_MAX_MM - 613.2) < 1e-9
-      and abs(K.REACH_SOLVABLE_MIN_MM - (-26.8)) < 1e-9,
-      "the only hard bound left is a3+a6 ± (a4+a5) = 293.2 ± 320 mm")
+check(abs(K.REACH_SOLVABLE_MAX_MM - 605.0) < 1e-9
+      and abs(K.REACH_SOLVABLE_MIN_MM - 240.0) < 1e-9,
+      "the only hard bound left is a3+a6 ± (a4+a5) = 422.5 ± 182.5 mm")
 src_kin = open(os.path.join(os.path.dirname(HERE), "robot_sim",
                             "kinematics.py"), encoding="utf-8").read()
 reach_body = src_kin.split("def _check_reach")[1].split("\ndef ")[0]
@@ -1244,17 +1376,18 @@ check("ARM_MIN_REACH_MM" not in reach_body and "ARM_MAX_REACH_MM" not in reach_b
 # The band a taught elbow pair really sweeps. NOT min/max of the endpoints:
 # reach is a cosine, so once a band crosses an extreme the extreme radius
 # is INSIDE the interval, and endpoint-only under-reports it.
-lo, hi = K.reach_band_from_motor_deg(0.0, 240.0)
-check(abs(lo - 133.2) < 0.05 and abs(hi - 613.2) < 0.05,
-      "the factory band 0..240 motor° sweeps 133.2..613.2 mm")
-lo, hi = K.reach_band_from_motor_deg(238.0, 242.0)
-check(abs(hi - 613.2) < 0.05,
-      "  ...and a band straddling fold 120° finds the peak BETWEEN its ends")
+_peak = 180.0 * C.ARM_GEAR_RATIO          # motor° at the straight arm
+lo, hi = K.reach_band_from_motor_deg(0.0, C.ARM_MOTOR_MAX_DEG)
+check(abs(lo - 240.0) < 0.05 and abs(hi - 605.0) < 0.05,
+      "the factory motor band sweeps the full 240..605 mm")
+lo, hi = K.reach_band_from_motor_deg(_peak - 20.0, _peak + 20.0)
+check(abs(hi - 605.0) < 0.05,
+      "  ...and a band straddling the straight arm finds the peak BETWEEN its ends")
 # fold -260..480 spans the whole curve, so BOTH extremes are interior.
 # The endpoint-only version reported 593.9..613.2 here and refused every
 # ordinary target — the bug reachBandFor was written to fix.
-lo, hi = K.reach_band_from_motor_deg(-520.0, 960.0)
-check(abs(hi - 613.2) < 0.05 and abs(lo - (-26.8)) < 0.05,
+lo, hi = K.reach_band_from_motor_deg(-2.0 * _peak, 3.0 * _peak)
+check(abs(hi - 605.0) < 0.05 and abs(lo - 240.0) < 0.05,
       "  ...and a band spanning the whole curve finds BOTH extremes inside it")
 
 print("\n  -- the panel advertises those limits, and repaints when they change --")
@@ -1274,8 +1407,8 @@ hn = Hint(); hn._refresh_workspace_hint()
 txt = hn.workspace_hint_v.get()
 check("Settings" in txt and "Boundaries" in txt,
       "the hint says where the numbers come from")
-check("612.0" in txt,
-      "  ...and quotes the reach from the taught band's far end (230 motor°)")
+check("%.1f" % K.motor_deg_to_reach(C.DEFAULT_LIM_A_MAX) in txt,
+      "  ...and quotes the reach from the taught band's far end")
 # The default elbow floor now coincides with the structural one, so proving
 # the hint is LIVE needs a band that is not the default. A hard-coded
 # envelope here would advertise a limit that nothing actually applies.
@@ -1319,6 +1452,7 @@ print("\n=== 25. a taught boundary applies IMMEDIATELY, with no reference ===")
 class Jogger:
     _axis_bounds = JC.JogControlMixin._axis_bounds
     _axis_enforced = JC.JogControlMixin._axis_enforced
+    _floor_is_factory_default = JC.JogControlMixin._floor_is_factory_default
     _limit_pair = JC.JogControlMixin._limit_pair
     _apply_axis_limit = JC.JogControlMixin._apply_axis_limit
     def __init__(self, homed=False, **over):
@@ -1343,6 +1477,31 @@ joff = Jogger(homed=False, lim_a1_min=-341.89, lim_a1_max=902.14,
 lo_off, hi_off = joff._axis_bounds(*joff._limit_pair("a1"), axis="A1")
 check(lo_off < -341.89 and hi_off > 902.14,
       "switching the axis OFF is still the way to jog outside a boundary")
+
+print("\n  -- but a FACTORY-DEFAULT floor cannot pin an unreferenced axis --")
+# The ZM bug: HOME is the minimum of every axis, so the shipped floor is 0.
+# Unreferenced, the counter also reads 0 wherever the board powered up, so
+# ZM sat exactly ON its floor and every Z_DOWN tick clamped straight back —
+# readout frozen at 0.00, axis pinned, and the escape rule cannot help
+# because sitting on the boundary counts as inside.
+jz = Jogger(homed=False)
+z_lo, z_hi = jz._axis_bounds(*jz._limit_pair("z"), axis="Z")
+check(z_lo < C.DEFAULT_LIM_Z_MIN,
+      "unreferenced, the DEFAULT ZM floor is relaxed so the axis can jog down")
+check(abs(z_hi - C.DEFAULT_LIM_Z_MAX) < 1e-9,
+      "  ...while the ceiling is untouched — it cannot meet the counter origin")
+_v, _hit = JC.JogControlMixin._apply_axis_limit(-0.5, 0.0, z_lo, z_hi)
+check(_hit is None and _v < 0.0,
+      "  ...so a Z_DOWN tick from 0.00 actually moves, instead of freezing")
+jzh = Jogger(homed=True)
+check(jzh._axis_bounds(*jzh._limit_pair("z"), axis="Z")
+      == (C.DEFAULT_LIM_Z_MIN, C.DEFAULT_LIM_Z_MAX),
+      "  ...and once referenced the floor applies again, in full")
+# Narrow on purpose: a TAUGHT floor is still enforced without a reference,
+# which is the -341.89 case above and the whole point of this section.
+jzt = Jogger(homed=False, lim_z_min=12.0)
+check(jzt._axis_bounds(*jzt._limit_pair("z"), axis="Z")[0] == 12.0,
+      "a TAUGHT floor is still enforced unreferenced — only defaults relax")
 
 print("\n  -- and an axis outside its band can always jog back in --")
 clamp = JC.JogControlMixin._apply_axis_limit
@@ -1423,10 +1582,14 @@ check("PULSES_PER_MM_Z" not in _body,
       "the fixed PULSES_PER_MM_Z is gone from every calculation")
 check(_body.count("pulsesPerMmZ()") >= 4,
       "  ...and position, move, velocity and accel all use the live figure")
-check("MEASURE THIS" in fw and "MEASURE THIS" in open(
+# The board now carries the SPEC lead (20 mm/rev) and its own microstep
+# constant for ZM; the GUI side is still the one asking for a bench check.
+check("Z_MICROSTEPS_PER_STEP" in fw and "PULSES_PER_MOTOR_REV_Z" in fw,
+      "ZM has its own pulses-per-rev, so the spec lead can be entered as-is")
+check("MEASURE THIS" in open(
         os.path.join(os.path.dirname(HERE), "robot_sim", "config.py"),
         encoding="utf-8").read(),
-      "both sides say the lead is unmeasured")
+      "  ...and the GUI still asks for the bench figure")
 # The proportionality the operator can act on: 3x too far means 3x the lead.
 check(abs(C.Z_MM_PER_MOTOR_REV - 20.0) < 1e-9,
       "the assumed lead is still 20 mm/rev until somebody measures it")
@@ -1448,12 +1611,10 @@ check('"[ROT_RATIO]"' in fw or "[ROT_RATIO]" in fw,
 check("Re-check" in fw.split("SET_ROT_RATIO:")[1][:1200],
       "  ...and warns the taught RM limits (stored in RM degrees) need re-checking "
       "-- unlike the elbow, whose taught limits are motor degrees and unaffected")
-check(abs(C.I_RM_TOTAL - 28.4375) < 1e-9,
-      "GUI-side mirror constant is unchanged pending a matching bench figure")
-check("MANUALLY-MIRRORED" in open(
-        os.path.join(os.path.dirname(HERE), "robot_sim", "config.py"),
-        encoding="utf-8").read(),
-      "  ...and config.py says so, so nobody expects it to live-sync")
+check(abs(C.I_RM_TOTAL - 6.5) < 1e-9,
+      "GUI-side mirror constant is the measured 6.5")
+check("SET_ROT_RATIO" in fw,
+      "  ...and the board takes a runtime recalibration, so it never live-syncs")
 
 
 
@@ -1526,10 +1687,11 @@ check(b._xy_points() is None, "  ...and simply draws no A/B while unparseable")
 print("\n  -- the live dot is the SHARED pose, not a copy --")
 b2 = Board()
 b2.current_joints[1] = 90.0                      # RM 90 -> straight along +Y
-b2.current_joints[2] = C.ARM_GEAR_RATIO * 60.0   # fold 60 -> R 453.2
+b2.current_joints[2] = C.ARM_GEAR_RATIO * 60.0   # fold 60
+_r60 = K.fold_angle_to_reach(60.0)
 lx, ly = b2._xy_live_point()
-check(abs(lx) < 1e-6 and abs(ly - 453.2) < 0.1,
-      "the dot follows current_joints (RM 90°, R 453.2 mm)")
+check(abs(lx) < 1e-6 and abs(ly - _r60) < 0.1,
+      "the dot follows current_joints (RM 90°, R %.2f mm)" % _r60)
 
 print("\n  -- and it says the chord is not the tool path --")
 b3 = Board(); b3._refresh_xy_board()
@@ -1611,23 +1773,28 @@ check(b5._xy_orbit_points() is not None,
 
 
 # ══════════════════════════════════════════════════════════════════════
-print("\n=== 23. all four sensors work, at OPPOSITE ends ===")
+print("\n=== 23. M30..M32 are the only sensors, and they are travel limits ===")
+# M5..M8 are gone, not just muted — see the config.py comment: they lit a
+# lamp and decided nothing, while a limit bit was refusing the jog.
+check(len(C.PLC_SENSOR_PANEL) == 3, "the panel is M30, M31, M32 — nothing else")
+_axis = {b: a for b, _l, a, _c, _e in C.PLC_SENSOR_PANEL}
+check(_axis["M32"] == "Z" and _axis["M30"] == "A2",
+      "M32 is ZM's device and M30 is A2M's — NOT the numeric order")
 _ends = {b: e for b, _l, _a, _c, e in C.PLC_SENSOR_PANEL}
-check(_ends["M5"] == -1 and _ends["M6"] == -1,
-      "M5 and M6 sit at the MINIMUM of their axis (down, CCW) — the home end")
-check(_ends["M7"] == +1 and _ends["M8"] == +1,
-      "M7 and M8 sit at the MAXIMUM of theirs (arms fully extended) — the far end")
+check(_ends["M32"] == -1 and _ends["M30"] == -1,
+      "M32 (ZM) and M30 (A2M) sit at the MINIMUM of their axis")
+check(_ends["M31"] == +1,
+      "M31 (RM) sits at the MAXIMUM — RM is mounted inverted")
 _cmds = {b: c for b, _l, _a, c, _e in C.PLC_SENSOR_PANEL}
-check(_cmds["M7"] == "A1_FWD" and _cmds["M8"] == "A2_FWD",
-      "  ...so the jog command that drives INTO them is the EXTEND one")
-check(_cmds["M5"] == "Z_DOWN" and _cmds["M6"] == "ROT_CCW",
-      "  ...while for M5/M6 it is DOWN and CCW")
+check(_cmds["M32"] == "Z_DOWN" and _cmds["M31"] == "ROT_CW"
+      and _cmds["M30"] == "A2_BACK",
+      "the jog command that drives INTO each switch matches its end")
 check(C.PLC_SENSOR_JOINT_INDEX == {"Z": 0, "ROT": 1, "A1": 2, "A2": 3},
       "each sensor maps to its axis in the shared pose")
-# Home = lift down, RM at 0, arms pulled IN, which is away from M7/M8.
-check(C.PLC_HOME_STATE_ON_BITS == ("M5", "M6")
-      and C.PLC_HOME_STATE_CLEAR_BITS == ("M7", "M8"),
-      "HOME STATE is still M5+M6 covered with M7+M8 clear")
+# HOME is now defined the same way the board homes: all three limits true.
+check(C.PLC_HOME_STATE_ON_BITS == ("M30", "M31", "M32")
+      and C.PLC_HOME_STATE_CLEAR_BITS == (),
+      "HOME STATE is all three limit bits true, same as the board")
 
 print("\n=== 24. JOG warns, P2P refuses ===")
 class Sensed:
@@ -1642,20 +1809,20 @@ class Sensed:
     _sensor_violation = P2C.P2PControlMixin._sensor_violation
 
 print("\n  -- jog: a warning, and nothing is blocked --")
-sj = Sensed(covered=("M5", "M7"))
+sj = Sensed(covered=("M32", "M31"))
 sj.warn_if_jogging_into_sensor("Z_DOWN")
-check(any("driving INTO M5" in m for m, _t in sj.logged), "jogging DOWN into M5 warns")
+check(any("driving INTO M32" in m for m, _t in sj.logged), "jogging DOWN into M32 warns")
 check(any(t == "warn" for _m, t in sj.logged), "  ...as a warning, not an error")
 check(any("not blocked" in m for m, _t in sj.logged), "  ...and says it is not blocked")
 sj.logged.clear()
-sj.warn_if_jogging_into_sensor("A1_FWD")
-check(any("driving INTO M7" in m for m, _t in sj.logged),
-      "extending A1M into M7 warns — the opposite end from M5")
+sj.warn_if_jogging_into_sensor("ROT_CW")
+check(any("driving INTO M31" in m for m, _t in sj.logged),
+      "turning CW into M31 warns — the opposite end from M32")
 sj.logged.clear()
 sj.warn_if_jogging_into_sensor("Z_UP")
 check(not sj.logged, "jogging AWAY from a covered sensor is silent")
-sj.warn_if_jogging_into_sensor("A1_BACK")
-check(not sj.logged, "  ...and so is retracting off M7")
+sj.warn_if_jogging_into_sensor("ROT_CCW")
+check(not sj.logged, "  ...and so is turning CCW off M31")
 sc = Sensed()          # nothing covered
 sc.warn_if_jogging_into_sensor("Z_DOWN")
 check(not sc.logged, "and a clear sensor never warns")
@@ -1672,22 +1839,22 @@ check(src_jc2.index("warn_if_jogging_into_sensor")
       "  ...before the axis is added, and WITHOUT returning early")
 
 print("\n  -- P2P: refused, and only when the move makes it worse --")
-sp = Sensed(covered=("M5",), pose=(50.0, 100.0, 100.0, 100.0))
+sp = Sensed(covered=("M32",), pose=(50.0, 100.0, 100.0, 100.0))
 check(sp._sensor_violation(20.0, 100.0, 100.0, 100.0) is not None,
-      "with M5 covered, lowering ZM is refused")
-check("M5" in sp._sensor_violation(20.0, 100.0, 100.0, 100.0),
-      "  ...and the message names the sensor")
+      "with M32 covered, lowering ZM is refused")
+check("M32" in sp._sensor_violation(20.0, 100.0, 100.0, 100.0),
+      "  ...and the message names the device")
 check(sp._sensor_violation(80.0, 100.0, 100.0, 100.0) is None,
       "  ...but RAISING ZM is allowed — it moves off the sensor")
 check(sp._sensor_violation(50.0, 100.0, 100.0, 100.0) is None,
       "  ...and an axis that does not move is never refused")
-sp7 = Sensed(covered=("M7",), pose=(50.0, 100.0, 100.0, 100.0))
-check(sp7._sensor_violation(50.0, 100.0, 140.0, 100.0) is not None,
-      "with M7 covered, EXTENDING A1M is refused")
-check(sp7._sensor_violation(50.0, 100.0, 60.0, 100.0) is None,
-      "  ...and retracting A1M is allowed — M7 is at the far end")
-check(sp7._sensor_violation(50.0, 100.0, 100.0, 140.0) is None,
-      "  ...and A2M is unaffected by A1M's sensor")
+sp7 = Sensed(covered=("M31",), pose=(50.0, 100.0, 100.0, 100.0))
+check(sp7._sensor_violation(50.0, 140.0, 100.0, 100.0) is not None,
+      "with M31 covered, turning RM further CW is refused")
+check(sp7._sensor_violation(50.0, 60.0, 100.0, 100.0) is None,
+      "  ...and turning CCW is allowed — M31 is at the max end")
+check(sp7._sensor_violation(50.0, 100.0, 140.0, 100.0) is None,
+      "  ...and A1M is unaffected, having no limit device at all")
 sp0 = Sensed(pose=(50.0, 100.0, 100.0, 100.0))
 check(sp0._sensor_violation(0.0, 0.0, 0.0, 0.0) is None,
       "with every sensor clear, nothing is refused")
@@ -1695,15 +1862,16 @@ check("_sensor_violation" in src_p2c, "LOAD runs the check")
 check("Blocked by a PLC sensor" in src_p2c, "  ...and says so distinctly")
 
 print("\n  -- the firmware splits it the same way --")
-check("PLC_SENSOR_END_A1  = +1" in fw and "PLC_SENSOR_END_Z   = -1" in fw,
-      "the board agrees on which end each sensor is at")
-check("runLegBlockedBySensor" in fw, "it refuses a P2P leg")
-check("plcServiceSensorJogWarning" in fw, "  ...and only warns during jog")
+check("PLC_LIMIT_END_Z   = -1" in fw and "PLC_LIMIT_END_ROT = +1" in fw,
+      "the board agrees on which end each limit is at")
+check("runLegBlockedByLimit" in fw, "it refuses a P2P leg")
 check("PLC_SENSOR_BLOCKS_" not in fw,
       "the old jog-blocking table is gone, not left beside the new one")
-_jogwarn = fw.split("void plcServiceSensorJogWarning()")[1].split("\n}")[0]
-check("MoveVelocity(0)" not in _jogwarn,
-      "  ...proved by the jog path never commanding a stop")
+# The whole M1/M5..M8/M10..M13 apparatus is gone from the board, not muted.
+for _dead in ("PLC_M_HOME_Z", "PLC_M_RUN_Z", "PLC_M_DONE", "plcAllHomeSensors",
+              "plcServiceHomeSensors", "plcServiceSensorJogWarning",
+              "runLegBlockedBySensor", "PLC_SENSOR_END_Z"):
+    check(_dead not in fw, "  ...and %s is gone from the firmware" % _dead)
 
 
 
@@ -1736,14 +1904,18 @@ check(C.PLC_SENSOR_UNKNOWN_TEXT == "NO DATA",
       "the unknown state has its own caption, not CLEAR")
 src_sp = open(os.path.join(os.path.dirname(HERE), "robot_sim", "ui",
                            "sensor_panel.py"), encoding="utf-8").read()
-check("PLC_SENSOR_UNKNOWN_TEXT, ACCENT_ORANGE" in src_sp,
+check("PLC_SENSOR_UNKNOWN_TEXT, ACCENT_PURPLE" in src_sp,
       "  ...and the lamps are BUILT in it, not in CLEAR")
+# ...and not in COVERED's colour either. They were both ACCENT_ORANGE, so a
+# dead link painted every lamp the same shade as a tripped limit.
+check("ACCENT_ORANGE" not in src_sp.split("if not known:")[1].split("elif")[0],
+      "  ...and UNKNOWN is a different colour from COVERED, not just different text")
 check(src_sp.count("plc_sensors_known()") >= 2,
       "both the lamps and the home state gate on it")
 
 print("\n  -- and the board reports unknown as a field, not by omission --")
-check('home Z/R/A1/A2=????' in fw,
-      "the board sends ???? when it has no device data")
+check('limit Z/R/A2=???' in fw,
+      "the board sends ??? when it has no device data")
 check("NO DEVICE DATA" in fw, "  ...and says so in words too")
 # The old summary returned bare "no data" with NO bit field, so the GUI's
 # regex found nothing and simply never updated — silence read as CLEAR.
@@ -1785,23 +1957,42 @@ class Lamp2:
 lu = Lamp2()
 lu._parse_hardware_response(
     "[PLC_STATE] link=UP socket=OPEN word=---- timeouts=4 | NO DEVICE DATA | "
-    "M1(DONE)=? home Z/R/A1/A2=???? run Z/R/A1/A2=????")
+    "limit Z/R/A2=???")
 check(not lu.plc_sensors_known(),
       "a '????' reply marks the sensors unknown rather than clear")
 check(any("UNKNOWN" in m for m, _t in lu.logged),
       "  ...and it is logged as a fault")
 check(any(t == "error" for _m, t in lu.logged), "  ...as an error")
 
+print("\n  -- SET_PLC_LINK:0's own line marks the sensors unknown too --")
+ld = Lamp2()
+ld._parse_hardware_response(
+    "[PLC_STATE] link=DISABLED socket=CLOSED data=NONE conn=0/0 word=---- "
+    "timeouts=0 | LINK DISABLED — SET_PLC_LINK:1 to re-enable | limit Z/R/A2=???")
+check(ld._plc_led_state == "disabled",
+      "the lamp reads DISABLED, not NO REPLY or UNREACHABLE")
+check(not ld.plc_sensors_known(),
+      "  ...and the sensors go unknown through the SAME '???' path as a dead link")
+
 print("\n  -- a real reading still lands, with M6 covered --")
 lr = Lamp2()
 lr._parse_hardware_response(
-    "[PLC_STATE] link=UP socket=OPEN word=0040 timeouts=0 | M1(DONE)=0 "
-    "home Z/R/A1/A2=0100 run Z/R/A1/A2=0000")
+    "[PLC_STATE] link=UP socket=OPEN word=0000 timeouts=0 | limit Z/R/A2=010")
 check(lr.plc_sensors_known(), "a real bit field is accepted")
-check(lr.plc_sensor_state["M6"] is True,
-      "M6 covered is read as COVERED — the reported symptom")
-check(lr.plc_sensor_state["M5"] is False and lr.plc_sensor_state["M7"] is False,
+check(lr.plc_sensor_state["M31"] is True,
+      "M31 covered is read as COVERED — the reported symptom")
+check(lr.plc_sensor_state["M32"] is False and lr.plc_sensor_state["M30"] is False,
       "  ...and the others stay clear")
+# The wire field is ordered by AXIS (Z/R/A2) and the devices are NOT in
+# numeric order, so a positional decode of M30/M31/M32 puts ZM's lamp on
+# A2M's switch. That is the bug this pins.
+lz = Lamp2()
+lz._parse_hardware_response(
+    "[PLC_STATE] link=UP socket=OPEN word=0000 timeouts=0 | limit Z/R/A2=100")
+check(lz.plc_sensor_state["M32"] is True,
+      "the FIRST field position is ZM, and ZM is M32")
+check(lz.plc_sensor_state["M30"] is False,
+      "  ...not M30, which is A2M and sits in the LAST position")
 
 print("\n=== 26. PLC wire diagnostics ===")
 check("PLC_TEST" in fw, "PLC_TEST does one read and reports the outcome")
@@ -1821,11 +2012,12 @@ check("NO device read has EVER succeeded" in fw,
 
 print("\n  -- HOME names the real cause instead of just timing out --")
 check("plcGoodReads == 0" in fw, "HOME warns UP FRONT if no read has succeeded")
-check("could not have seen DONE" in fw,
+check("it could not have seen the switches at all" in fw,
       "  ...and on timeout blames the link, not the PLC")
-check("never came ON" in fw,
-      "  ...or the IO-0 -> X0 wire, when reads work but the PLC never started")
-check("never set M1" in fw, "  ...or the end of the PLC's own sequence")
+check("a switch is stuck, broken, or the" in fw and "mechanically obstructed" in fw,
+      "  ...or the physical switch/mechanism, when reads work but a switch never came ON")
+check("SET_PLC_SENSOR_ENFORCE" in fw,
+      "  ...and points at the escape hatch for a switch known to be broken")
 
 
 
@@ -1842,7 +2034,7 @@ check("data=" in fw, "the board reports a data= state")
 check("plcDataState" in fw, "  ...from a dedicated helper")
 for token in ("NONE", "STALE", "OK"):
     check('return "%s"' % token in fw, "  ...with a %s case" % token)
-check("PLC_DATA_STALE_MS" in fw, "  ...and a staleness window")
+check("plcDataStaleMs" in fw, "  ...and a staleness window")
 
 class Flap:
     def __init__(self):

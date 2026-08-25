@@ -1,4 +1,4 @@
-"""Screen layout: window shell, panels and dialogs."""
+"""Screen layout: window shell, panels, dialogs."""
 
 from .coord_reset import CoordResetRowMixin
 from .sensor_panel import SensorPanelMixin

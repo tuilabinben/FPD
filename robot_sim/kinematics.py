@@ -1,7 +1,6 @@
-"""Inverse / forward kinematics for the STCR4000S twin frog-leg arm.
+"""Inverse / forward kinematics for STCR4000S twin frog-leg arm.
 
-This is a direct port of `solve_ik_frogleg` from
-MATLAB_v4_final/mophong_init.m. The MATLAB helper is:
+Direct port of `solve_ik_frogleg` from MATLAB_v4_final/mophong_init.m. MATLAB helper:
 
     function [d1, th2, th3_cad] = solve_ik_frogleg(X, Y, Z, Z_offset, a3, a4, a5, a6)
         d1 = Z - Z_offset;
@@ -14,18 +13,15 @@ MATLAB_v4_final/mophong_init.m. The MATLAB helper is:
         th3_cad  = pi - th3_math;
     end
 
-Two deliberate differences from the MATLAB original, both about safety
-rather than maths:
+Two deliberate diffs from MATLAB original, both about safety not maths:
 
-1.  MATLAB *clamps* silently — an out-of-range Z or an unreachable
-    radius quietly becomes the nearest legal pose. A plotting script can
-    afford that; a machine cannot, because the operator would press RUN
-    believing the commanded point was accepted. Here the same conditions
-    raise ValueError so the GUI refuses the LOAD. `clamp_like_matlab=True`
-    restores the original clamping behaviour for A/B comparison.
+1. MATLAB *clamps* silently — out-of-range Z or unreachable radius quietly becomes nearest
+   legal pose. Fine for plotting script; not for machine — operator would press RUN believing
+   point accepted. Here same conditions raise ValueError, GUI refuses LOAD.
+   `clamp_like_matlab=True` restores original clamping for A/B comparison.
 
-2.  Per-arm Z offsets are honoured: arm 2's deck sits 9 mm below arm 1's,
-    so the same Cartesian Z maps to a different d1 for each arm.
+2. Per-arm Z offsets honoured: arm 2's deck sits 9mm below arm 1's, same Cartesian Z maps to
+   different d1 per arm.
 
 Pure maths — no tkinter, no serial. Safe to unit-test in isolation.
 """
@@ -65,12 +61,11 @@ def normalize_angle(deg):
 
 
 def rot_from_bearing(deg):
-    """Compass bearing (any range) -> an RM reading in [0, 360).
+    """Compass bearing (any range) -> RM reading in [0, 360).
 
-    RM's zero is its CCW stop and it counts up to 340, so a position is
-    never negative. atan2 returns (-180, 180], which would report a point
-    just clockwise of home as -5 and get it refused as "below the CCW
-    limit" when it is in fact 355 and perfectly reachable.
+    RM zero = CCW stop, counts up to 340 — never negative. atan2 returns
+    (-180,180], would report point just CW of home as -5, refused as
+    "below CCW limit" though actually 355 and reachable.
     """
     return deg % 360.0
 
@@ -88,23 +83,21 @@ def z_offset_for(arm):
 
 
 # ----------------------------------------------------------------------
-# The operator's Z frame: 0 AT HOME
+# Operator's Z frame: 0 AT HOME
 # ----------------------------------------------------------------------
-# HOME is the P2P reference point — X = 0, Y = 0, Z = 0 — and the typed Z
-# is the lift's travel up from it, 0..285 mm. X and Y stay signed, because
-# the turntable can put the arm behind the machine; Z cannot go negative,
-# because HOME is the bottom of the stroke and there is nothing below it.
+# HOME = P2P reference point — X=0, Y=0, Z=0. Typed Z = lift travel up
+# from it, 0..285mm. X/Y signed (turntable can put arm behind machine);
+# Z never negative (HOME = bottom of stroke, nothing below it).
 #
-# The maths underneath is unchanged and still absolute: solve_ik(),
-# forward_kinematics() and the MATLAB parity sweep all work in the frame
-# where the arm 1 deck sits at 514.3 mm with the lift down. That is
-# deliberate — the sweep proves this module still reproduces
-# mophong_init.m to machine precision, and it can only do that if it is
-# speaking the .m's frame. So the translation lives HERE, at the edge, and
-# is applied when a number crosses between the operator and the maths.
+# Maths underneath unchanged, still absolute: solve_ik(),
+# forward_kinematics(), MATLAB parity sweep all work in frame where arm 1
+# deck sits at 514.3mm w/ lift down — deliberate, sweep proves module
+# still reproduces mophong_init.m to machine precision, only works
+# speaking .m's frame. Translation lives HERE, at edge, applied when
+# number crosses operator <-> maths.
 #
-# Z_HOME is therefore per arm: one carriage, two decks 9 mm apart, so the
-# same typed Z is a different absolute height for A1M and A2M.
+# Z_HOME per arm: one carriage, two decks 9mm apart — same typed Z is
+# different absolute height for A1M vs A2M.
 def z_abs_from_home(z_home_mm, arm):
     """Operator Z (0 at HOME, up positive) -> absolute model Z for `arm`."""
     return z_home_mm + z_offset_for(arm)
@@ -118,9 +111,8 @@ def z_home_from_abs(z_abs_mm, arm):
 # ----------------------------------------------------------------------
 # Elbow angle <-> radial reach
 # ----------------------------------------------------------------------
-# These two functions are the ONLY place the CAD frame appears. Callers
-# work in degrees-rotated-from-home (0° retracted); the +/- of
-# ARM_ZERO_CAD_DEG here is the whole of the translation.
+# Only place CAD frame appears. Callers work in degrees-rotated-from-home
+# (0° retracted); +/- ARM_ZERO_CAD_DEG here is the whole translation.
 def fold_angle_to_reach(fold_deg):
     """Elbow rotation from home (deg) -> radial reach of the wafer centre.
 
@@ -141,14 +133,13 @@ def reach_to_fold_angle(r_mm):
 # ----------------------------------------------------------------------
 # Motor degrees <-> frog-leg degrees
 # ----------------------------------------------------------------------
-# The board counts step pulses, so MOTOR degrees is the only elbow figure
-# it knows exactly. Every frog-leg angle in this module is derived from it
-# through these two functions and nothing else, so a re-calibration of
-# ARM_GEAR_RATIO cannot be half-applied.
+# Board counts step pulses — MOTOR degrees only elbow figure it knows
+# exactly. Every frog-leg angle here derived from it via these two fns
+# only, so ARM_GEAR_RATIO recalibration can't be half-applied.
 #
-# The ratio is 2 because the elbow motor drives the KNEE while the reach
-# curve is written in terms of the driven LINK angle, and the knee turns
-# through twice the link angle — see the derivation in config.py.
+# Model-derived ratio is 2 (elbow motor drives KNEE, reach curve written in
+# terms of driven LINK angle — knee turns through twice link angle). Live
+# ARM_GEAR_RATIO is bench-measured, currently 7.80 — see config.py.
 def fold_angle_from_motor_deg(motor_deg):
     """Motor rotation from home (deg) -> frog-leg rotation from home."""
     return motor_deg / ARM_GEAR_RATIO
@@ -160,18 +151,16 @@ def motor_deg_from_fold_angle(fold_deg):
 
 
 # ----------------------------------------------------------------------
-# Arm BASE angle — the number the operator reads off the machine
+# Arm BASE angle — number operator reads off machine
 # ----------------------------------------------------------------------
-# The base (shoulder) link swings 0 deg at HOME (240 mm reach) to 90 deg
-# with the arm at the rated working reach of 575 mm. The scale is anchored
-# on FOLD_ANGLE_SPEC_MAX_DEG (146.68 deg of fold = 575 mm reach = 90 deg
-# base) rather than the geometric singularity at 180 deg, because the
-# singularity is never a valid target and anchoring there would mean
-# "straight out" reads ~73 deg instead of the 90 the operator sees on the
-# machine.
+# Base (shoulder) link swings 0deg at HOME (240mm reach) to 90deg at rated
+# working reach 575mm. Scale anchored on FOLD_ANGLE_SPEC_MAX_DEG
+# (146.68deg fold = 575mm reach = 90deg base) not geometric singularity at
+# 180deg — singularity never valid target, anchoring there would make
+# "straight out" read ~73deg instead of the 90 operator sees on machine.
 #
-# DISPLAY ONLY. The wire protocol, the taught boundaries and everything the
-# board stores remain MOTOR degrees - see CLAUDE.md section 1b.
+# DISPLAY ONLY. Wire protocol, taught boundaries, everything board stores
+# stay MOTOR degrees — see CLAUDE.md section 1b.
 BASE_ANGLE_MAX_DEG = 90.0
 
 
@@ -228,34 +217,32 @@ def _check_rotation(theta2):
         )
 
 
-#: The radii the cosine can actually invert: |(R - 293.2) / 320| <= 1.
-#: Outside this there is NO frog-leg configuration at all, at any elbow
-#: angle, on any machine — acos would clamp and hand back a pose that is
-#: not the one asked for, which is the MATLAB behaviour this module
-#: deliberately does not copy.
+#: Radii cosine can actually invert: |(R - 293.2) / 320| <= 1.
+#: Outside this NO frog-leg configuration exists, any elbow angle, any
+#: machine — acos would clamp, hand back pose not the one asked for,
+#: which is MATLAB behaviour this module deliberately doesn't copy.
 REACH_SOLVABLE_MIN_MM = ARM_RADIAL_OFFSET_MM - ARM_LINK_SUM_MM   # -26.8
 REACH_SOLVABLE_MAX_MM = ARM_RADIAL_OFFSET_MM + ARM_LINK_SUM_MM   # 613.2
 
 
 def _check_reach(r, label="Point"):
-    """Refuses only radii the geometry cannot solve AT ALL.
+    """Refuses only radii geometry cannot solve AT ALL.
 
-    THERE IS NO STRUCTURAL REACH ENVELOPE HERE ANY MORE, and that is the
-    same decision already taken for the elbow boundaries themselves
-    (ARM_LIMITS_UNBOUNDED in config.py). The old floor of 133.2 mm was
-    R(fold = 0°) — it assumed the elbow's zero really is the folded home
-    pose, and that the fold angle is motor degrees over an ARM_GEAR_RATIO
-    that has never been measured. Both are assumptions, so the floor was a
-    guess, and a guess that rejects a radius the arm is physically
-    standing at stops the operator using the machine at all.
+    NO STRUCTURAL REACH ENVELOPE HERE ANY MORE — same decision already
+    taken for elbow boundaries (ARM_LIMITS_UNBOUNDED in config.py). Old
+    133.2mm floor was R(fold=0°) — assumed elbow zero really is folded
+    home pose, and fold angle is motor degrees over an ARM_GEAR_RATIO
+    never measured. Both assumptions, so floor was a guess — one that
+    rejects a radius the arm is physically standing at, stopping operator
+    using machine at all.
 
-    The working envelope is the operator's, from the taught elbow
-    boundaries in Settings -> Boundaries, and it is enforced where those
-    live: _limit_violation() before LOAD, and armBand()/reachBandFor() on
-    the board. That is one system of record instead of two.
+    Working envelope is operator's, from taught elbow boundaries in
+    Settings -> Boundaries, enforced where those live: _limit_violation()
+    before LOAD, armBand()/reachBandFor() on board. One system of record,
+    not two.
 
-    What survives is arithmetic, not opinion: a radius beyond 613.2 mm has
-    no solution for any elbow angle, and acos() would silently clamp it.
+    What survives is arithmetic, not opinion: radius beyond 613.2mm has no
+    solution for any elbow angle, acos() would silently clamp it.
     """
     if r < REACH_SOLVABLE_MIN_MM - EPS or r > REACH_SOLVABLE_MAX_MM + EPS:
         raise ValueError(
@@ -268,17 +255,17 @@ def _check_reach(r, label="Point"):
 
 
 def reach_band_from_motor_deg(motor_lo, motor_hi):
-    """(min, max) radius produced by a taught elbow band, in MOTOR degrees.
+    """(min, max) radius from taught elbow band, in MOTOR degrees.
 
-    NOT min/max of the two endpoints. Reach is a cosine of `fold + 60`, so
-    it is monotonic only across half a period: once a band crosses an
-    extreme, the extreme radius lies INSIDE the interval and an
-    endpoint-only answer is wrong in the unsafe direction — it reports a
-    narrower band than the arm can actually sweep. The extremes sit where
-    `fold + 60` is a multiple of 180, i.e. fold = 120, 300, -60, ...
+    NOT min/max of two endpoints. Reach = cosine of `fold + 60`,
+    monotonic only across half period: once band crosses extreme, extreme
+    radius lies INSIDE interval — endpoint-only answer wrong in unsafe
+    direction, reports narrower band than arm can actually sweep.
+    Extremes sit where `fold + 60` is multiple of 180, i.e. fold = 120,
+    300, -60, ...
 
-    This mirrors reachBandFor() in the firmware; the two must agree or the
-    panel would advertise a band the board refuses.
+    Mirrors reachBandFor() in firmware; both must agree or panel would
+    advertise band board refuses.
     """
     lo_f = fold_angle_from_motor_deg(min(motor_lo, motor_hi))
     hi_f = fold_angle_from_motor_deg(max(motor_lo, motor_hi))
@@ -298,11 +285,10 @@ def reach_band_from_motor_deg(motor_lo, motor_hi):
 
 def _check_d1(d1, arm, z):
     if not (D1_MIN_MM - EPS <= d1 <= D1_MAX_MM + EPS):
-        # d1 IS the operator's Z now — the lift's travel up from HOME — so
-        # the message leads with that and mentions the absolute height only
-        # as context. The old message quoted a 514.3..799.3 band nobody
-        # types any more, which read as though the entry had been rejected
-        # for being far too small.
+        # d1 IS operator's Z now — lift's travel up from HOME — message
+        # leads with that, absolute height only as context. Old message
+        # quoted 514.3..799.3 band nobody types anymore, read as though
+        # entry rejected for being far too small.
         raise ValueError(
             f"Z={d1:.1f} mm is outside the lift's travel from HOME "
             f"(valid [{D1_MIN_MM:.0f}, {D1_MAX_MM:.0f}] mm; Z is measured UP "
@@ -316,24 +302,23 @@ def _check_d1(d1, arm, z):
 # ----------------------------------------------------------------------
 def solve_ik(x, y, z, arm_choice="A1M", reference_deg=0.0, clamp_like_matlab=False,
              idle_deg=None):
-    """Inverse kinematics for a single-arm move.
+    """Inverse kinematics for single-arm move.
 
     Model: prismatic Z lift (d1) + rotating base (theta2, RM) + one of two
-    independent frog-leg arms (A1M or A2M). `arm_choice` selects the arm
-    that makes the move.
+    independent frog-leg arms (A1M or A2M). `arm_choice` selects arm that
+    moves.
 
-    `idle_deg` is the elbow angle returned for the arm that is NOT moving.
-    Pass its current live angle to leave it exactly where it is — the
-    default of None means "park at the CAD home angle", which is what the
-    firmware's own IK does but which physically MOVES an arm the operator
-    never commanded. The GUI passes the live angle for that reason.
+    `idle_deg` = elbow angle returned for arm NOT moving. Pass its current
+    live angle to leave it exactly where it is — default None means "park
+    at CAD home angle", what firmware's own IK does but physically MOVES
+    an arm operator never commanded. GUI passes live angle for that
+    reason.
 
-    Returns (d1_mm, theta2_deg, theta_a1m_deg, theta_a2m_deg), with the
-    arm angles expressed as rotation from home (0° retracted .. 120°
-    straight).
+    Returns (d1_mm, theta2_deg, theta_a1m_deg, theta_a2m_deg), arm angles
+    as rotation from home (0° retracted .. 120° straight).
 
-    With `clamp_like_matlab=True` the MATLAB helper's silent clamping is
-    reproduced exactly instead of raising.
+    `clamp_like_matlab=True` reproduces MATLAB helper's silent clamping
+    exactly instead of raising.
     """
     z_offset = z_offset_for(arm_choice)
 
@@ -353,13 +338,12 @@ def solve_ik(x, y, z, arm_choice="A1M", reference_deg=0.0, clamp_like_matlab=Fal
 
     theta_active = reach_to_fold_angle(r)
 
-    # The idle arm's angle is passed through UNCLAMPED. It is a measured
-    # position, not a request: clamping it to 0..120 would hand back a
-    # target different from where the arm is standing, i.e. would command
-    # a move on the arm the operator did not select — the exact failure
-    # the idle_deg parameter exists to prevent. The reported angle rides
-    # on an unmeasured ARM_GEAR_RATIO, so reading outside 0..120 is
-    # expected, not a fault.
+    # Idle arm's angle passed through UNCLAMPED. Measured position, not
+    # request: clamping to 0..120 would hand back target different from
+    # where arm stands — command move on arm operator didn't select,
+    # exact failure idle_deg exists to prevent. Reported angle rides on
+    # unmeasured ARM_GEAR_RATIO, reading outside 0..120 expected, not
+    # fault.
     idle = FOLD_ANGLE_HOME_DEG if idle_deg is None else idle_deg
 
     theta_a1m = theta_active if arm_choice == "A1M" else idle
@@ -369,19 +353,18 @@ def solve_ik(x, y, z, arm_choice="A1M", reference_deg=0.0, clamp_like_matlab=Fal
 
 
 def solve_ik_both(x0, y0, z0, x1, y1, z1, reference_deg=0.0):
-    """Inverse kinematics for a SIMULTANEOUS dual-arm move: A1M reaches
+    """Inverse kinematics for SIMULTANEOUS dual-arm move: A1M reaches
     (x0,y0,z0) while A2M reaches (x1,y1,z1).
 
-    RM and the ZM carriage are shared while each arm's elbow has its own
-    motor, so the two points must lie in the same direction from the
-    centre (only the radius may differ). Their Cartesian Z values must
-    differ by exactly the 9 mm deck offset, because a single carriage
-    lifts both decks.
+    RM and ZM carriage shared, each arm's elbow has own motor — two
+    points must lie same direction from centre (only radius may differ).
+    Cartesian Z values must differ by exactly 9mm deck offset, since one
+    carriage lifts both decks.
 
     Returns (d1_mm, theta2_deg, theta_a1m_deg, theta_a2m_deg).
     """
-    # Arm 2's deck is ARM2_Z_DROP_MM lower, so for one carriage position
-    # the two end-effectors are at Z and Z - 9.
+    # Arm 2's deck ARM2_Z_DROP_MM lower — one carriage position, two
+    # end-effectors at Z and Z-9.
     expected_dz = ARM2_Z_DROP_MM
     if abs((z0 - z1) - expected_dz) > 0.5:
         raise ValueError(
@@ -425,9 +408,9 @@ def solve_ik_both(x0, y0, z0, x1, y1, z1, reference_deg=0.0):
 # Forward kinematics
 # ----------------------------------------------------------------------
 def forward_kinematics(d1, theta2, theta_a1m, theta_a2m, arm=None):
-    """Joint values -> Cartesian (x, y, z) mm of the selected arm's wafer
-    centre. `arm` is "A1M" or "A2M"; when omitted the more-extended arm
-    (larger th3_cad) is reported, since the idle arm sits at home.
+    """Joint values -> Cartesian (x, y, z) mm of selected arm's wafer
+    centre. `arm` = "A1M" or "A2M"; omitted -> more-extended arm (larger
+    th3_cad) reported, since idle arm sits at home.
     """
     if arm == "A1M":
         active_theta, z_offset = theta_a1m, Z_OFFSET_ARM1_MM
@@ -450,14 +433,13 @@ def home_pose():
 
 
 def sample_joint_path(start_j, target_j, arm=None, n=30):
-    """(x, y) mm polyline for a linear joint-space move from start_j to
-    target_j, both (d1, rot, a1_motor_deg, a2_motor_deg).
+    """(x, y) mm polyline for linear joint-space move start_j -> target_j,
+    both (d1, rot, a1_motor_deg, a2_motor_deg).
 
-    Uses the SAME per-joint linear interpolation the real machine is
-    driven with (p2p_control._animate_leg: `s + (e - s) * t`), so this is
-    the actual swept path, not an approximation of it. Motor degrees are
-    converted to fold degrees per sample because forward_kinematics works
-    in the fold frame.
+    Uses SAME per-joint linear interpolation real machine driven with
+    (p2p_control._animate_leg: `s + (e - s) * t`) — actual swept path,
+    not approximation. Motor degrees converted to fold degrees per sample
+    since forward_kinematics works in fold frame.
     """
     pts = []
     for i in range(n + 1):

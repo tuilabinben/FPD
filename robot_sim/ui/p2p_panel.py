@@ -3,9 +3,8 @@
 import tkinter as tk
 from tkinter import ttk
 
-# No reach constants here any more. The workspace line is built from the
-# operator's taught boundaries by _refresh_workspace_hint(), because those
-# are the only limits that are actually applied.
+# No reach constants here any more. Workspace line built from operator's
+# taught boundaries by _refresh_workspace_hint() — only limits actually applied.
 from ..config import ARM_CONFIGS, DEFAULT_POINT_A, DEFAULT_POINT_B
 from ..theme import (
     FONT_CAPTION,
@@ -32,22 +31,20 @@ from ..widgets import HomeButton, RoundedButton, make_coord_card, make_led_card
 
 class P2PPanelMixin:
     def _build_p2p_panel(self, parent):
-        # Left column: Point A stacked directly above Point B (and their
-        # HOME-frame caption / workspace-hint annotations). Right column:
-        # the Oxy board, wide open. It used to be a side column squeezed
-        # beside two side-by-side point blocks, which clipped the
-        # right-hand edge of the workspace circle — the annulus has to be
-        # fully visible or the plot is worse than no plot. Stacking A/B on
-        # the left is what frees up a generous, dedicated column for it.
-        # grid, not pack, for the split itself: grid's column weights are
-        # unambiguous — column 0 at weight=0 gets EXACTLY its content's
-        # natural width and never more, however wide `split` is stretched
-        # by the scrollable body above it. Nested pack fill="x" chains were
-        # letting the left column balloon to the container's full width
-        # (the coordinate cards' grid columns have weight=1 of their own —
-        # see _build_coordinate_inputs — so anything that widened their
-        # container widened the cards with it), which is what pushed the
-        # board off the right edge with no horizontal scrollbar to reach it.
+        # Left column: Point A stacked above Point B (+ HOME-frame caption /
+        # workspace-hint). Right column: Oxy board, wide open. Used to be a
+        # side column squeezed beside two side-by-side point blocks, which
+        # clipped the right edge of the workspace circle — annulus must be
+        # fully visible or plot is worse than no plot. Stacking A/B left
+        # frees a dedicated column for it.
+        # grid, not pack, for the split: grid column weights unambiguous —
+        # column 0 at weight=0 gets EXACTLY its content's natural width,
+        # however wide `split` stretches from the scrollable body above.
+        # Nested pack fill="x" chains let left column balloon to container's
+        # full width (coordinate cards' grid columns have weight=1 of their
+        # own — see _build_coordinate_inputs — so widening their container
+        # widened cards too), pushing board off right edge with no h-scroll
+        # to reach it.
         split = tk.Frame(parent, bg=PANEL_BG)
         split.pack(fill="x")
         split.grid_columnconfigure(0, weight=0)
@@ -55,17 +52,15 @@ class P2PPanelMixin:
         left_col = tk.Frame(split, bg=PANEL_BG)
         left_col.grid(row=0, column=0, sticky="ns")
         right_col = tk.Frame(split, bg=PANEL_BG)
-        # sticky="n", NOT "nsew": column 1 has weight=1 so its CELL
-        # absorbs all leftover width (which varies with the window's own
-        # width, e.g. once the user resizes it wider than the default).
-        # right_col itself stays exactly as wide as the board and is
-        # CENTRED in that cell -- fixed padding looked right at one
-        # window size and left a lopsided gap at another; centring uses
-        # whatever space actually exists, on both sides, at any width.
+        # sticky="n", NOT "nsew": column 1 weight=1 so its CELL absorbs all
+        # leftover width (varies with window's own width on resize).
+        # right_col stays exactly board-width, CENTRED in that cell — fixed
+        # padding looked right at one window size, lopsided at another;
+        # centring uses whatever space exists, both sides, any width.
         right_col.grid(row=0, column=1, sticky="n")
 
-        # Inputs FIRST: the board reads x0_v..y1_v when it first paints, and
-        # building it before they exist would draw an empty plot.
+        # Inputs FIRST: board reads x0_v..y1_v on first paint; building it
+        # before they exist draws empty plot.
         self._build_coordinate_inputs(left_col)
         self._build_xy_board(right_col).pack(side="top", anchor="nw")
 
@@ -77,36 +72,32 @@ class P2PPanelMixin:
 
     # ── coordinates ──────────────────────────────────────────────────
     def _build_coordinate_inputs(self, parent):
-        # A directly above B — easier to compare X/Y/Z between the two by
-        # eye than the old side-by-side layout, and it is what leaves the
-        # right-hand column free for the board.
+        # A directly above B — easier to eyeball X/Y/Z between the two than
+        # old side-by-side layout, and frees right column for the board.
         start_col = tk.Frame(parent, bg=PANEL_BG)
         start_col.pack(side="top", fill="x")
         tk.Label(start_col, text="POINT A (mm from HOME)", bg=PANEL_BG, fg=TEXT_MUTED,
                  font=FONT_CAPTION).pack(anchor="w")
         start_grid = tk.Frame(start_col, bg=PANEL_BG)
         start_grid.pack(fill="x", pady=(4, 0))
-        # Defaults must be genuinely reachable. Z is measured UP FROM HOME
-        # (0..285) and the radius can never go below 133.2 mm, so "0,0,0"
-        # is still not a valid point even though it is the reference: at
-        # HOME the arm is retracted and its centre sits 133.2 mm out.
+        # Defaults must be genuinely reachable. Z measured UP FROM HOME
+        # (0..285), radius never below 133.2 mm — "0,0,0" still not a valid
+        # point even as reference: at HOME arm retracted, centre 133.2 mm out.
         self.x0_v = tk.StringVar(value=f"{DEFAULT_POINT_A[0]:g}")
         self.y0_v = tk.StringVar(value=f"{DEFAULT_POINT_A[1]:g}")
         self.z0_v = tk.StringVar(value=f"{DEFAULT_POINT_A[2]:g}")
         make_coord_card(start_grid, 0, "X0", AXIS_X_COLOR, self.x0_v, compact=True)
         make_coord_card(start_grid, 1, "Y0", AXIS_Y_COLOR, self.y0_v, compact=True)
         make_coord_card(start_grid, 2, "Z0", AXIS_Z_COLOR, self.z0_v, compact=True)
-        # make_coord_card sets weight=1 on each column (it also serves the
-        # old full-width side-by-side layout elsewhere). Here the row sits
-        # in the narrow left column, so pin the columns back to their
-        # natural size instead of stretching to fill it -- three compact
-        # cards, not three cards ballooned across the whole column.
+        # make_coord_card sets weight=1 on each column (also serves old
+        # full-width side-by-side layout elsewhere). Row sits in narrow left
+        # column here, so pin columns to natural size instead of stretching
+        # -- three compact cards, not ballooned across whole column.
         for _c in range(3):
             start_grid.grid_columnconfigure(_c, weight=0)
-        # The real height of the deck, live, right under the Z you typed.
-        # Z is from HOME now, so the entry alone no longer tells you where
-        # the arm actually is off the floor — and that is the number you
-        # compare against a cassette, a load port or a tape measure.
+        # Real height of deck, live, under the typed Z. Z is from HOME now,
+        # so entry alone no longer says where arm actually is off floor —
+        # that's the number compared against cassette, load port, tape measure.
         self.z0_real_v = tk.StringVar(value="")
         tk.Label(start_col, textvariable=self.z0_real_v, bg=PANEL_BG,
                  fg=AXIS_Z_COLOR, font=FONT_MONO).pack(anchor="w", pady=(2, 0))
@@ -131,29 +122,26 @@ class P2PPanelMixin:
                  fg=AXIS_Z_COLOR, font=FONT_MONO).pack(anchor="w", pady=(2, 0))
 
         self.z0_v.trace_add("write", self._sync_z_for_both_mode)
-        # Both readouts follow the typed value directly. Recomputing them
-        # only on LOAD would leave a stale height on screen for as long as
-        # the operator was still deciding, which is exactly when they are
-        # reading it.
+        # Readouts follow typed value directly. Recomputing only on LOAD
+        # would leave stale height on screen while operator still deciding
+        # — exactly when they're reading it.
         self.z0_v.trace_add("write", self._refresh_real_heights)
         self.z1_v.trace_add("write", self._refresh_real_heights)
-        # The board follows the boxes on every keystroke, so a typed target
-        # is visible before LOAD accepts or refuses it.
+        # Board follows boxes every keystroke, so typed target visible
+        # before LOAD accepts or refuses it.
         for _v in (self.x0_v, self.y0_v, self.x1_v, self.y1_v):
             _v.trace_add("write", lambda *_a: self._refresh_xy_board())
         self._refresh_real_heights()
 
-        # The frame, spelled out. HOME is the reference: X/Y from the
-        # turntable axis and signed, Z up from HOME and never negative.
+        # Frame spelled out. HOME is reference: X/Y from turntable axis,
+        # signed; Z up from HOME, never negative.
         #
-        # wraplength IS the actual fix for the board getting pushed off
-        # the right edge: an unwrapped one-line Label reports its NATURAL
-        # width as the full length of its text (~900+ px for this
-        # sentence), which made `left_col` that wide regardless of how
-        # compact the coordinate cards above it were -- the cards just
-        # sat left-aligned inside a column that was secretly enormous.
-        # Capped to the coordinate cards' own width, these wrap onto a
-        # few lines instead and the column shrinks to match the cards.
+        # wraplength IS the actual fix for board pushed off right edge:
+        # unwrapped one-line Label reports NATURAL width as full text length
+        # (~900+ px here), made `left_col` that wide regardless of how
+        # compact coordinate cards above were -- cards sat left-aligned in a
+        # secretly enormous column. Capped to cards' own width, wraps onto
+        # a few lines instead, column shrinks to match.
         _caption_width = 3 * 150   # ~= one row of 3 compact coord cards
         tk.Label(parent,
                  text=("HOME = X 0 · Y 0 · Z 0.  X, Y measured from the turntable "
@@ -162,13 +150,11 @@ class P2PPanelMixin:
                  bg=PANEL_BG, fg=TEXT_MUTED, wraplength=_caption_width,
                  justify="left",
                  font=FONT_MONO).pack(anchor="w", pady=(6, 0))
-        # The workspace line is LIVE, and it reports YOUR limits, not a
-        # structural envelope. The old line quoted a fixed 133.2–613.2 mm
-        # reach; that floor assumed the elbow's zero really is the folded
-        # home pose and that the fold angle is motor degrees over an
-        # unmeasured gear ratio. The IK no longer enforces it, so
-        # advertising it here would be worse than useless — it would name a
-        # boundary nothing applies.
+        # Workspace line is LIVE, reports YOUR limits, not structural
+        # envelope. Old line quoted fixed 133.2-613.2 mm reach; floor
+        # assumed elbow zero really is folded home pose and fold angle is
+        # motor degrees over unmeasured gear ratio. IK no longer enforces
+        # it, so advertising it here would name a boundary nothing applies.
         self.workspace_hint_v = tk.StringVar(value="")
         tk.Label(parent, textvariable=self.workspace_hint_v,
                  bg=PANEL_BG, fg=TEXT_MUTED, wraplength=_caption_width,
@@ -176,7 +162,6 @@ class P2PPanelMixin:
                  font=FONT_MONO).pack(anchor="w", pady=(2, 0))
         self._refresh_workspace_hint()
 
-    # ── arm selector ─────────────────────────────────────────────────
     def _build_arm_selector(self, parent):
         row = tk.Frame(parent, bg=PANEL_BG)
         row.pack(fill="x", pady=(14, 0))
@@ -198,7 +183,6 @@ class P2PPanelMixin:
                  bg=PANEL_BG, fg=TEXT_MUTED,
                  font=FONT_HINT).pack(side="left")
 
-    # ── computed IK targets ──────────────────────────────────────────
     def _build_computed_targets(self, parent):
         tk.Label(parent, text="COMPUTED JOINT TARGETS (d1 mm / RM ° / A1M base ° / A2M base °  —  base 0° = retracted, 90° = straight out)",
                  bg=PANEL_BG, fg=TEXT_MUTED,
@@ -230,7 +214,6 @@ class P2PPanelMixin:
         make_led_card(cards, 2, "A1M", a1_v, ARM_COLOR)
         make_led_card(cards, 3, "A2M", a2_v, ARM2_COLOR)
 
-    # ── live telemetry ───────────────────────────────────────────────
     def _build_telemetry(self, parent):
         tk.Label(parent, text="LIVE TELEMETRY (from ClearCore)", bg=PANEL_BG, fg=TEXT_MUTED,
                  font=FONT_CAPTION).pack(anchor="w", pady=(16, 0))
@@ -252,7 +235,6 @@ class P2PPanelMixin:
         tk.Label(parent, textvariable=self.calc_xyz_v, bg=PANEL_BG, fg=TEXT_MUTED,
                  font=FONT_MONO).pack(anchor="w", pady=(4, 0))
 
-    # ── progress ─────────────────────────────────────────────────────
     def _build_progress(self, parent):
         block = tk.Frame(parent, bg=PANEL_BG)
         block.pack(fill="x", pady=(10, 0))
@@ -270,7 +252,6 @@ class P2PPanelMixin:
         tk.Label(bar_row, textvariable=self.progress_pct_var, bg=PANEL_BG, fg=ACCENT_MINT,
                  font=FONT_MONO, width=5).pack(side="left", padx=(8, 0))
 
-    # ── buttons ──────────────────────────────────────────────────────
     def _build_p2p_buttons(self, parent):
         row1 = tk.Frame(parent, bg=PANEL_BG)
         row1.pack(pady=(18, 6))
@@ -291,26 +272,24 @@ class P2PPanelMixin:
                              "(not while a coordinate box has focus)",
                  bg=PANEL_BG, fg=TEXT_MUTED, font=FONT_HINT).pack()
 
-        # The plain STOP button is gone by request. EMERGENCY STOP remains:
-        # it is the single audited stop path (emergency_stop_all) that the
-        # SPACE key also fires, so removing STOP loses a duplicate, not the
-        # ability to halt a running program.
+        # Plain STOP button gone by request. EMERGENCY STOP remains: single
+        # audited stop path (emergency_stop_all) SPACE also fires — removing
+        # STOP lost a duplicate, not ability to halt a running program.
         row2 = tk.Frame(parent, bg=PANEL_BG)
         row2.pack(pady=(0, 4))
         RoundedButton(row2, text="EMERGENCY STOP", icon="⬛", bg_color=ACCENT_RED,
                       fg_color=INK_DARK, width=240, height=44,
                       command=self.emergency_stop_all).pack(side="left", padx=6)
 
-        # RESET COORDINATES lives here rather than in Settings: it is a
-        # machine action used while jogging the robot to its reference, and
-        # having to open a dialog to reach it meant leaving the controls you
-        # were using. Each button still confirms before acting. The JOG
-        # panel builds the same row from the same builder — see
-        # ui/coord_reset.py — so the two cannot drift apart.
+        # RESET COORDINATES lives here, not Settings: machine action used
+        # while jogging to reference; a dialog meant leaving the controls
+        # you were using. Each button still confirms before acting. JOG
+        # panel builds same row from same builder — see ui/coord_reset.py —
+        # so the two can't drift apart.
         self._build_plc_sensor_row(parent)
         self._build_coord_reset_row(parent)
 
-        # Every arm button is locked during motion — the original list left
-        # out "BOTH", so the config could still be switched mid-program.
+        # Every arm button locked during motion — original list left out
+        # "BOTH", so config could still be switched mid-program.
         self.motion_lock_widgets += [self.btn_p2p_load, self.btn_p2p_run, self.p2p_home_btn]
         self.motion_lock_widgets += list(self.arm_buttons.values())

@@ -1,12 +1,8 @@
-"""Tuning constants, machine geometry and protocol-level settings.
+"""Tuning constants, machine geometry, protocol settings.
 
-Everything in here is a plain value — no tkinter, no logic — so any other
-module can import it without pulling in the GUI.
+Plain values only — no tkinter, no logic — so any module can import w/o pulling in GUI.
 """
 
-# ------------------------------------------------------------------
-# Serial / connection
-# ------------------------------------------------------------------
 DEFAULT_COM_PORT = "COM7"
 DEFAULT_BAUD_RATE = "115200"
 BAUD_CHOICES = ["9600", "19200", "38400", "57600", "115200", "230400"]
@@ -16,31 +12,21 @@ HEARTBEAT_INTERVAL_MS = 3000
 MISSED_BEAT_LIMIT = 3
 SERIAL_POLL_MS = 50
 
-# ------------------------------------------------------------------
-# Jog (software simulation used when no hardware is confirmed)
-# ------------------------------------------------------------------
 JOG_SIM_TICK_MS = 50
 
 BOOST_LEVELS = [1.0, 1.5, 2.0]
 
 JOG_HEARTBEAT_MS = 150
 
-# ------------------------------------------------------------------
-# PID — ONE preset, from the Stepper MATLAB report, Table 2
-# ("normalised controller parameters as configured in Simulink").
+# PID: ONE preset, from Stepper MATLAB report Table 2 ("normalised controller params as configured in Simulink").
+# Plant from report (open-loop TF, ClearCore->TB6600->stepper->1:50 gearbox):
+#   G(s) = 12.5 / (s * (s + 12.5))   [rad per STEP pulse]
+# Pole placement for POT < 5% (zeta = 0.7071), ts ≈ 0.57 s.
 #
-# Plant identified in that report (open-loop transfer function of the
-# ClearCore -> TB6600 -> stepper -> 1:50 gearbox chain):
-#       G(s) = 12.5 / (s * (s + 12.5))          [rad per STEP pulse]
-# Designed by pole placement for POT < 5% (zeta = 0.7071), ts ≈ 0.57 s.
-#
-# The P / PI / PD alternatives and the PARALLEL / I-PD / PREFILTER form
-# selector were REMOVED in v9.1. Only this row was ever used on the
-# machine, and the form selector configured a controller structure that
-# does not exist on an open-loop board — a menu that changed nothing but
-# could still be set wrong. PID_ENABLED replaces it: one switch that says
-# whether these gains are in play at all.
-# ------------------------------------------------------------------
+# P/PI/PD alternatives + PARALLEL/I-PD/PREFILTER form selector REMOVED v9.1: only this row
+# ever used on machine, form selector configured a structure that doesn't exist on open-loop
+# board (changed nothing, could still be set wrong). PID_ENABLED replaces it: one switch, gains
+# in play or not.
 PID_PRESET = {
     "kp": 24.97, "ki": 120.00, "kd": 1.33, "n": 50.0, "ts": 0.57,
     "note": "Pole placement, ζ = 0.7071, ts ≈ 0.57 s. The only gain set "
@@ -57,37 +43,28 @@ N_FILTER_MIN, N_FILTER_MAX = 1.0, 200.0
 
 DEFAULT_PID_ENABLED = True
 
-# ------------------------------------------------------------------
-# SPEED — ONE UNIVERSAL RPM, ONE PERCENTAGE PER MOTOR
+# SPEED: one universal RPM, one percentage per motor.
+#   axisMotorRpm = master_rpm * (axis_pct / 100) * AXIS_RPM_SCALE
 #
-#     axisMotorRpm = master_rpm * (axis_pct / 100) * AXIS_RPM_SCALE
+# AXIS_RPM_SCALE = calibration, not user setting. 3 axes geared differently, raw pct of one
+# shared RPM meaningless:
+#   RM 28.4375:1 -> 140 motor RPM = 29.5°/s   scale 1.000
+#   ZM 20mm/rev  -> 105 motor RPM = 35.0mm/s  scale 0.750
+#   AM ratio UNMEASURED -> runs at master RPM  scale 1.000
 #
-# AXIS_RPM_SCALE is CALIBRATION, not a user setting. The three axes are
-# geared completely differently, so a raw percentage of one shared RPM
-# would mean nothing:
+# AM's scale was 0.030 (from "25°/s = 4.17 motor RPM"), only valid if ARM_GEAR_RATIO were 1.0.
+# On machine 100°/s still visibly slow -> proof elbow has real reduction, motor throttled to
+# ~17 RPM while other axes ran 100+. Scale now 1.0: arm pct maps straight to master motor RPM
+# like RM does, old 100°/s ceiling gone.
 #
-#     RM  28.4375:1  ->  140 motor RPM gives  29.5 °/s     scale 1.000
-#     ZM  20 mm/rev  ->  105 motor RPM gives  35.0 mm/s    scale 0.750
-#     AM  ratio UNMEASURED -> runs at the master RPM        scale 1.000
-#
-# AM's scale was 0.030, derived from "25 °/s = 4.17 motor RPM", which only
-# held if ARM_GEAR_RATIO were really 1.0. On the machine, 100 °/s was
-# still visibly slow — proof the elbow has a real reduction and the motor
-# was being throttled to ~17 RPM while every other axis ran at 100+. Its
-# scale is now 1.0, so the arm's percentage maps straight to the master
-# motor RPM exactly like RM's does, and its old 100 °/s ceiling is gone.
-#
-# RM and ZM are still clamped to a real engineering ceiling because their
-# gearing is known. The arm is bounded in MOTOR RPM instead — the only
-# unit on that axis that currently means anything, and the one that
-# guards the hazard that actually exists: an open-loop stepper skipping
-# steps at high RPM with no encoder to notice.
-# ------------------------------------------------------------------
+# RM/ZM still clamped to real engineering ceiling (gearing known). Arm bounded in MOTOR RPM
+# instead — only unit on that axis that means anything, guards real hazard: open-loop stepper
+# skipping steps at high RPM, no encoder to notice.
 MASTER_RPM_NOMINAL = 140.0
 
-ROT_RPM_SCALE = 140.0 / MASTER_RPM_NOMINAL     
-Z_RPM_SCALE = 105.0 / MASTER_RPM_NOMINAL       
-ARM_RPM_SCALE = 1.0                            
+ROT_RPM_SCALE = 140.0 / MASTER_RPM_NOMINAL
+Z_RPM_SCALE = 105.0 / MASTER_RPM_NOMINAL
+ARM_RPM_SCALE = 1.0
 
 AXIS_RPM_SCALES = {
     "rot_pct": ROT_RPM_SCALE,
@@ -103,12 +80,6 @@ DEFAULT_ROT_PCT = 75.0
 DEFAULT_Z_PCT = 50.0
 
 AXIS_PCT_MIN = 1.0
-
-SPEED_WARN_PCT = {
-    "rot_pct": DEFAULT_ROT_PCT,
-    "arm_pct": DEFAULT_ARM_PCT,
-    "z_pct": DEFAULT_Z_PCT,
-}
 
 SPEED_FIELDS = {
     "rot_pct": ("RM — rotation", "%", DEFAULT_ROT_PCT, AXIS_PCT_MIN, None),
@@ -141,12 +112,6 @@ ACCEL_KEYS = ("rot_acc_pct", "arm_acc_pct", "z_acc_pct")
 
 ACCEL_WIRE_KEYS = ("rot_acc_pct", "arm_acc_pct", "z_acc_pct")
 
-ACCEL_WARN_PCT = {
-    "rot_acc_pct": DEFAULT_ROT_ACC_PCT,
-    "arm_acc_pct": DEFAULT_ARM_ACC_PCT,
-    "z_acc_pct": DEFAULT_Z_ACC_PCT,
-}
-
 ROT_ACC_MAX_DEG_S2 = 400.0
 Z_ACC_MAX_MM_S2 = 400.0
 ARM_ACC_RPM_MAX = 2000.0
@@ -155,131 +120,91 @@ ROT_VEL_MAX_DEG_S = 120.0
 Z_VEL_MAX_MM_S = 140.0
 ARM_MOTOR_RPM_MAX = 400.0
 
-# ------------------------------------------------------------------
-# MACHINE GEOMETRY — STCR4000S twin frog-leg arm
+# MACHINE GEOMETRY — STCR4000S twin frog-leg arm.
+# SOURCE OF TRUTH: MATLAB_v4_final/mophong_init.m (Simscape model driven by SolidWorks
+# assembly). Symbol names mirror that file for eyeball diffing.
 #
-# SOURCE OF TRUTH: MATLAB_v4_final/mophong_init.m (the Simscape model
-# driven by the SolidWorks assembly). Symbol names below deliberately
-# mirror that file so the two can be diffed by eye.
+# Cross-checked vs JEL drawing MTCR4160-300-AM (related model, same line):
+#   "340degree (Rotation angle)"  -> ROT span        AGREES
+#   "160 160"                     -> A4_MM/A5_MM     AGREES
+#   "575 (robot centre->wafer centre)" -> see REACH below
+#   "315 (robot centre->3rd joint)"    -> see REACH below
+#   "674.5/662.5 end-effector levels"  -> 12mm arm gap vs 9mm in MATLAB model. MATLAB wins:
+#       sim + firmware must agree w/ CAD that generates them; drawing is different model no.
+#       CONFIRM ON BENCH.
 #
-# Cross-checked against JEL reference drawing MTCR4160-300-AM (a closely
-# related model in the same product line):
-#     "340degree (Rotation angle)"           -> ROT span         AGREES
-#     "160   160"                            -> A4_MM / A5_MM    AGREES
-#     "575 (robot centre -> wafer centre)"   -> see REACH below
-#     "315 (robot centre -> 3rd joint)"      -> see REACH below
-#     "674.5 / 662.5 end-effector levels"    -> 12 mm arm gap, vs 9 mm in
-#         the MATLAB model. The MATLAB value wins because the simulation
-#         and this firmware must agree with the CAD that generates them;
-#         the drawing is a different model number. CONFIRM ON THE BENCH.
-#
-# The previous revision of this file modelled the arm as
-#     reach = 2 * 157.5 * cos(theta),  theta 0..90, reach 0..315
-# which is wrong in three ways: the links are 160 mm (not 157.5), the
-# reach carries a fixed +293.2 mm offset from A3 + A6 that was missing
-# entirely, and reach therefore never approaches 0. See the audit note
-# at the bottom of this section.
+# Prior revision modelled arm as reach = 2*157.5*cos(theta), theta 0..90, reach 0..315 — wrong
+# 3 ways: links are 160mm not 157.5, reach missing fixed +293.2mm offset (A3+A6), so reach never
+# approached 0. See audit note below.
 # ------------------------------------------------------------------
 import math
 
-# SOLVED FROM TWO BENCH MEASUREMENTS, not from mophong_init.m.
+# SOLVED FROM TWO BENCH MEASUREMENTS, not mophong_init.m.
+# Only the two SUMS below measured; split within each pair not, since reach curve only uses sums:
+#   R = (a3+a6) - (a4+a5) * cos(frog-leg angle)
+#   HOME, frog-leg 0deg:   (a3+a6)-(a4+a5) = 240mm  measured
+#   straight, 180deg:      (a3+a6)+(a4+a5) = 605mm  measured
+#   -> a3+a6 = 422.5, a4+a5 = 182.5
 #
-# Only the two SUMS below are measured; the split within each pair is not,
-# because the reach curve only ever uses the sums:
+# a3 keeps old 45.0 (base radius unchanged), a6 carries correction; a4/a5 stay equal. If links
+# measured individually later, only sums must be preserved.
 #
-#     R = (a3 + a6) - (a4 + a5) * cos(frog-leg angle)
-#
-#     HOME, frog-leg   0 deg:  (a3+a6) - (a4+a5) = 240 mm   measured
-#     straight, 180 deg:       (a3+a6) + (a4+a5) = 605 mm   measured
-#     -> a3 + a6 = 422.5,  a4 + a5 = 182.5
-#
-# a3 keeps its old 45.0 (the base radius is the one part that did not
-# change) and a6 carries the correction; a4/a5 stay equal. If someone later
-# measures the links individually, only the sums have to be preserved.
-#
-# The .m file still says 45/160/160/248.2 -> 133.2..613.2 mm. mophong_init.m
-# is NOT the reference for this machine - it is wrong in several places and
-# was abandoned as ground truth. The bench measurements above are.
+# .m file still says 45/160/160/248.2 -> 133.2..613.2mm. mophong_init.m NOT reference for this
+# machine — wrong in several places, abandoned as ground truth. Bench measurements above are.
 A3_MM = 45.0
 A4_MM = 91.25
 A5_MM = 91.25
 A6_MM = 377.5
 
-D_BASE_MM = 388.0      
-D3_ARM1_MM = 50.0      
-D3_ARM2_MM = 41.0      
+D_BASE_MM = 388.0
+D3_ARM1_MM = 50.0
+D3_ARM2_MM = 41.0
 D4_MM = 46.5
 D5_MM = 24.8
 D6_MM = 5.0
 
-Z_OFFSET_ARM1_MM = D_BASE_MM + D3_ARM1_MM + D4_MM + D5_MM + D6_MM  
-Z_OFFSET_ARM2_MM = D_BASE_MM + D3_ARM2_MM + D4_MM + D5_MM + D6_MM  
-ARM2_Z_DROP_MM = D3_ARM1_MM - D3_ARM2_MM                           
+Z_OFFSET_ARM1_MM = D_BASE_MM + D3_ARM1_MM + D4_MM + D5_MM + D6_MM
+Z_OFFSET_ARM2_MM = D_BASE_MM + D3_ARM2_MM + D4_MM + D5_MM + D6_MM
+ARM2_Z_DROP_MM = D3_ARM1_MM - D3_ARM2_MM
 
-I_RM_TOTAL = 1 * 6.5       
+I_RM_TOTAL = 1 * 6.5
 
-# ------------------------------------------------------------------
-# THE ELBOW: MOTOR DEGREES vs FROG-LEG DEGREES
+# ELBOW: MOTOR DEGREES vs FROG-LEG DEGREES — two different numbers. Board MEASURES motor shaft
+# rotation only (counts step pulses). Frog-leg link angle DERIVED from it via this ratio.
 #
-# These are two different numbers. What the board can MEASURE is motor
-# shaft rotation — it counts step pulses and nothing else. The frog-leg
-# link angle is DERIVED from it, and the derivation needs this ratio.
+# SOURCE (MATLAB_v4_final: mophongv2.slx + mophong_init.m): Simscape root diagram drives each
+# arm's two revolute joints from one AM1/AM2 signal:
+#   AM1 --x(-1)--> Revolute3 [banxoay:canhtay1]  SHOULDER
+#       --x(-2)--> Revolute  [canhtay1:canhtay2] KNEE
+# mophong_init.m FK agrees in closed form: upper link at (th2+th3_math), lower at
+# (th2-th3_math) — symmetric about radial line, so knee turns TWICE angle of driven link.
 #
-# WHERE IT COMES FROM (MATLAB_v4_final: mophongv2.slx + mophong_init.m)
-# --------------------------------------------------------------------
-# The Simscape root diagram drives each arm's TWO revolute joints from the
-# one AM1/AM2 signal:
+# Elbow motor coupled to knee: one frog-leg degree costs two motor degrees.
+#   fold_deg  = motor_deg / ARM_GEAR_RATIO
+#   motor_deg = fold_deg  * ARM_GEAR_RATIO
 #
-#     AM1 --x(-1)--> Revolute3   [banxoay : canhtay1]   the SHOULDER
-#         --x(-2)--> Revolute    [canhtay1 : canhtay2]  the KNEE
+# CONFIRM ON BENCH — derived from model, not measured. Mark elbow, command known motor
+# revolutions, divide by frog-leg angle actually swept. If not 2, change here AND firmware (or
+# SET_ARM_RATIO to running board, no re-flash needed).
 #
-# and mophong_init.m's forward kinematics says the same thing in closed
-# form: the upper link sits at (th2 + th3_math), the lower at
-# (th2 - th3_math) — symmetric about the radial line, so the knee turns
-# through TWICE the angle the driven link does.
-#
-# The elbow motor is coupled to the knee, so one frog-leg degree costs two
-# motor degrees:
-#
-#     fold_deg  = motor_deg / ARM_GEAR_RATIO
-#     motor_deg = fold_deg  * ARM_GEAR_RATIO
-#
-# >>> CONFIRM ON THE BENCH. <<< This is derived from the model, not
-# measured off the machine. Mark the elbow, command a known number of
-# motor revolutions and divide by the frog-leg angle actually swept. If it
-# is not 2, change it here AND in the firmware (or send SET_ARM_RATIO to a
-# running board, which needs no re-flash).
-#
-# RM is the counter-example that shows this is the right shape: its ratio
-# has been in the model all along as 1/4.375 then 1/6.5.
-# ------------------------------------------------------------------
-ARM_GEAR_RATIO = 7.80       # MEASURED: physical arm reaches 575 mm (straight out) at the
-                             # motor position the old 10.0 ratio mapped to 498 mm.
-                             # Derived: new = old * fold_angle(498mm) / fold_angle(575mm)
-                             #              = 10.0 * 114.45 / 146.68 = 7.80
+# RM shows this shape is right: its ratio always in model, as 1/4.375 then 1/6.5.
+ARM_GEAR_RATIO = 7.80
+# MEASURED: arm reaches 575mm (straight out) at motor position old 10.0 ratio mapped to 498mm.
+# new = old * fold_angle(498mm) / fold_angle(575mm) = 10.0 * 114.45 / 146.68 = 7.80
 
 
 I_ARM_TOTAL = ARM_GEAR_RATIO
 
-# ZM ballscrew: carriage travel per motor revolution.
-# ------------------------------------------------------------------
-# ZM LEAD — MEASURE THIS
+# ZM LEAD — MEASURE THIS. Carriage travel per motor rev. 20 assumed, never measured — decides
+# whether commanded mm is real mm.
 #
-# Carriage travel per motor revolution. 20 was assumed, never measured, and
-# it is the one number that decides whether a commanded millimetre is a real
-# millimetre.
+# If carriage travels FURTHER than commanded, true lead LARGER in exact proportion: 10mm
+# command moving 30mm means 3*20=60mm/rev. Non-power-of-2 factor (e.g. 3) points at mechanics
+# (lead screw pitch, pulley ratio), not driver microstep switches (only err by powers of 2).
 #
-# If the carriage travels FURTHER than commanded, the true lead is LARGER in
-# exact proportion: a 10 mm command that moves 30 mm means 3 * 20 = 60
-# mm/rev. A non-power-of-2 factor like 3 points at the mechanics (lead screw
-# pitch, pulley ratio) rather than the driver's microstep switches, which
-# only ever err by powers of two.
-#
-# Measure with a rule on the carriage over a long move — 100 mm, not 10, so
-# the reading error is small — then set it here AND send SET_Z_LEAD to the
-# board (which needs no re-flash). A wrong lead also moves where every ZM
-# soft limit physically is, because those are in millimetres.
-# ------------------------------------------------------------------
+# Measure w/ rule on carriage over long move (100mm not 10, smaller reading error), set here
+# AND send SET_Z_LEAD to board (no re-flash). Wrong lead also moves where every ZM soft limit
+# physically is (stored in mm).
 Z_MM_PER_MOTOR_REV = 20.0
 
 
@@ -345,43 +270,34 @@ ACCEL_PREVIEW_BY_KEY = {p[1]: p for p in ACCEL_PREVIEW}
 ARM_LINK_SUM_MM = A4_MM + A5_MM            
 ARM_RADIAL_OFFSET_MM = A3_MM + A6_MM       
 
-# MEASURED ON THE MACHINE. mophong_init.m is no longer the reference.
+# MEASURED ON MACHINE. mophong_init.m no longer reference.
+# .m frame put HOME at th3_cad 60deg, 133.2mm reach, arm straight at 613.2mm. Neither survived
+# contact w/ machine: HOME measures 240mm from turntable axis, arm straight at ~605mm. Those
+# two numbers are what A3..A6 above solved from — see note beside them.
 #
-# The .m file's frame put HOME at th3_cad 60 deg and a 133.2 mm reach, with
-# the arm straight at 613.2 mm. Neither figure survived contact with the
-# machine: HOME measures 240 mm from the turntable axis and the arm goes
-# straight at ~605 mm. Those two numbers are what A3..A6 above are solved
-# from - see the note beside them.
+# So HOME is frog-leg 0, not 60. Frog-leg opens full 180deg over travel, base link swings half
+# (0..90deg) since knee geared 2:1 vs shoulder — makes base = fold/2 exact, not approximation.
 #
-# So HOME is frog-leg 0, not 60. The frog-leg opens through a full 180 deg
-# over the travel, and the base link swings half of that, 0..90 deg,
-# because the knee is geared 2:1 against the shoulder. That is what makes
-# base = fold / 2 exact rather than an approximation.
-#
-# CONSEQUENCE: the MATLAB parity sweep in tests/python_check.py cannot pass
-# any more. That is intended - the .m was found to be wrong in several
-# places and dropped as ground truth. Do NOT adjust the numbers here to
-# make that sweep go green; re-point the test at these measurements or
-# retire it.
+# CONSEQUENCE: MATLAB parity sweep in tests/python_check.py can't pass anymore. Intended — .m
+# found wrong in several places, dropped as ground truth. Do NOT adjust numbers here to make
+# sweep green; re-point test at these measurements or retire it.
 ARM_ZERO_CAD_DEG = 0.0
 
 FOLD_ANGLE_HOME_DEG = 0.0
-# The rated working reach, 575 mm, sits BELOW the 605 mm straight-arm pose
-# on purpose: 180 deg is the singularity and no program should be planning
-# up against it. 146.68 deg is the fold angle that puts the wafer centre at
-# 575 mm under the measured geometry.
+# Rated working reach 575mm sits BELOW 605mm straight-arm pose on purpose: 180deg is
+# singularity, no program should plan up against it. 146.68deg = fold angle putting wafer
+# centre at 575mm under measured geometry.
 FOLD_ANGLE_SPEC_MAX_DEG = 146.68
 FOLD_ANGLE_MIN_DEG = FOLD_ANGLE_HOME_DEG
 FOLD_ANGLE_MAX_DEG = 180.0
 
-# Straight out is the singularity, so this keeps the same 10 deg of warning
-# before it that the old 110-of-120 gave.
+# Straight out = singularity; keeps same 10deg warning before it that old 110-of-120 gave.
 FOLD_ANGLE_SINGULARITY_WARN_DEG = 170.0
 
 
 def _reach_at(fold_deg):
-    """Reach for an angle in the from-home frame. The +ARM_ZERO_CAD_DEG
-    is the one place the CAD frame is reintroduced."""
+    """Reach for angle in from-home frame. +ARM_ZERO_CAD_DEG is the one place CAD frame
+    reintroduced."""
     return ARM_RADIAL_OFFSET_MM - ARM_LINK_SUM_MM * math.cos(
         math.radians(fold_deg + ARM_ZERO_CAD_DEG))
 
@@ -409,51 +325,33 @@ ARM_MOTOR_MIN_DEG = FOLD_ANGLE_MIN_DEG * ARM_GEAR_RATIO
 ARM_MOTOR_MAX_DEG = FOLD_ANGLE_MAX_DEG * ARM_GEAR_RATIO    
 ARM_SIM_MIN_DEG, ARM_SIM_MAX_DEG = ARM_MOTOR_MIN_DEG, ARM_MOTOR_MAX_DEG
 
-# ------------------------------------------------------------------
-# OPERATOR-DEFINED WORKING LIMITS
+# OPERATOR-DEFINED WORKING LIMITS. Everything above = FACTORY envelope (what structure allows).
+# What machine may actually use is narrower, depends on install around it (cassette, chamber
+# port, cable loop). Limits belong to operator: editable in Settings, capturable from current
+# position ("set here as lower/upper limit").
 #
-# Everything above is the FACTORY envelope — what the structure allows.
-# What the machine may actually use is narrower and depends on what is
-# installed around it: a cassette, a chamber port, a cable loop. Those
-# limits belong to the operator, so they are editable in Settings and can
-# also be captured straight from the machine's current position
-# ("set here as lower / upper limit").
+# Each arm has OWN pair — sharing one arm limit is how v8 let A2M drive past its stop while
+# A1M's angle was the one checked.
 #
-# Each arm has its OWN pair. Sharing one arm limit is exactly how v8 let
-# A2M be driven past its stop while A1M's angle was the one being checked.
+# Board holds these in RAM only; GUI is system of record, writes to JSON, re-sends every connect.
 #
-# The board holds these in RAM only, so the GUI is the system of record:
-# it writes them to a JSON file and re-sends them on every connect.
-#
-#   key -> (label, firmware axis, end, unit, factory floor, factory ceil,
-#           default, decimals)
-# ------------------------------------------------------------------
-# How far a TAUGHT elbow boundary may sit. Deliberately far wider than
-# the CAD envelope: the number the board reports for an elbow is scaled by
-# ARM_GEAR_RATIO, which has not been measured, so a captured position can
-# legitimately land well outside 60°–180°. Narrowing this would reject the
-# very teaching it exists to support.
-#: Kept only so older saved files and the firmware constant names still
-#: resolve. Nothing validates against these any more — see LIMIT_FIELDS.
+#   key -> (label, firmware axis, end, unit, factory floor, factory ceil, default, decimals)
+# How far a TAUGHT elbow boundary may sit. Deliberately far wider than CAD envelope: board's
+# reported elbow number scaled by unmeasured ARM_GEAR_RATIO, so captured position can land well
+# outside 60-180deg. Narrowing would reject the teaching it exists to support.
+# Kept only so older saved files/firmware constant names resolve. Nothing validates against
+# these anymore — see LIMIT_FIELDS.
 ARM_LIMIT_FLOOR_DEG = None
 ARM_LIMIT_CEIL_DEG = None
 
-# ------------------------------------------------------------------
-# DEFAULT BOUNDARIES SIT INSIDE THE FACTORY ENVELOPE
+# DEFAULT BOUNDARIES SIT INSIDE FACTORY ENVELOPE. Defaults used to BE factory envelope, meaning
+# untaught machine would drive axis to mechanical end stop — soft limit == hard stop, protected
+# nothing. First real test = collision, not warning.
 #
-# The defaults used to BE the factory envelope, which meant a machine
-# nobody had taught yet would happily drive an axis to its mechanical end
-# stop — the soft limit and the hard stop were the same position, so the
-# soft limit protected nothing. On a first real test that is a collision,
-# not a warning.
+# Each default now inset by margin below. Factory envelope unchanged, still outer bound; these
+# are just numbers before anyone teaches better ones, deliberately timid.
 #
-# Each default is now inset by the margin below. The factory envelope is
-# unchanged and still the outer bound; these are just the numbers you get
-# before anybody teaches better ones, and they are deliberately timid.
-#
-# Widen them by teaching (SET HERE) once the real stops are known, which is
-# the workflow these boundaries exist for.
-# ------------------------------------------------------------------
+# Widen by teaching (SET HERE) once real stops known — that's the workflow these exist for.
 LIMIT_SAFETY_MARGIN = {
     "Z": 5.0,      
     "ROT": 5.0,    
@@ -484,6 +382,21 @@ DEFAULT_LIMITS_ENABLED = True
 
 PLC_LINK_ENABLED_KEY = "plc_link_enabled"
 DEFAULT_PLC_LINK_ENABLED = True
+
+# Per-sensor boundary switch for M30/M31/M32 — separate from the taught
+# soft limits above and from the master PLC_LINK_ENABLED_KEY (which stops
+# the whole PLC socket, HOME included). This is for one BROKEN switch: a
+# stuck or noisy sensor should not have to take HOME and the other two
+# axes' protection down with it. Disabled -> the axis is never stopped by
+# that switch, AND the switch stops counting toward the M30+M31+M32 HOME
+# condition (a broken switch would otherwise block HOME forever).
+PLC_SENSOR_ENFORCE_BY_AXIS = {
+    "Z":   "plc_sensor_z_enforced",
+    "ROT": "plc_sensor_rot_enforced",
+    "A2":  "plc_sensor_a2_enforced",
+}
+PLC_SENSOR_ENFORCE_KEYS = tuple(PLC_SENSOR_ENFORCE_BY_AXIS[a] for a in ("Z", "ROT", "A2"))
+DEFAULT_PLC_SENSOR_ENFORCED = True
 
 LIMIT_FIELDS = {
     "lim_z_min":   ("Lower limit",     "Z",   "MIN", "mm",
@@ -528,85 +441,56 @@ LIMIT_LIVE_SOURCE = {
     "Z": "sim_z", "ROT": "sim_rot", "A1": "sim_a1", "A2": "sim_a2",
 }
 
-# ------------------------------------------------------------------
-# PLC LINK — MELSEC MC Protocol 3E, ASCII, TCP
+# PLC LINK — MELSEC MC Protocol 3E, ASCII, TCP. Mirrors firmware's PLC section; nothing here
+# opens a socket — GUI talks ClearCore over serial, ClearCore is the MC protocol client.
+# Constants exist so console can SAY what board talks to, wrong address visible in one place
+# not buried in a .ino nobody has open.
 #
-# Mirrors the PLC section of the firmware. Nothing here opens a socket:
-# the GUI talks to the ClearCore over serial and the ClearCore is the MC
-# protocol client. These constants exist so the operator console can SAY
-# what the board is talking to, and so a wrong address is visible in one
-# place rather than only in a .ino nobody has open.
-#
-# If you change one of these, change the matching #define in
-# RobotMotionController_v9_ClearCore.ino and re-flash. They are two
-# copies on purpose — the board must work driven from a bare terminal
-# with no GUI at all — but they must not disagree.
-# ------------------------------------------------------------------
+# Change one -> change matching #define in RobotMotionController_v9_ClearCore.ino, re-flash.
+# Two copies on purpose (board must work from bare terminal, no GUI) but must not disagree.
 PLC_IP = "192.168.3.101"
 PLC_PORT = 1025
 PLC_CLEARCORE_IP = "192.168.3.200"
-PLC_POLL_IDLE_MS = 5000
-PLC_POLL_HOMING_MS = 200
+PLC_POLL_IDLE_MS = 20
+PLC_POLL_HOMING_MS = 10
 PLC_POLL_MS = PLC_POLL_IDLE_MS
 
 PLC_DEVICE_MAP = (
     ("X0",  "HOME request (wired from ClearCore IO-0)", "wire"),
     ("M0",  "RUN",           "plc"),
-    ("M1",  "DONE",          "read"),
     ("M2",  "rHOME",         "plc"),
     ("M3",  "STOP",          "plc"),
     ("M4",  "rJOG",          "plc"),
-    ("M5",  "MinZ  (ZM home sensor)",  "read"),
-    ("M6",  "OutR  (RM home sensor)",  "read"),
-    ("M7",  "OutR1 (A1M home sensor)", "read"),
-    ("M8",  "OutR2 (A2M home sensor)", "read"),
-    ("M10", "Run ZM",        "read"),
-    ("M11", "Run RM",        "read"),
-    ("M12", "Run A1M",       "read"),
-    ("M13", "Run A2M",       "read"),
+    ("M30", "ZM travel limit",  "read"),
+    ("M31", "RM travel limit",  "read"),
+    ("M32", "A2M travel limit", "read"),
     ("M20", "AUTO",          "plc"),
     ("M21", "HOME",          "plc"),
     ("M23", "sHOME",         "plc"),
 )
 
-PLC_HOME_SENSOR_BITS = {
-    "M5": ("Z",   "MinZ",  "ZM lift"),
-    "M6": ("ROT", "OutR",  "RM turntable"),
-    "M7": ("A1",  "OutR1", "A1M arm 1 elbow"),
-    "M8": ("A2",  "OutR2", "A2M arm 2 elbow"),
-}
 
-# ------------------------------------------------------------------
-# THE M5..M8 SENSOR PANEL, shown in BOTH motion modes
+# M30..M32 TRAVEL LIMITS — the ONLY PLC devices read, shown in BOTH motion modes.
+# (bit, axis label, firmware axis token, jog command that drives INTO it, which end: -1 min,
+# +1 max)
 #
-# (bit, axis label, firmware axis token, blocked jog command, wired)
+# The panel used to show M5..M8, the home sensors. They were read, lit a lamp, and decided
+# NOTHING — while M30 was the bit actually refusing a jog and had no lamp anywhere. An
+# operator watching "M5 ZM lift = CLEAR" while ZM refused to move down was reading a device
+# that has no say in it. M1 (DONE) and M10..M13 (run) went the same way: HOME completes on
+# M30..M32, so nothing else needed reading.
 #
-# M5 and M6 are wired and working: while covered, the axis may not be
-# driven FURTHER INTO the stop. The opposite direction stays available —
-# a sensor that blocked both would pin the machine on its own home switch.
-#
-# M7 and M8 are BROKEN on this machine, so they are `wired = False`:
-# displayed as a placeholder, never acted on. A dead sensor read as "not at
-# the limit" simply never blocks; read as "at the limit" it would freeze
-# both elbows for good.
-# ------------------------------------------------------------------
-# (bit, axis label, firmware axis token, jog command that drives INTO it,
-#  which end of the axis it sits at: -1 minimum, +1 maximum)
-#
-# All four are wired and working, and they sit at OPPOSITE ends:
-#   M5 MinZ  -> ZM at the bottom      \ the HOME end
-#   M6 OutR  -> RM at the CCW stop    /
-#   M7 OutR1 -> A1M fully EXTENDED    \ the FAR end
-#   M8 OutR2 -> A2M fully EXTENDED    /
-#
-# HOME STATE is M5 and M6 covered while M7 and M8 are CLEAR: at home the
-# lift is down, the turntable is at 0, and both arms are pulled IN — which
-# is the opposite end from where M7/M8 sit.
+# While covered, an axis may not drive FURTHER INTO its switch. The opposite direction stays
+# available — blocking both would pin the machine on its own limit with no way off.
+# ZM AND A2M ARE SWAPPED FROM THE OBVIOUS ORDER, measured on the machine: M32 tracks ZM
+# (covered at the bottom of the stroke, clearing as Z rises), M30 is A2M's. The tidy
+# M30=ZM order was an assumption, and it made ZM watch a bit that sits at 1 — so every
+# Z_DOWN was refused wherever the carriage really was. Keep this in step with
+# PLC_M_LIMIT_* in the firmware; python_check.py asserts the two agree.
 PLC_SENSOR_PANEL = (
-    ("M5", "ZM  lift",      "Z",   "Z_DOWN",   -1),
-    ("M6", "RM  turntable", "ROT", "ROT_CCW",  -1),
-    ("M7", "A1M arm 1",     "A1",  "A1_FWD",   +1),
-    ("M8", "A2M arm 2",     "A2",  "A2_FWD",   +1),
+    ("M32", "ZM  lift",      "Z",   "Z_DOWN",  -1),
+    ("M31", "RM  turntable", "ROT", "ROT_CW",  +1),
+    ("M30", "A2M arm 2",     "A2",  "A2_BACK", -1),
 )
 
 PLC_SENSOR_JOINT_INDEX = {"Z": 0, "ROT": 1, "A1": 2, "A2": 3}
@@ -617,8 +501,9 @@ PLC_SENSOR_STALE_MS = 15000
 
 PLC_SENSOR_BROKEN_TEXT = "NO SENSOR"
 
-PLC_HOME_STATE_ON_BITS = ("M5", "M6")
-PLC_HOME_STATE_CLEAR_BITS = ("M7", "M8")
+# HOME STATE = all three limits true. Same condition the board homes on.
+PLC_HOME_STATE_ON_BITS = ("M30", "M31", "M32")
+PLC_HOME_STATE_CLEAR_BITS = ()
 
 PLC_STATUS_POLL_MS = HEARTBEAT_INTERVAL_MS
 
@@ -627,6 +512,7 @@ PLC_LED_STATES = {
     "connected":   ("CONNECTED",   "ACCENT_GREEN"),
     "no_reply":    ("NO REPLY",    "ACCENT_ORANGE"),
     "unreachable": ("UNREACHABLE", "ACCENT_RED"),
+    "disabled":    ("DISABLED",    "TEXT_MUTED"),
 }
 
 PLC_HOME_REQUEST_DEVICE = "X0"
@@ -660,16 +546,12 @@ DEFAULT_POINT_A = (240.0, 0.0, 45.0)
 DEFAULT_POINT_B = (250.0, 250.0, 135.0)
 
 ARM_CONFIGS = ("A1M", "A2M", "BOTH")
-ELBOW_CONFIGS = ARM_CONFIGS 
+ELBOW_CONFIGS = ARM_CONFIGS
 
-# ------------------------------------------------------------------
-# Jog command vocabulary — single source of truth. Previously three
-# separate copies of this map lived in the app class and drifted apart.
-# ------------------------------------------------------------------
-# A1M and A2M are separate motors on separate frog-leg linkages, so each
-# gets its own jog axis. ARM_FWD/ARM_BACK are kept on the wire as the
-# "both arms together" gesture that was tested on real hardware, and are
-# what the LINK toggle sends.
+# Jog command vocabulary, single source of truth — previously 3 copies in app class, drifted
+# apart. A1M/A2M separate motors on separate frog-leg linkages, each own jog axis. ARM_FWD/
+# ARM_BACK kept on wire as "both arms together" gesture tested on real hardware, sent by LINK
+# toggle.
 JOG_STOP_COMMAND = {
     "ROT_CW": "ROT_STOP",
     "ROT_CCW": "ROT_STOP",
@@ -704,15 +586,9 @@ LIMIT_OPPOSITE = {
     "Z_DOWN": "Z_UP",
 }
 
-# ------------------------------------------------------------------
-# Keyboard bindings
-#
-# These are no longer hard-coded. They live in `keybinds.py`, are editable
-# in Settings → Controls, and persist to keybinds.json. The names below
-# are kept because the rest of the app reads them, but they are DERIVED —
-# anything that needs the live layout after a rebinding must call
-# keybinds.active_map() rather than capture these at import.
-# ------------------------------------------------------------------
+# Keyboard bindings no longer hard-coded — live in keybinds.py, editable Settings->Controls,
+# persist to keybinds.json. Names below kept since rest of app reads them, but DERIVED — needs
+# live layout after rebind must call keybinds.active_map(), not capture these at import.
 from . import keybinds as _kb
 
 JOG_KEYMAP = _kb.to_tk_keymap(_kb.active_map())

@@ -17,8 +17,7 @@ __all__ = ["RobotControlApp", "main", "__version__"]
 
 
 def __getattr__(name):
-    """Import the GUI lazily so `robot_sim.kinematics` and `robot_sim.config`
-    can be imported (and unit-tested) on machines without tkinter."""
+    """Lazy GUI import: lets robot_sim.kinematics/config import (and be unit-tested) w/o tkinter."""
     if name in ("RobotControlApp", "main"):
         from . import app
         return getattr(app, name)

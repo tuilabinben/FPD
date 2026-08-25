@@ -15,7 +15,6 @@ NO_PORT_LABEL = "No COM ports"
 
 
 class SerialLinkMixin:
-    # ── port discovery ───────────────────────────────────────────────
     def refresh_com_ports(self):
         if not serial_backend.HAS_SERIAL:
             self.log("WARNING: the 'pyserial' library is not installed. "
@@ -33,8 +32,8 @@ class SerialLinkMixin:
 
         previous = self.com_var.get()
         self.com_combo["values"] = ports
-        # Keep the user's current selection if it survived the rescan,
-        # instead of always snapping back to the default port.
+        # Keep user's current selection if it survived rescan, instead of
+        # always snapping back to default port.
         if previous in ports:
             self.com_combo.set(previous)
         elif DEFAULT_COM_PORT in ports:
@@ -43,7 +42,6 @@ class SerialLinkMixin:
             self.com_combo.set(ports[0])
         self.log(f"Found {len(ports)} COM port(s): {', '.join(ports)}")
 
-    # ── connect / disconnect ─────────────────────────────────────────
     def toggle_connection(self):
         if self.is_connected:
             self.disconnect_serial()
@@ -75,13 +73,13 @@ class SerialLinkMixin:
 
         self.is_connected = True
         self._missed_beats = 0
-        # Invalidate any RX pump left over from a previous session so two
+        # Invalidates any RX pump left over from a previous session, so two
         # listener loops can never run at once after a reconnect.
         self._rx_generation += 1
 
         set_led(self.com_led_card, "OPEN", ACCENT_GREEN)
         set_led(self.hw_led_card, "WAITING...", ACCENT_ORANGE)
-        # Unknown until the board answers PLC_STATUS.
+        # Unknown until board answers PLC_STATUS.
         self._plc_link_lost()
 
         self.btn_connect.set_config("DISCONNECT", ACCENT_RED, icon="❌")
@@ -107,7 +105,7 @@ class SerialLinkMixin:
 
         self._cancel_jobs("_ping_timeout_job", "_heartbeat_job", "_hb_blink_job")
 
-        # Safety: treat any disconnect as an all-stop.
+        # Safety: treats any disconnect as an all-stop.
         self.is_running = False
         self.is_homing = False
         self._cancel_jobs("anim_job", "_jog_sim_job")
@@ -124,7 +122,7 @@ class SerialLinkMixin:
 
     def _close_port(self):
         """Closes the port, swallowing driver errors (a yanked USB cable
-        makes close() itself raise — the old code let that crash the app)."""
+        makes close() itself raise — old code let that crash the app)."""
         if self.ser is None:
             return
         try:
@@ -135,7 +133,6 @@ class SerialLinkMixin:
         finally:
             self.ser = None
 
-    # ── TX ───────────────────────────────────────────────────────────
     def send(self, msg: str, log_tx=True):
         """Writes one newline-terminated command. No-op when offline, so
         every caller can send unconditionally."""
@@ -150,7 +147,7 @@ class SerialLinkMixin:
                 self.log(f">> {line}", tag="tx")
         except Exception as e:
             self.log(f"Serial write failed: {e}", tag="error")
-            # A write failure means the link is gone — drop it instead of
+            # Write failure means link is gone — drop it instead of
             # silently pretending to still be connected.
             self._on_link_failure()
 
@@ -161,10 +158,9 @@ class SerialLinkMixin:
             self.log("Lost the physical COM connection — disconnecting.", tag="error")
             self._do_disconnect()
 
-    # ── RX ───────────────────────────────────────────────────────────
-    # Cap the number of lines consumed per tick so a flooded serial
-    # buffer (e.g. from Ethernet socket cycling) cannot block the
-    # Tkinter event loop for hundreds of milliseconds.
+    # Caps lines consumed per tick so a flooded serial buffer (e.g. from
+    # Ethernet socket cycling) can't block the Tkinter event loop for
+    # hundreds of milliseconds.
     _RX_MAX_LINES_PER_TICK = 20
 
     def _listen_hardware_response(self, generation):

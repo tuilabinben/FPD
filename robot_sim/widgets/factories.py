@@ -1,10 +1,9 @@
 """Composite-widget factories: sections, LED wells, coordinate cards.
 
-Every container here is a RoundedFrame, so nothing in the app has a hard
-90-degree corner any more. The rule that carries real information is
-unchanged: anything you can TYPE IN or PRESS uses a lighter surface,
-anything read-only uses the darkest one (LED_BG). That is the operator's
-cue for what is touchable, so it holds without exception.
+Every container here = RoundedFrame — no hard 90-degree corner anywhere
+in app. Rule that matters: anything TYPE IN or PRESS uses lighter
+surface, read-only uses darkest (LED_BG). Operator's cue for what's
+touchable — holds without exception.
 """
 
 import tkinter as tk
@@ -82,8 +81,8 @@ def make_status_led(parent, label, initial_text, initial_color):
 def set_led(led_dict, text, color):
     led_dict["var"].set(text)
     card = led_dict["card"]
-    # RoundedFrame draws its own outline, so recolouring goes through the
-    # widget rather than through a Tk highlight option.
+    # RoundedFrame draws own outline — recolour goes through widget, not
+    # Tk highlight option.
     if isinstance(card, RoundedFrame):
         card.set_border(mix(LED_BG, color, 0.40))
     led_dict["label"].config(fg=color)
@@ -91,12 +90,12 @@ def set_led(led_dict, text, color):
 
 def make_coord_card(parent, col, badge_text, badge_color, var, unit="mm",
                     compact=False):
-    """Labelled numeric entry used for the X/Y/Z coordinate inputs.
-    Returns the tk.Entry so callers can enable/disable it.
+    """Labelled numeric entry for X/Y/Z coordinate inputs.
+    Returns tk.Entry so callers can enable/disable it.
 
-    `compact=True` trims padding and the entry width for a layout where
-    the row sits in a narrow column rather than stretched full-width —
-    the P2P panel's Point A/B cards, once the board took the wide column.
+    `compact=True` trims padding/entry width for narrow-column layout,
+    not stretched full-width — P2P panel's Point A/B cards, once board
+    took wide column.
     """
     parent.grid_columnconfigure(col, weight=1)
     card = RoundedFrame(parent, bg=ENTRY_BG, radius=RADIUS_MD,
@@ -134,10 +133,10 @@ def make_led_card(parent, col, title, var, color):
 
 
 def make_well(parent, radius=RADIUS_MD, bg=LED_BG, border=None):
-    """A recessed rounded panel for grouped information — the speed
-    reference readout, the help text, the saved-limit-set row.
+    """Recessed rounded panel for grouped info — speed reference readout,
+    help text, saved-limit-set row.
 
-    Returns the RoundedFrame; pack into `.body`.
+    Returns RoundedFrame; pack into `.body`.
     """
     return RoundedFrame(parent, bg=bg, radius=radius,
                         border=border or BORDER_SOFT, border_w=1)
@@ -145,12 +144,11 @@ def make_well(parent, radius=RADIUS_MD, bg=LED_BG, border=None):
 
 def make_inset_entry(parent, var, width=10, justify="right",
                      font=FONT_ENTRY):
-    """Text field as a rounded well.
+    """Text field as rounded well.
 
-    Returns (wrapper, entry). The border lives on the WRAPPER so callers
-    can recolour it — for a warning or an error — without touching the
-    entry and without the field changing size, which would make the whole
-    form twitch as you type.
+    Returns (wrapper, entry). Border lives on WRAPPER so callers can
+    recolour it (warning/error) without touching entry, without field
+    resizing — would make whole form twitch as you type.
     """
     wrap = RoundedFrame(parent, bg=ENTRY_BG, radius=RADIUS_MD,
                         border=BORDER, border_w=2)

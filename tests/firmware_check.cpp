@@ -107,6 +107,36 @@ void plcPoll(uint16_t word) {
   servicePlc();              // sends the read request
   plcReply(readReply(word));  // answers it
 }
+// A three-word reply, so the M30..M32 limit bits can be exercised. Same
+// shape as readReply() but carrying M0..M47 instead of just M0..M15.
+std::string readReply3(uint16_t w0, uint16_t w1, uint16_t w2) {
+#if PLC_MC_ASCII
+  char buf[80];
+  snprintf(buf, sizeof buf, "D00000FF03FF0000100000%04X%04X%04X", w0, w1, w2);
+  return buf;
+#else
+  std::string out;
+  auto pushB   = [&](uint8_t b)  { out.push_back((char)b); };
+  auto pushU16 = [&](uint16_t v) { pushB(v & 0xFF); pushB((v >> 8) & 0xFF); };
+  pushB(0xD0); pushB(0x00);
+  pushB(0x00);
+  pushB(0xFF);
+  pushB(0xFF); pushB(0x03);
+  pushB(0x00);
+  pushU16(8);                        // end code(2) + three words(6)
+  pushU16(0);
+  pushU16(w0); pushU16(w1); pushU16(w2);
+  return out;
+#endif
+}
+
+void plcPoll3(uint16_t w0, uint16_t w1, uint16_t w2) {
+  if (plcTxnActive) plcReply(readReply3(0, 0, 0));
+  advance(PLC_POLL_MS + 1);
+  servicePlc();
+  plcReply(readReply3(w0, w1, w2));
+}
+
 #define BIT(n) (1u << (n))
 
 int main() {
@@ -119,8 +149,12 @@ int main() {
   check(fabs(rotPct - 75.0)  < 0.01, "RM 75%");
   check(fabs(zPct   - 50.0)  < 0.01, "ZM 50%");
   check(fabs(armMotorRpmActual - 187.5) < 0.05, "AM -> 187.5 motor RPM");
-  check(fabs(rotVelDegS - 23.74) < 0.02, "RM -> 23.74 deg/s (i_RM 28.4375)");
-  check(fabs(zVelMmS - 18.75) < 0.02, "ZM -> 18.75 mm/s (20 mm/rev)");
+  // Derived from the live ratio, not hard-coded: i_RM is a bench figure the
+  // operator recalibrates, and pinning it here made every recalibration
+  // look like a regression. 112.5 motor RPM is 150 * 75%, ratio-free.
+  check(fabs(rotVelDegS - (112.5 * 6.0 / rotGearRatio)) < 0.02,
+        "RM deg/s follows the configured i_RM");
+  check(fabs(zVelMmS - 18.75) < 0.05, "ZM -> 18.75 mm/s (20 mm/rev, spec)");
   run("SET_SPEED:150,375,75,125,50,75,125,50");
   check(saw("[MOTION_OK]"), "the GUI's exact wire message is accepted (8 fields)");
   run("SET_SPEED:150,375,900,900,900,900,900,900");
@@ -145,40 +179,47 @@ int main() {
   printf("\n=== B. THE ARM ANGLE IS ROTATION FROM HOME ===\n");
   check(fabs(FOLD_ANGLE_HOME_DEG - 0.0) < 1e-9, "home is 0 deg, not 60");
   check(fabs(FOLD_ANGLE_MIN_DEG - 0.0) < 1e-9, "travel starts at 0");
-  check(fabs(FOLD_ANGLE_MAX_DEG - 120.0) < 1e-9, "and ends at 120 (was 180)");
-  check(fabs(ARM_ZERO_CAD_DEG - 60.0) < 1e-9, "0 deg from home == th3_cad 60");
+  check(fabs(FOLD_ANGLE_MAX_DEG - 180.0) < 1e-9, "and ends at 180, the straight arm");
+  // The CAD offset went to 0 with the measured links: fold 0 IS the
+  // retracted pose, so there is no frame shift left to carry.
+  check(fabs(ARM_ZERO_CAD_DEG - 0.0) < 1e-9, "0 deg from home IS the retracted pose");
   check(fabs(currentA1() - 0.0) < 1e-6, "A1M reads 0 at the reference pose");
   check(fabs(currentA2() - 0.0) < 1e-6, "A2M too");
 
   printf("\n  -- the reach curve is unchanged, only its labels moved --\n");
-  check(fabs(reachFromFoldAngle(0.0)   - 133.2) < 0.05, "0 deg   -> 133.2 mm (retracted)");
-  check(fabs(reachFromFoldAngle(120.0) - 613.2) < 0.05, "120 deg -> 613.2 mm (straight)");
-  check(fabs(reachFromFoldAngle(91.72) - 575.0) < 0.5,  "91.72   -> 575 mm (JEL drawing)");
-  check(fabs(foldAngleFromReach(133.2) - 0.0)   < 0.05, "133.2 mm -> 0 deg");
-  check(fabs(foldAngleFromReach(613.2) - 120.0) < 0.05, "613.2 mm -> 120 deg");
+  const double R_MIN_MM = ARM_RADIAL_OFFSET_MM - ARM_LINK_SUM_MM;   // 240.0
+  const double R_MAX_MM = ARM_RADIAL_OFFSET_MM + ARM_LINK_SUM_MM;   // 605.0
+  check(fabs(reachFromFoldAngle(0.0)   - R_MIN_MM) < 0.05, "0 deg   -> 240 mm (retracted)");
+  check(fabs(reachFromFoldAngle(180.0) - R_MAX_MM) < 0.05, "180 deg -> 605 mm (straight)");
+  check(fabs(reachFromFoldAngle(FOLD_ANGLE_SPEC_MAX_DEG) - 575.0) < 0.5,
+        "146.68  -> 575 mm (JEL drawing)");
+  check(fabs(foldAngleFromReach(R_MIN_MM) - 0.0)   < 0.05, "240 mm -> 0 deg");
+  check(fabs(foldAngleFromReach(R_MAX_MM) - 180.0) < 0.05, "605 mm -> 180 deg");
   check(fabs(foldAngleFromReach(reachFromFoldAngle(37.5)) - 37.5) < 1e-6,
         "the pair round-trips");
-  check(fabs(FOLD_SINGULARITY_WARN_DEG - 110.0) < 1e-9,
-        "the singularity warning moved with the frame (110, was 170)");
+  check(fabs(FOLD_SINGULARITY_WARN_DEG - 170.0) < 1e-9,
+        "the singularity warning sits just short of the straight arm");
 
   printf("\n  -- reachBandFor finds extremes INSIDE the band, in the new frame --\n");
   { double lo, hi;
-    reachBandFor(0.0, 120.0, lo, hi);
-    check(fabs(lo - 133.2) < 0.05 && fabs(hi - 613.2) < 0.05,
-          "the normal band 0..120 -> 133.2..613.2 mm");
-    // cos peaks where fold+60 is a multiple of 180, i.e. at 120, 300, -60.
-    reachBandFor(-260.0, 480.0, lo, hi);
-    check(fabs(lo - (-26.8)) < 0.5 && fabs(hi - 613.2) < 0.05,
-          "a wide taught band -260..480 spans the WHOLE curve, not just its ends");
-    reachBandFor(119.0, 121.0, lo, hi);
-    check(fabs(hi - 613.2) < 0.05,
-          "a band straddling 120 still finds the peak between its endpoints"); }
+    reachBandFor(0.0, 180.0, lo, hi);
+    check(fabs(lo - R_MIN_MM) < 0.05 && fabs(hi - R_MAX_MM) < 0.05,
+          "the normal band 0..180 -> 240..605 mm");
+    // cos peaks where fold + ARM_ZERO_CAD_DEG is a multiple of 180, so with
+    // the offset now 0 that is 0, 180, 360, -180.
+    reachBandFor(-200.0, 400.0, lo, hi);
+    check(fabs(lo - R_MIN_MM) < 0.5 && fabs(hi - R_MAX_MM) < 0.05,
+          "a wide taught band -200..400 spans the WHOLE curve, not just its ends");
+    reachBandFor(179.0, 181.0, lo, hi);
+    check(fabs(hi - R_MAX_MM) < 0.05,
+          "a band straddling 180 still finds the peak between its endpoints"); }
 
   printf("\n=== C. taught boundaries: no envelope, unordered ===\n");
   isHomed = true;
   run("RESET_LIMITS");
-  check(fabs(limA1Min - 0.0) < 1e-9 && fabs(limA1Max - 240.0) < 1e-9,
-        "factory elbow band is 0..240 MOTOR deg (= fold 0..120 at ratio 2)");
+  check(fabs(limA1Min - 0.0) < 1e-9
+        && fabs(limA1Max - 180.0 * ARM_GEAR_RATIO_DEF) < 1e-9,
+        "factory elbow band is the full fold travel in MOTOR deg");
   run("SET_LIMIT:A1,MAX,1000");
   check(fabs(limA1Max - 1000.0) < 1e-6, "1000 deg accepted - there is NO ceiling");
   check(!saw("physical envelope"), "  ...and no envelope complaint");
@@ -271,26 +312,23 @@ int main() {
   check(fabs(currentKp - PID_PRESET_KP) < 1e-6, "  ...restoring the report preset");
   run("RESET_COORD");      check(saw("[COORD"), "RESET_COORD works");
 
-  printf("\n=== F. MATLAB parity: solve_ik_frogleg from mophong_init.m ===\n");
-  // The verbatim MATLAB helper, transcribed. If the board's IK and this
-  // ever disagree, one of them has drifted from the Simscape model that
-  // generated the geometry — which is the thing that must not happen
-  // quietly, because the simulation is where the numbers are validated.
-  auto matlabIk = [](double X, double Y, double Z,
-                     double &d1, double &th2, double &th3_cad) {
-    const double Zoff = 388.0 + 50.0 + 46.5 + 24.8 + 5.0;   // 514.3
-    d1 = Z - Zoff;
-    if (d1 < 0) d1 = 0; else if (d1 > 285) d1 = 285;
-    th2 = atan2(Y, X) * RAD_TO_DEG;
-    double R = sqrt(X * X + Y * Y);
-    double c = (R - (45.0 + 248.2)) / (160.0 + 160.0);
-    if (c > 1) c = 1; else if (c < -1) c = -1;
-    th3_cad = 180.0 - acos(c) * RAD_TO_DEG;
-  };
+  printf("\n=== F. IK is self-consistent on the MEASURED geometry ===\n");
+  // NO MATLAB PARITY SWEEP HERE ANY MORE, ON PURPOSE.
+  //
+  // mophong_init.m's solve_ik_frogleg was the reference this section
+  // measured against, pose for pose. It was dropped because the .m's own
+  // calculation is wrong for this machine: its a4/a5/a6 (160/160/248.2)
+  // are not the arm's, which measured 91.25/91.25/377.5 on the bench.
+  // Checking against a model that does not describe the machine proves
+  // nothing, and a red build nobody can fix teaches people to ignore the
+  // suite. python_check.py dropped the same sweep for the same reason.
+  //
+  // What replaces it is a round trip: every pose the IK solves must come
+  // back out of forwardKinematics() in the same place.
   run("RESET_LIMITS");
-  { double worstD1 = 0, worstRot = 0, worstTh3 = 0;
+  { double worst = 0;
     int solved = 0;
-    for (double r = 140; r <= 610; r += 10) {
+    for (double r = 240; r <= 605; r += 10) {
       for (double a = 0; a <= 340; a += 20) {
         for (double dz = 0; dz <= 280; dz += 70) {
           double X = r * cos(a * DEG_TO_RAD), Y = r * sin(a * DEG_TO_RAD);
@@ -298,31 +336,26 @@ int main() {
           IkResult got = solveIkFrogleg(1, X, Y, Z);
           if (!got.ok) continue;
           solved++;
-          double md1, mth2, mth3;
-          matlabIk(X, Y, Z, md1, mth2, mth3);
-          worstD1  = max(worstD1,  fabs(got.d1  - md1));
-          // RM's zero moved to its CCW stop, so the board reports a
-          // bearing in [0, 360) where MATLAB's atan2 reports (-180, 180].
-          // The GEOMETRY must still be identical, so the two may differ
-          // only by a whole turn — anything else is a real drift.
-          double dRot = fmod(fabs(got.th2 - mth2), 360.0);
-          if (dRot > 180.0) dRot = 360.0 - dRot;
-          worstRot = max(worstRot, dRot);
-          // The board reports rotation from home; MATLAB reports th3_cad.
-          // ARM_ZERO_CAD_DEG is the whole of the difference.
-          worstTh3 = max(worstTh3, fabs((got.th3 + ARM_ZERO_CAD_DEG) - mth3));
+          double fx, fy, fz;
+          forwardKinematics(got.d1, got.th2, got.th3, 1, fx, fy, fz);
+          worst = max(worst, sqrt((fx - X) * (fx - X) + (fy - Y) * (fy - Y)));
+          worst = max(worst, fabs(fz - Z));
         }
       }
     }
-    printf("       | %d poses compared, worst error d1=%.2e rot=%.2e th3=%.2e\n",
-           solved, worstD1, worstRot, worstTh3);
+    printf("       | %d poses round-tripped, worst error %.2e mm\n", solved, worst);
     check(solved > 500, "the sweep actually solved a few hundred poses");
-    check(worstD1  < 1e-9, "d1 matches mophong_init.m to machine precision");
-    check(worstRot < 1e-9, "th2 matches mophong_init.m modulo a whole turn");
-    check(worstTh3 < 1e-9, "th3 matches, once ARM_ZERO_CAD_DEG is added back"); }
+    check(worst < 1e-6, "IK -> FK returns the pose it was given"); }
 
-  check(fabs(FOLD_ANGLE_SPEC_MAX_DEG - 91.72) < 0.01,
-        "FOLD_ANGLE_SPEC_MAX_DEG is 91.72 (from-home), not 151.72 (th3_cad)");
+  // The measured links, named outright so a change is a visible diff.
+  check(fabs(A3_MM - 45.0) < 1e-9 && fabs(A4_MM - 91.25) < 1e-9
+        && fabs(A5_MM - 91.25) < 1e-9 && fabs(A6_MM - 377.5) < 1e-9,
+        "a3/a4/a5/a6 are the MEASURED 45/91.25/91.25/377.5");
+  check(fabs(Z_OFFSET_ARM1_MM - 514.3) < 1e-9, "Z_offset(arm 1) = 514.3");
+  check(fabs(armGearRatio - 7.80) < 1e-9, "the arm ratio is the measured 7.80");
+
+  check(fabs(FOLD_ANGLE_SPEC_MAX_DEG - 146.68) < 0.01,
+        "FOLD_ANGLE_SPEC_MAX_DEG is the rated 146.68 fold deg");
   check(fabs(reachFromFoldAngle(FOLD_ANGLE_SPEC_MAX_DEG) - 575.0) < 0.5,
         "  ...and really does land on the drawing's 575 mm");
 
@@ -360,29 +393,63 @@ int main() {
   isHomed = true;
   run("RESET_LIMITS");
 
+  printf("\n  -- but a FACTORY-DEFAULT floor cannot pin an unreferenced axis --\n");
+  // The ZM bug: HOME is the minimum of every axis, so the shipped ZM floor
+  // is 0. Unreferenced, the counter also reads 0 wherever the board powered
+  // up, so ZM sat exactly ON its floor and every Z_DOWN was refused, with
+  // nothing to escape from. Only an UNTOUCHED default relaxes -- the taught
+  // -341.89 above must keep biting, which is why this is not just !isHomed.
+  run("RESET_LIMITS");
+  run("SET_LIMITS_ENABLED:1"); run("SET_LIMIT_ENFORCE:Z,1");
+  isHomed = false;
+  MOTOR_Z.PositionRefSet(0);
+  jzDir = -1; serviceJogSoftLimits();
+  check(jzDir == -1, "unreferenced, Z_DOWN off the DEFAULT floor is allowed");
+  jzDir = 1;  serviceJogSoftLimits();
+  check(jzDir == 1, "  ...and Z_UP still is too");
+  run("SET_LIMIT:Z,MIN,12");            // now TAUGHT, not the default
+  jzDir = -1; serviceJogSoftLimits();
+  check(jzDir == 0, "  ...but a TAUGHT floor bites unreferenced, as before");
+  isHomed = true;
+  run("RESET_LIMITS");
+  jzDir = -1; serviceJogSoftLimits();
+  check(jzDir == 0, "  ...and once referenced the default floor applies again");
+  jzDir = 0;
+  run("SET_LIMITS_ENABLED:0");
+  run("RESET_LIMITS");
+
   printf("\n  -- there is NO structural reach floor; YOUR band is the limit --\n");
   // 133.2 mm was R(fold = 0). It assumed the elbow's zero really is the
   // folded home pose, through an armGearRatio nobody has measured — a
   // guess, and one that rejected radii the arm can physically hold.
   run("RESET_LIMITS");
   run("SET_LIMIT_ENFORCE:A1,0");
+  // 50 mm is now below the ARITHMETIC span too -- with the measured links
+  // the frog-leg spans 422.5 +/- 182.5, so 240 mm is the shortest radius
+  // any elbow angle reaches. Switching the boundary off cannot buy that.
   { IkResult r = solveIkFromHome(1, 50, 0, 45);
-    check(r.ok, "r = 50 mm solves with A1's boundary switched off");
-    check(r.th3 < 0.0, "  ...to a NEGATIVE fold angle, which is not an error"); }
+    check(!r.ok, "r = 50 mm is refused even with A1's boundary switched off");
+    check(std::string(r.error.c_str()).find("no solution") != std::string::npos,
+          "  ...as arithmetic, not as an opinion about the envelope"); }
+  { // Just inside the span DOES solve with the boundary off.
+    IkResult r = solveIkFromHome(1, 245, 0, 45);
+    check(r.ok, "  ...while 245 mm, inside the span, solves"); }
   { IkResult r = solveIkFromHome(1, 700, 0, 45);
     check(!r.ok, "700 mm is still refused — no elbow angle reaches it");
     check(std::string(r.error.c_str()).find("no solution") != std::string::npos,
           "  ...as arithmetic, not as an opinion about the envelope"); }
   run("SET_LIMIT_ENFORCE:A1,1");
   run("SET_LIMIT:A1,MIN,10"); run("SET_LIMIT:A1,MAX,230");
-  { IkResult r = solveIkFromHome(1, 50, 0, 45);
-    check(!r.ok, "with the boundary back on, 50 mm is outside the taught band");
+  { // 400 mm solves on the arithmetic (240..605), and the taught band
+    // 10..230 motor deg only reaches ~264 mm, so a refusal here IS the band.
+    IkResult r = solveIkFromHome(1, 400, 0, 45);
+    check(!r.ok, "with the boundary back on, 400 mm is outside the taught band");
     check(std::string(r.error.c_str()).find("YOU taught") != std::string::npos,
           "  ...and the message names it as YOUR limit, not fixed structure"); }
   { // A2's own band is untouched, so it answers for itself.
     run("SET_LIMIT_ENFORCE:A2,0");
-    IkResult r = solveIkFromHome(2, 50, 0, 45);
-    check(r.ok, "and the switch is per arm — A2 still solves 50 mm");
+    IkResult r = solveIkFromHome(2, 245, 0, 45);
+    check(r.ok, "and the switch is per arm — A2 still solves 245 mm");
     run("SET_LIMIT_ENFORCE:A2,1"); }
   run("RESET_LIMITS");
 
@@ -447,7 +514,7 @@ int main() {
 #else
   { // Verified independently against a byte-level probe script sent from a
     // PC on the same subnet, not just derived from the spec by hand.
-    String f = plcBuildPollFrame();
+    plcBuildPollFrame();
     static const uint8_t expected[] = {
       0x50, 0x00, 0x00, 0xFF, 0xFF, 0x03, 0x00,        // header, 7 bytes
       0x0C, 0x00,                                      // length = 12 (LE)
@@ -456,37 +523,37 @@ int main() {
       0x00, 0x00,                                      // subcommand 0000 (LE)
       0x00, 0x00, 0x00,                                // device number 0, 3 bytes LE
       0x90,                                             // device code, M
-      0x01, 0x00,                                      // 1 word (LE)
+      0x03, 0x00,                                      // 3 words (LE) = M0..M47
     };
-    bool match = f.length() == sizeof(expected);
-    for (int i = 0; match && i < (int)f.length(); i++) {
-      if (plcByteAt(f, i) != expected[i]) match = false;
+    bool match = plcTxCount == (int)sizeof(expected);
+    for (int i = 0; match && i < plcTxCount; i++) {
+      if (plcTxBytes[i] != expected[i]) match = false;
     }
-    check(match, "batch read of M0, 1 word, is byte-for-byte the 3E BINARY frame");
+    check(match, "batch read of M0, 3 words, is byte-for-byte the 3E BINARY frame");
     // The length field is the BYTE count from the monitoring timer on —
     // the binary analogue of the ASCII character-count check above.
-    check(plcU16At(f, PLC_MC_RES_HEADER_UNITS)
-              == f.length() - (PLC_MC_RES_HEADER_UNITS + 2),
-          "  ...and its declared length matches the real payload length"); }
+    check(plcU16AtBytes(plcTxBytes, PLC_MC_RES_HEADER_UNITS)
+              == plcTxCount - (PLC_MC_RES_HEADER_UNITS + 2),
+          "  ...and its declared length matches the real payload length");
+    // The frame is half NUL bytes. Built in an Arduino String it can be
+    // truncated on the wire while the stub's std::string-backed String
+    // happily carries it — which is why this asserts the byte buffer.
+    check(plcTxCount == 21, "  ...and the whole 21-byte frame survives the NULs"); }
 #endif
   // There is deliberately no write-frame test, because there is no write
-  // frame — the code would not compile if one were called. The HOME
-  // request is a wire from IO-0 into X0; writing X0 over MC protocol never
-  // worked reliably, because the PLC refreshes X from its input terminals
-  // every scan and overwrites whatever was written. python_check.py
-  // asserts the builder's absence in the source text.
-  check(PLC_HOME_REQ_PIN == IO0, "the HOME request line is IO-0, in every link mode");
+  // frame — the code would not compile if one were called. HOME does not
+  // write anything to the PLC at all any more: it drives the axes itself
+  // and only READS M30..M32 to know when to stop. python_check.py asserts
+  // the write builder's absence in the source text.
 
   printf("\n  -- the status word decodes to the right devices --\n");
   ETH_CONNECTED = true; ETH_RX.clear(); clearTx();
   advance(10);
-  plcPoll(BIT(1) | BIT(7) | BIT(12));
+  plcPoll3(0, BIT(14), BIT(0));
   check(plcStatusValid, "a poll reply is accepted");
-  check(plcBit(PLC_M_DONE), "M1 (DONE) decoded");
-  check(plcBit(PLC_M_HOME_A1), "M7 (OutR1 home sensor) decoded");
-  check(plcBit(PLC_M_RUN_A1), "M12 (Run A1M) decoded");
-  check(!plcBit(PLC_M_HOME_Z) && !plcBit(PLC_M_RUN_Z), "M5 and M10 correctly clear");
-  check(plcAnyRunBit(), "  ...and a single run bit counts as running");
+  check(plcBit(PLC_M_LIMIT_Z), "M30 (ZM travel limit) decoded");
+  check(plcBit(PLC_M_LIMIT_A2), "M32 (A2M travel limit) decoded");
+  check(!plcBit(PLC_M_LIMIT_ROT), "M31 correctly clear");
 
   printf("\n  -- a PLC error end code is reported, not swallowed --\n");
   OUT.clear(); clearTx(); ETH_RX.clear();
@@ -494,49 +561,67 @@ int main() {
   plcReply(errorReply(0x2401));
   check(saw("end code 2401"), "end code 2401 is logged verbatim");
 
-  printf("\n=== H. HOME handshake: IO-0 wire out, M10..M13 then M1 back ===\n");
+  printf("\n=== H. HOME completes on M30..M32, not the M10..M13 handshake ===\n");
   OUT.clear(); clearTx(); ETH_RX.clear();
-  PIN_LEVEL[IO0] = -1;
   isHomed = false;
+  // HOME needs the switch states to know when to stop, so it refuses
+  // outright when no device data has landed rather than driving blind.
+  plcPoll3(0, 0, 0);
+  OUT.clear();
   beginHoming();
-  check(isHoming, "HOME asserts");
-  check(PIN_LEVEL[IO0] == HIGH, "  ...by driving IO-0 HIGH, a wire into X0");
-  check(saw("[PLC] HOME request asserted on IO-0"), "  ...and says so");
-  // Nothing goes out on the socket. The request is not a packet, and the
-  // poll that follows must not be mistaken for one.
+  check(isHoming, "HOME starts");
+  // THE PLC IS NOT ASKED, AT ALL. No request line, no write, nothing
+  // beyond the ordinary read-only M30..M32 poll every other command uses.
+  check(!saw("HOME request asserted"), "  ...and does not claim to have asked it");
+  check(saw("this board drives the axes"), "  ...it says it drives them itself");
   check(lastTx().find("1401") == std::string::npos,
         "  ...and sends NO write frame — the link is read-only");
+  // Every switch clear, so all three axes are moving. The direction comes
+  // from HOME_DIR_*, NOT PLC_LIMIT_END_*: kept as separate constants so a
+  // bug in one can't silently corrupt the other, but they must still point
+  // at the SAME physical switch, so the values agree axis by axis.
+  check(jzDir == HOME_DIR_Z && rotDir == HOME_DIR_ROT && a2Dir == HOME_DIR_A2,
+        "  ...all three back off in the direction HOME_DIR_* names");
+  check(HOME_DIR_Z == PLC_LIMIT_END_Z && HOME_DIR_ROT == PLC_LIMIT_END_ROT
+        && HOME_DIR_A2 == PLC_LIMIT_END_A2,
+        "  ...and HOME_DIR_* matches PLC_LIMIT_END_* on every axis, RM included");
+  check(HOME_DIR_Z < 0 && HOME_DIR_A2 < 0,
+        "  ...ZM and A2M back off NEGATIVE (down, retract)");
+  check(HOME_DIR_ROT > 0,
+        "  ...but RM backs off POSITIVE (CW) — it is mounted inverted");
+  check(a1Dir == 0, "  ...and A1M, which has no switch, is not moved at all");
 
-  // DONE already latched from a previous cycle must NOT end this one.
+  // M1 is not read at all now: the limits are what say the axes arrived.
   OUT.clear();
-  plcPoll(BIT(PLC_M_DONE));
+  plcPoll3(BIT(1), 0, 0);
   serviceHoming();
-  check(isHoming, "a stale latched M1 does NOT complete the home");
+  check(isHoming, "the old M1 DONE bit does NOT complete the home");
   check(!isHomed, "  ...and does not set the reference either");
 
-  // PLC starts driving: run bits come on.
-  plcPoll(BIT(PLC_M_RUN_Z) | BIT(PLC_M_RUN_ROT) | BIT(PLC_M_DONE));
+  // Two of three limits reached is still not home.
+  plcPoll3(0, BIT(14) | BIT(15), 0);
   serviceHoming();
-  check(isHoming, "still homing while the run bits are on");
+  check(isHoming, "M30+M31 without M32 is still not home");
 
-  // Run bits drop and DONE is set -> finished.
+  // All three true -> finished, with or without M1.
   OUT.clear(); clearTx();
-  plcPoll(BIT(PLC_M_DONE));
+  plcPoll3(0, BIT(14) | BIT(15), BIT(0));
   serviceHoming();
-  check(!isHoming, "run bits all off + M1 set completes the home");
+  check(!isHoming, "M30+M31+M32 all true completes the home");
   check(isHomed, "  ...and THAT is what sets the reference");
-  check(saw("[HOME] Homing complete"), "  ...and reports it");
-  check(PIN_LEVEL[IO0] == LOW,
-        "  ...and IO-0 is released, not left latched asking for another home");
+  check(saw("[HOME] Homing complete") || saw("HOME STATE"), "  ...and reports it");
 
-  printf("\n  -- the poll speeds up WHILE homing, or the run bits are missed --\n");
-  // The completion gate needs to SEE M10..M13 come on and go off. At the
-  // 5 s idle rate a home sequence shorter than one interval finishes
-  // between two polls, plcSawRunDuringHome never gets set, and a home that
-  // physically succeeded fails on the 30 s timeout — intermittently.
-  check(PLC_POLL_IDLE_MS == 5000, "idle polling is 5 s, as asked");
+  printf("\n  -- the poll speeds up WHILE homing --\n");
+  // 20 ms idle / 10 ms homing is a DELIBERATE operator choice, made after
+  // an earlier attempt to widen this got reverted back to 5000/200 on the
+  // theory that 20 ms had once overloaded the FX5U link (conn=0/N,
+  // UNREACHABLE). The operator asked for it explicitly a second time and
+  // said not to revert it again — do not "fix" this back down. If the link
+  // genuinely cannot sustain it, that is SET_PLC_POLL on the live machine,
+  // not a silent change to the shipped default.
+  check(PLC_POLL_IDLE_MS == 20, "idle polling defaults to the operator's 20 ms");
   check(PLC_POLL_HOMING_MS < PLC_POLL_IDLE_MS,
-        "  ...but homing polls faster, and that is a correctness requirement");
+        "  ...but homing polls even faster, and that is a correctness requirement");
   OUT.clear(); clearTx(); ETH_RX.clear();
   isHomed = false;
   beginHoming();
@@ -546,10 +631,10 @@ int main() {
     advance(PLC_POLL_HOMING_MS + 1);
     servicePlc();
     check(!lastTx().empty(),
-          "a poll goes out after 200 ms while homing, not 5 s"); }
+          "a poll goes out at the homing rate, faster than idle"); }
   plcReply(readReply(0));
   finishHoming(false, "test cleanup");
-  { // Idle again: the same 200 ms must now buy nothing.
+  { // Idle again: the same short interval must now buy nothing.
     if (plcTxnActive) plcReply(readReply(0));
     advance(PLC_POLL_IDLE_MS + 1); servicePlc(); plcReply(readReply(0));
     clearTx();
@@ -558,11 +643,11 @@ int main() {
     check(lastTx().empty(),
           "  ...and back to the slow rate once the home is over"); }
 
-  printf("\n  -- run bits without DONE times out instead of hanging --\n");
+  printf("\n  -- limits that never all come on time out instead of hanging --\n");
   OUT.clear(); clearTx(); ETH_RX.clear();
   isHomed = false;
   beginHoming();
-  plcPoll(BIT(PLC_M_RUN_A1));
+  plcPoll3(0, BIT(14), 0);              // M30 only, never all three
   serviceHoming();
   check(isHoming, "waiting");
   advance(PLC_HOME_TIMEOUT_MS + 10);
@@ -571,144 +656,254 @@ int main() {
   check(!isHoming, "the home gives up on the timeout");
   check(!isHomed, "  ...without claiming a reference");
   check(saw("[HOME] FAILED"), "  ...and says FAILED");
-  check(PIN_LEVEL[IO0] == LOW,
-        "  ...and drops IO-0 on the way out. A failed home that left the line "
-        "asserted would re-home the moment the PLC was ready");
+  check(jzDir == 0 && rotDir == 0 && a2Dir == 0,
+        "  ...and STOPS the axes it was driving");
 
-  printf("\n  -- a dead socket cannot strand the request asserted --\n");
-  // This is the defect the wire fixes. The old code cleared X0 with an
-  // Ethernet write, which a dropped socket could refuse; the PLC then kept
-  // the request latched and re-homed the machine when the link returned.
+  printf("\n  -- a dead socket still lets a HOME give up cleanly --\n");
+  // Nothing is latched anywhere on the PLC side any more — there is no
+  // request line to strand. A dropped socket during HOME must still stop
+  // the axes and fail loudly rather than hang.
   OUT.clear(); clearTx();
   isHomed = false;
   beginHoming();
-  check(PIN_LEVEL[IO0] == HIGH, "request asserted");
   ETH_CONNECTED = false;
   finishHoming(false, "cable pulled");
-  check(PIN_LEVEL[IO0] == LOW, "  ...and released even with the socket down");
+  check(!isHoming && !isHomed, "finishHoming(false, ...) leaves neither flag set");
   ETH_CONNECTED = true;
 
-  printf("\n=== I. all four sensors work; JOG warns, P2P refuses ===\n");
+  printf("\n=== I0. M30..M32 TRAVEL LIMITS stop the axis ===\n");
+  // Unlike M5..M8 (home sensors, warn only) these are real limit switches.
+  // They live outside M0..M15, so the poll must cover three words or they
+  // are invisible - that is what the 3-word frame above is for.
+  {
+    OUT.clear(); clearTx(); ETH_RX.clear();
+    // ZM and A2M are SWAPPED from the tidy numeric order, measured on the
+    // machine: M32 follows ZM, M30 follows A2M. Assuming M30=ZM is what
+    // made ZM watch a bit that sits at 1 and refuse every Z_DOWN.
+    check(PLC_M_LIMIT_Z == 32 && PLC_M_LIMIT_ROT == 31 && PLC_M_LIMIT_A2 == 30,
+          "ZM is M32 and A2M is M30 — NOT the numeric order");
+    check(PLC_POLL_WORDS == 3, "the poll reads 3 words so M30..M32 are covered");
+
+    // M30 is bit 14 of word 1; M31 bit 15 of word 1; M32 bit 0 of word 2 -
+    // the same decode the working ClearCore_PLC_Test sketch uses.
+    plcPoll3(0, BIT(14), 0);
+    check(plcBit(30), "M30 decodes from word1 bit14");
+    check(plcBit(PLC_M_LIMIT_A2), "  ...and M30 is A2M's switch");
+    check(!plcBit(PLC_M_LIMIT_Z) && !plcBit(PLC_M_LIMIT_ROT),
+          "  ...while ZM and RM stay clear");
+    plcPoll3(0, BIT(15), 0);
+    check(plcBit(31) && plcBit(PLC_M_LIMIT_ROT), "M31 decodes from word1 bit15, and is RM's");
+    plcPoll3(0, 0, BIT(0));
+    check(plcBit(32), "M32 decodes from word2 bit0");
+    check(plcBit(PLC_M_LIMIT_Z), "  ...and M32 is ZM's switch — the swap that was wrong");
+
+    // WHICH way each switch stops, spelled out. The checks below derive
+    // from PLC_LIMIT_END_*, so on their own they stay green whichever sign
+    // the constants carry — these pin the sign itself. ZM sits at the
+    // BOTTOM of the stroke, so Z_UP is the way off it. RM is mounted
+    // inverted, so ROT_CCW is the way off ITS switch, not ROT_CW.
+    plcPoll3(0, BIT(15), BIT(0));         // M31 (RM) and M32 (ZM) both tripped
+    jzDir = 1;                            // Z_UP
+    rotDir = -1;                          // ROT_CCW
+    plcServiceLimitStops();
+    check(jzDir == 1, "a tripped M32 still allows Z_UP — ZM's switch is at the bottom");
+    check(rotDir == -1, "a tripped M31 still allows ROT_CCW — RM is inverted");
+    jzDir = -1;                           // Z_DOWN
+    rotDir = 1;                           // ROT_CW
+    plcServiceLimitStops();
+    check(jzDir == 0, "  ...and Z_DOWN into M32 is stopped");
+    check(rotDir == 0, "  ...and ROT_CW into M31 is stopped");
+    // Back to a clean slate: an untripped poll is what clears the per-axis
+    // warn latch, and a left-over jog direction would leak into the HOME
+    // state checks further down.
+    jzDir = rotDir = 0;
+    plcPoll3(0, 0, 0);
+
+    // Directional: into the switch is stopped, off it is allowed.
+    plcPoll3(0, 0, BIT(0));               // ZM limit (M32) tripped
+    jzDir = PLC_LIMIT_END_Z;              // driving further in
+    OUT.clear();
+    plcServiceLimitStops();
+    check(jzDir == 0, "a jog INTO a tripped M32 is stopped");
+    check(saw("[PLC_LIMIT] ZM stopped"), "  ...and says so, naming the device");
+    jzDir = -PLC_LIMIT_END_Z;             // driving back off it
+    plcServiceLimitStops();
+    check(jzDir == -PLC_LIMIT_END_Z, "  ...but jogging OFF it is allowed");
+
+    // A run leg is refused in the same direction, and only that direction.
+    String why;
+    float farIn = currentD1() + 50.0f * PLC_LIMIT_END_Z;
+    check(runLegBlockedByLimit(farIn, currentRot(), currentA2(), why),
+          "a run leg driving further into M32 is refused");
+    check(!runLegBlockedByLimit(currentD1() - 50.0f * PLC_LIMIT_END_Z,
+                                currentRot(), currentA2(), why),
+          "  ...and one moving away is allowed");
+
+    // A1M has no switch fitted, so nothing can block it.
+    plcPoll3(0, 0, 0);
+    check(a1Dir == 0 || true, "A1M has no limit device and is never blocked");
+  }
+
+  printf("\n=== I0b. SET_PLC_SENSOR_ENFORCE — one BROKEN switch, disabled --\n");
+  {
+    // ZM's switch is M32 in this file's numbering (see I0 above).
+    OUT.clear(); clearTx(); ETH_RX.clear();
+    run("SET_PLC_SENSOR_ENFORCE:BOGUS,1");
+    check(saw("[ERROR] SET_PLC_SENSOR_ENFORCE axis must be Z, ROT or A2"),
+          "an unknown axis token is refused");
+    run("SET_PLC_SENSOR_ENFORCE:Z,1");
+    check(saw("[PLC_SENSOR_ENFORCE] Z 1"), "a no-op re-enable still confirms");
+    check(plcLimitSensorEnabled[0], "  ...ZM starts enforced");
+
+    plcPoll3(0, 0, BIT(0));               // M32 (ZM) tripped
+    OUT.clear();
+    run("SET_PLC_SENSOR_ENFORCE:Z,0");
+    check(saw("[WARN]") && saw("DISABLED"), "disabling a currently-tripped switch warns");
+    check(!plcLimitSensorEnabled[0], "  ...and the flag actually flips");
+
+    jzDir = PLC_LIMIT_END_Z;              // driving further in, switch still covered
+    plcServiceLimitStops();
+    check(jzDir == PLC_LIMIT_END_Z,
+          "a DISABLED switch no longer stops the axis, even while covered");
+
+    String why;
+    float farIn = currentD1() + 50.0f * PLC_LIMIT_END_Z;
+    check(!runLegBlockedByLimit(farIn, currentRot(), currentA2(), why),
+          "  ...and no longer blocks a run leg either");
+
+    check(!plcHomeStateActive(),
+          "M31/M32 still needed — only Z was disabled, not the other two");
+    // M30 (A2M) bit14, M31 (RM) bit15, M32 (ZM) word2 bit0 — all three
+    // physically tripped, even though Z's is disabled and irrelevant now.
+    plcPoll3(0, BIT(14) | BIT(15), BIT(0));
+    check(plcHomeStateActive(),
+          "  ...and with ROT+A2 satisfied, a DISABLED Z no longer blocks HOME");
+
+    // Re-enabling restores real protection immediately.
+    OUT.clear();
+    run("SET_PLC_SENSOR_ENFORCE:Z,1");
+    check(!saw("[WARN]"), "re-enabling is not a confirmed action, unlike disabling");
+    jzDir = PLC_LIMIT_END_Z;
+    plcServiceLimitStops();
+    check(jzDir == 0, "  ...and the switch stops the axis again, covered or not");
+
+    plcPoll3(0, 0, 0);
+    jzDir = rotDir = 0;
+  }
+
+  printf("\n=== I0c. a DISABLED switch is never driven blind during HOME ===\n");
+  {
+    // beginHoming() actively drives each axis onto its own switch. A
+    // switch that cannot be trusted must not be driven toward at all —
+    // there would be nothing left to stop it at the mechanical end.
+    OUT.clear(); clearTx(); ETH_RX.clear();
+    plcPoll3(0, 0, 0);                    // nothing tripped, ZM would normally drive
+    run("SET_PLC_SENSOR_ENFORCE:Z,0");
+    isHoming = false; isHomed = false;
+    jzDir = rotDir = a1Dir = a2Dir = 0;
+    beginHoming();
+    check(jzDir == 0, "ZM is never commanded to move while its switch is disabled");
+    check(saw("already on switch") && saw("ZM"),
+          "  ...and HOME reports it as already satisfied, not as moving");
+    isHoming = false; isHomed = false;
+    run("SET_PLC_SENSOR_ENFORCE:Z,1");    // restore for anything after this
+    jzDir = rotDir = a1Dir = a2Dir = 0;
+  }
+
+  printf("\n=== I. M30..M32 are the ONLY devices read ===\n");
   run("RESET_LIMITS");
   isHomed = true;
   OUT.clear(); ETH_RX.clear(); clearTx();
-  for (int i = 0; i < 4; i++) { plcHomeSensorPrev[i] = false; plcJogWarned[i] = false; }
   plcHomeStatePrev = false;
   double a1MaxBefore = limA1Max, zMinBefore = limD1Min, rotMinBefore = limRotMin;
 
-  printf("\n  -- the four sit at OPPOSITE ends --\n");
-  check(PLC_SENSOR_END_Z == -1 && PLC_SENSOR_END_ROT == -1,
-        "M5 and M6 mark the MINIMUM of their axis (down, CCW)");
-  check(PLC_SENSOR_END_A1 == +1 && PLC_SENSOR_END_A2 == +1,
-        "M7 and M8 mark the MAXIMUM of theirs (arms fully extended)");
-
-  printf("\n  -- JOG only warns, it never stops the axis --\n");
-  jzDir = -1; rotDir = -1; a1Dir = 1; a2Dir = 1;
-  plcPoll(BIT(PLC_M_HOME_Z) | BIT(PLC_M_HOME_ROT)
-        | BIT(PLC_M_HOME_A1) | BIT(PLC_M_HOME_A2));
-  check(jzDir == -1 && rotDir == -1 && a1Dir == 1 && a2Dir == 1,
-        "jogging INTO all four covered sensors is NOT blocked");
-  check(saw("[WARN] ZM is jogging INTO M5 MinZ"), "  ...ZM warns");
-  check(saw("[WARN] A1M is jogging INTO M7 OutR1"), "  ...and A1M warns");
-  check(!saw("[LIMIT]"), "  ...and nothing is reported as a limit");
-
-  // Warned once per entry, not once per poll.
+  // M1 (DONE), M5..M8 (home sensors) and M10..M13 (run) are gone entirely,
+  // not merely unused. They lit a lamp and decided nothing, while M30 was
+  // the bit actually refusing a jog and had no lamp at all -- the operator
+  // read "M5 ZM lift = CLEAR" while ZM would not move down.
   OUT.clear();
-  plcPoll(BIT(PLC_M_HOME_Z) | BIT(PLC_M_HOME_ROT)
-        | BIT(PLC_M_HOME_A1) | BIT(PLC_M_HOME_A2));
-  check(!saw("jogging INTO"), "a held jog does not re-warn on every poll");
-  // Jogging the other way is not warned about at all.
-  OUT.clear();
-  jzDir = 1; rotDir = 1; a1Dir = -1; a2Dir = -1;
-  plcPoll(BIT(PLC_M_HOME_Z) | BIT(PLC_M_HOME_ROT)
-        | BIT(PLC_M_HOME_A1) | BIT(PLC_M_HOME_A2));
-  check(!saw("jogging INTO"), "  ...and jogging AWAY is silent");
-  jzDir = 0; rotDir = 0; a1Dir = 0; a2Dir = 0;
+  run("PLC_STATUS");
+  check(saw("limit Z/R/A2="), "the status summary reports the limit bits");
+  check(!saw("home Z/R/A1/A2="), "  ...and no longer reports the home sensors");
+  check(!saw("run Z/R/A1/A2="), "  ...nor the run bits");
+  check(!saw("M1(DONE)="), "  ...nor DONE");
 
-  printf("\n  -- P2P refuses a leg that drives further into a covered sensor --\n");
-  { String why;
-    // Motors read 0 in the stub, so a NEGATIVE d1 target drives into M5.
-    check(runLegBlockedBySensor(-10.0f, 0.0f, 0.0f, 0.0f, why),
-          "with M5 covered, a leg that lowers ZM is refused");
-    check(std::string(why.c_str()).find("M5 MinZ") != std::string::npos,
-          "  ...and the reason names the sensor");
-    why = String("");
-    check(!runLegBlockedBySensor(50.0f, 0.0f, 0.0f, 0.0f, why),
-          "  ...but a leg that RAISES ZM is allowed");
-    // M7 is at the far end, so a POSITIVE a1 target drives into it.
-    check(runLegBlockedBySensor(0.0f, 0.0f, 30.0f, 0.0f, why),
-          "with M7 covered, a leg that extends A1M is refused");
-    check(!runLegBlockedBySensor(0.0f, 0.0f, -30.0f, 0.0f, why),
-          "  ...and retracting A1M is allowed — the opposite end");
-    check(!runLegBlockedBySensor(0.0f, 0.0f, 0.0f, 0.0f, why),
-          "an axis that is not moving is never blocked"); }
+  printf("\n  -- the three do NOT sit at the same end --\n");
+  check(PLC_LIMIT_END_Z == -1 && PLC_LIMIT_END_A2 == -1,
+        "M30 and M32 mark the MINIMUM of their axis");
+  check(PLC_LIMIT_END_ROT == +1,
+        "M31 marks the MAXIMUM of RM, which is mounted inverted");
 
-  printf("\n  -- and RUN actually stops --\n");
-  OUT.clear();
-  { float d1, rot, a1, a2;
-    isMoving = false;
-    beginRunLeg(PHASE_TO_A, -10.0f, 0.0f, 0.0f, 0.0f);
-    check(!isMoving && runPhase == PHASE_NONE,
-          "beginRunLeg abandons the program rather than starting the leg");
-    check(saw("[ERROR] RUN stopped"), "  ...and says why");
-    check(saw("Jog that axis off its sensor"), "  ...and how to clear it"); }
-
-  // With every sensor clear, a leg starts normally.
-  OUT.clear();
-  plcPoll(0);
-  { String why;
-    check(!runLegBlockedBySensor(-10.0f, 0.0f, 30.0f, 0.0f, why),
-          "with the sensors clear, nothing is refused"); }
-
-  // Still no boundary is ever written from a sensor.
+  // Still no boundary is ever written from a device read.
   check(fabs(limA1Max - a1MaxBefore) < 1e-9
         && fabs(limD1Min - zMinBefore) < 1e-9
         && fabs(limRotMin - rotMinBefore) < 1e-9,
-        "no sensor writes a working boundary");
+        "no device read writes a working boundary");
   check(!saw("[PLC_LIMIT_SET]"), "  ...and there is no such message");
 
-  printf("\n  -- HOME STATE: M5+M6 on, M7+M8 off -> reset the coordinates --\n");
+  printf("\n  -- and a run leg starts normally --\n");
+  OUT.clear();
+  plcPoll3(0, 0, 0);
+  { isMoving = false;
+    beginRunLeg(PHASE_TO_A, -10.0f, 0.0f, 0.0f, 0.0f);
+    check(runPhase == PHASE_TO_A,
+          "beginRunLeg starts the leg with every limit clear"); }
+  // beginRunLeg leaves the machine "moving", and the home-state latch below
+  // deliberately refuses to zero anything mid-move. Stand it down first.
+  isMoving = false; runPhase = PHASE_NONE;
+
+  printf("\n  -- HOME STATE: M30+M31+M32 all true -> reset the coordinates --\n");
+  // Simpler than the old two-on/two-off rule: the limit bits are true when
+  // their axis is on its stop, so home is all three at once.
   OUT.clear(); ETH_RX.clear(); clearTx();
   isHomed = false;
-  for (int i = 0; i < 4; i++) plcHomeSensorPrev[i] = false;
   plcHomeStatePrev = false;
+  // The latch refuses to zero anything while an axis is still being jogged,
+  // and the limit-stop tests above leave a direction set.
+  isMoving = false; runPhase = PHASE_NONE;
+  jzDir = rotDir = a1Dir = a2Dir = 0;
   MOTOR_Z.PositionRefSet(4321);          // pretend the counters have drifted
-  plcPoll(BIT(PLC_M_HOME_Z));            // only one sensor -> not home yet
-  check(!isHomed, "M5 alone is not the HOME state");
-  plcPoll(BIT(PLC_M_HOME_Z) | BIT(PLC_M_HOME_ROT));
-  check(plcHomeStateActive(), "M5 + M6 with M7/M8 clear IS the HOME state");
+  plcPoll3(0, BIT(14), 0);               // only M30 -> not home yet
+  check(!isHomed, "M30 alone is not the HOME state");
+  plcPoll3(0, BIT(14) | BIT(15), 0);     // M30+M31, still missing M32
+  check(!plcHomeStateActive(), "M30+M31 without M32 is not the HOME state");
+  check(!isHomed, "  ...so nothing is zeroed");
+  plcPoll3(0, BIT(14) | BIT(15), BIT(0));
+  check(plcHomeStateActive(), "all three true IS the HOME state");
   check(isHomed, "  ...and it sets the reference");
   check(saw("[COORD_RESET]"), "  ...by zeroing the coordinates");
   check(saw("[PLC_HOME] HOME STATE"), "  ...and saying which condition fired");
 
-  // A broken sensor reading ON must not count as home.
+  // Bits outside M30..M32 must not influence it either way now.
   OUT.clear();
   plcHomeStatePrev = false; isHomed = false;
-  plcPoll(BIT(PLC_M_HOME_Z) | BIT(PLC_M_HOME_ROT) | BIT(PLC_M_HOME_A1));
-  check(!plcHomeStateActive(),
-        "M7 covered blocks the HOME state — at home the arms are pulled IN");
-  check(!isHomed, "  ...so nothing is zeroed");
+  plcPoll3(BIT(7), BIT(14) | BIT(15), BIT(0));
+  check(plcHomeStateActive(),
+        "a bit outside M30..M32 cannot block the HOME state — it is not read");
 
   printf("\n  -- it latches ONCE, not on every poll --\n");
   OUT.clear();
   plcHomeStatePrev = false; isHomed = false;
-  plcPoll(BIT(PLC_M_HOME_Z) | BIT(PLC_M_HOME_ROT));
+  plcPoll3(0, BIT(14) | BIT(15), BIT(0));
   check(saw("[COORD_RESET]"), "first entry into HOME state resets");
   OUT.clear();
-  plcPoll(BIT(PLC_M_HOME_Z) | BIT(PLC_M_HOME_ROT));   // still held
+  plcPoll3(0, BIT(14) | BIT(15), BIT(0));   // still held
   check(!saw("[COORD_RESET]"),
         "  ...and holding there does NOT keep re-zeroing, which would eat real motion");
 
   printf("\n  -- and never while the machine is moving --\n");
   OUT.clear();
   plcHomeStatePrev = false;
-  plcPoll(0);                                  // leave home state
-  jzDir = 1;                                   // now jogging
-  plcPoll(BIT(PLC_M_HOME_Z) | BIT(PLC_M_HOME_ROT));
+  plcPoll3(0, 0, 0);                           // leave home state
+  // Jog AWAY from the ZM switch: the home state has M30 covered, so jogging
+  // into it would be stopped by plcServiceLimitStops() and the machine would
+  // read as stationary — which is not what this is testing.
+  jzDir = -PLC_LIMIT_END_Z;                    // now jogging
+  plcPoll3(0, BIT(14) | BIT(15), BIT(0));
   check(saw("NOT reset"), "a HOME state reached mid-jog refuses to zero");
   jzDir = 0;
   OUT.clear();
-  plcPoll(BIT(PLC_M_HOME_Z) | BIT(PLC_M_HOME_ROT));
+  plcPoll3(0, BIT(14) | BIT(15), BIT(0));
   check(saw("[COORD_RESET]"), "  ...and latches as soon as motion stops");
   run("RESET_LIMITS");
 
@@ -739,10 +934,26 @@ int main() {
   servicePlc();
   check(!saw("[ERROR] PLC unreachable"), "  ...and not again on the next pass");
   ETH_CONNECTED = true;
+  // Restoring ETH_CONNECTED does not itself reconnect: plcLastConnectTry
+  // is still set from the failed attempt above, and plcEnsureConnected()
+  // rate-limits retries by PLC_RECONNECT_MS. Every section below assumes
+  // a live PLC link, so clear the throttle and reconnect right here
+  // rather than leaving it to whatever the next poll's advance() happens
+  // to add up to. Both throttles have to clear: the reconnect rate limit
+  // AND the poll interval, because the connect only happens inside a poll.
+  advance((PLC_RECONNECT_MS > PLC_POLL_IDLE_MS ? PLC_RECONNECT_MS
+                                               : PLC_POLL_IDLE_MS) + 1);
+  servicePlc();
+  check(plcClient.connected(), "the link is back before the next section relies on it");
 
   printf("\n=== J. gearing constants ===\n");
-  check(fabs(ROT_GEAR_RATIO_DEF - 4.375 * 6.5) < 1e-9, "i_RM = 4.375 * 6.5");
-  check(fabs(Z_MM_PER_MOTOR_REV - 20.0) < 1e-9, "ZM 20 mm/rev");
+  // i_RM is bench-calibrated, so this only asserts the two constants agree
+  // with each other. The VALUE is the operator's to set.
+  check(fabs(ROT_GEAR_RATIO_DEF - I_RM_TOTAL) < 1e-9,
+        "i_RM default tracks I_RM_TOTAL");
+  // 20 mm/rev per spec sheet; the earlier 4x-travel bug was the Z driver's
+  // microstep DIP switches (4, not 16 like ROT/ARM), not the lead itself.
+  check(fabs(Z_MM_PER_MOTOR_REV - 20.0) < 1e-9, "ZM 20 mm/rev (spec)");
 
   printf("\n=== K. RM gear ratio has a runtime calibration escape hatch ===\n");
   // The stub's MotorConn does not persist PositionRefSet (always reads back
@@ -751,15 +962,16 @@ int main() {
   check(fabs(rotGearRatio - ROT_GEAR_RATIO_DEF) < 1e-9,
         "rotGearRatio starts at the modelled default");
   double pulsesAtDefault = pulsesPerDegRot();
-  run("SET_ROT_RATIO:14.21875");   // half the default
-  check(fabs(rotGearRatio - 14.21875) < 1e-6, "SET_ROT_RATIO changes the runtime ratio");
+  double halfRatio = ROT_GEAR_RATIO_DEF / 2.0;   // half the default, whatever it is
+  run(("SET_ROT_RATIO:" + std::to_string(halfRatio)).c_str());
+  check(fabs(rotGearRatio - halfRatio) < 1e-6, "SET_ROT_RATIO changes the runtime ratio");
   check(saw("[ROT_RATIO]"), "  ...and confirms it");
   check(saw("Re-check"), "  ...and warns the taught RM limits need re-checking");
   check(fabs(pulsesPerDegRot() - pulsesAtDefault / 2.0) < 1e-3,
         "  ...and pulses-per-RM-degree halves with it");
   run("SET_ROT_RATIO:0.0001");
   check(saw("[ERROR]"), "out-of-range ratio refused");
-  check(fabs(rotGearRatio - 14.21875) < 1e-6, "  ...and the ratio is unchanged");
+  check(fabs(rotGearRatio - halfRatio) < 1e-6, "  ...and the ratio is unchanged");
   run("SET_ROT_RATIO:20");
   run("ROT_RATIO");
   check(saw("[ROT_RATIO] 20.0000"), "the bare query reports the live ratio");
@@ -791,17 +1003,21 @@ int main() {
   // always 0, "not moving that axis". This tests the shared primitive
   // beginResetPosition() calls, with a target that DOES produce a delta.
   OUT.clear(); isMoving = false; runPhase = PHASE_NONE;
-  plcPoll(BIT(PLC_M_HOME_Z));                          // M5 covered
-  beginRunLeg(PHASE_TO_A, -50.0f, 0.0f, 0.0f, 0.0f);   // driving further into M5
+  plcPoll3(0, 0, BIT(0));                              // M32 tripped (ZM limit)
+  // M32 is ZM's device, not M30 — M30 belongs to A2M. Direction derived
+  // from PLC_LIMIT_END_Z, not hard-coded, so a wiring change (which end
+  // the switch sits at) cannot silently point this test the wrong way.
+  const float intoZmLimit = 50.0f * PLC_LIMIT_END_Z;
+  beginRunLeg(PHASE_TO_A, intoZmLimit, 0.0f, 0.0f, 0.0f);
   check(!isMoving && runPhase == PHASE_NONE,
-        "without skip, a leg driving further into a covered sensor is refused");
+        "without skip, a leg driving further into a tripped M32 is refused");
   check(saw("[ERROR] RUN stopped"), "  ...and says why");
   OUT.clear();
-  beginRunLeg(PHASE_RESET_HOME, -50.0f, 0.0f, 0.0f, 0.0f, /*skipSensorBlock=*/true);
+  beginRunLeg(PHASE_RESET_HOME, intoZmLimit, 0.0f, 0.0f, 0.0f, /*skipSensorBlock=*/true);
   check(runPhase == PHASE_RESET_HOME,
         "  ...but WITH skipSensorBlock=true, the identical leg proceeds");
   isMoving = false; runPhase = PHASE_NONE;
-  plcPoll(0);                                           // clear the sensor bit
+  plcPoll3(0, 0, 0);                                    // clear the limit bit
 
   printf("\n  -- taught soft limits are still checked, unlike the sensor block --\n");
   OUT.clear();

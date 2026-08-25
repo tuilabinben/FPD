@@ -1,8 +1,8 @@
 """Helpers for tracking and safely cancelling tkinter `after` jobs.
 
-The original code cancelled jobs by hand in six different places and, in a
-couple of them, cancelled an already-fired id — harmless on CPython but it
-raises TclError on some Tk builds. Everything now goes through here.
+Original code cancelled jobs by hand in six different places, and in a
+couple cancelled an already-fired id — harmless on CPython but raises
+TclError on some Tk builds. Everything now goes through here.
 """
 
 import tkinter as tk
@@ -24,7 +24,7 @@ class TimerMixin:
         try:
             self.root.after_cancel(job)
         except (tk.TclError, ValueError):
-            pass        # already fired or the interpreter is shutting down
+            pass        # already fired, or interpreter shutting down
         setattr(self, attr, None)
 
     def _cancel_jobs(self, *attrs):

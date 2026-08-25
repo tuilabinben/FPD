@@ -1,46 +1,30 @@
 """Named colour schemes.
 
-WHY THIS IS A SEPARATE MODULE
------------------------------
-`theme.py` exports flat module-level constants because every widget reads
-them at import time. That is fine, but it means the scheme has to be
-chosen BEFORE anything imports theme — so the choice lives here, in a
-module with no dependencies, and is persisted in its own tiny file rather
-than in machine_settings.json (which is loaded much later, by the app).
+WHY SEPARATE MODULE: theme.py exports flat module-level constants, every widget reads them at
+import time. Scheme must be chosen BEFORE anything imports theme — so choice lives here, no
+deps, persisted in its own tiny file rather than machine_settings.json (loaded much later by app).
 
-RULES EVERY PALETTE MUST FOLLOW
--------------------------------
-These are not stylistic. They are what keeps the UI readable as a machine
-controller rather than a mood board:
+RULES EVERY PALETTE MUST FOLLOW — not stylistic, keep UI readable as machine controller not
+mood board:
 
-  1. Every surface level must be SEPARABLE from its neighbours, and a
-     control must be separable from the card behind it. Flat design has
-     no shadows, so those steps do the work shadows used to.
+  1. Every surface level SEPARABLE from neighbours, control separable from card behind it. Flat
+     design has no shadows, these steps do that work instead.
+     NOT "monotonic luminance": dark schemes step upward (BG<PANEL_BG<SURFACE<SURFACE_HI), light
+     schemes follow normal light-UI convention instead — card is LIGHTEST, controls slightly
+     darker. Single-direction rule would ban every sane light theme.
 
-     Note this is NOT "monotonic luminance". Dark schemes do step
-     upward — BG < PANEL_BG < SURFACE < SURFACE_HI — but light schemes
-     follow the normal light-UI convention instead: the card is the
-     LIGHTEST thing, and controls sit slightly darker than it. Requiring
-     a single direction would have banned every sane light theme.
+  2. ENTRY_BG must read as well cut into card, LED_BG most recessed plane of all — operator's
+     only cue for editable vs read-only, holds both directions: darker than card on dark
+     schemes, brighter on light ones (white = "you may type here").
 
-  2. ENTRY_BG must read as a well cut into the card, and LED_BG must be
-     the most recessed plane of all. That is the operator's only cue for
-     "editable" versus "read-only", so it holds in both directions:
-     darker than the card on dark schemes, brighter on light ones (where
-     white is what "you may type here" looks like).
+  3. RED = stop, AMBER = warning, every scheme. Safety signals not decoration — no palette may
+     reassign them, none may use amber as primary accent or warning stops standing out.
 
-  3. RED means stop and AMBER means warning, in every scheme. Those two
-     are safety signals, not decoration, so no palette may reassign them
-     to something merely pretty — and no palette may use amber as its
-     primary accent, or a warning stops standing out.
+  4. Axis colours must stay mutually distinguishable INCLUDING for red-green colour-vision
+     deficiency. Hue alone insufficient, so six pinned to luminances spaced ~15 apart then given
+     hue — why they look slightly desaturated: lightness spent on separation not vividness.
 
-  4. The axis colours must stay mutually distinguishable, INCLUDING for
-     red-green colour-vision deficiency. Hue alone does not achieve that,
-     so the six are pinned to luminances spaced ~15 apart and only then
-     given a hue. That is why they look slightly desaturated: the
-     lightness had to be spent on separation rather than on vividness.
-
-  5. Body text needs ≥ 110 luminance contrast against PANEL_BG.
+  5. Body text needs >= 110 luminance contrast against PANEL_BG.
 """
 
 import json
@@ -52,12 +36,8 @@ _HERE = paths.user_data_dir()
 PALETTE_FILE = os.path.join(_HERE, "appearance.json")
 
 
-# ══════════════════════════════════════════════════════════════════════
-# The schemes
-# ══════════════════════════════════════════════════════════════════════
 PALETTES = {
 
-    # ── 1 ─────────────────────────────────────────────────────────────
     "graphite": {
         "label": "Graphite",
         "blurb": "Near-monochrome dark. Colour only where it means "
@@ -72,7 +52,6 @@ PALETTES = {
         "TEXT_LIGHT": "#e6e7e9", "TEXT_MUTED": "#8a8d91", "TEXT_DIM": "#5b5e62",
     },
 
-    # ── 2 ─────────────────────────────────────────────────────────────
     "slate": {
         "label": "Slate Blue",
         "blurb": "Cool neutral greys with one restrained steel blue. "
@@ -87,7 +66,6 @@ PALETTES = {
         "TEXT_LIGHT": "#e4e8ee", "TEXT_MUTED": "#8892a0", "TEXT_DIM": "#59616d",
     },
 
-    # ── 3 ─────────────────────────────────────────────────────────────
     "nord": {
         "label": "Nordic Light",
         "blurb": "Light, low-contrast, muted blue. Reads best in a bright "
@@ -102,7 +80,6 @@ PALETTES = {
         "TEXT_LIGHT": "#22262c", "TEXT_MUTED": "#5d646e", "TEXT_DIM": "#8b929b",
     },
 
-    # ── 4 ─────────────────────────────────────────────────────────────
     "paper": {
         "label": "Warm Paper",
         "blurb": "Warm off-white with a muted clay accent. The softest "
@@ -117,7 +94,6 @@ PALETTES = {
         "TEXT_LIGHT": "#2b2722", "TEXT_MUTED": "#6a635a", "TEXT_DIM": "#968e83",
     },
 
-    # ── 5 ─────────────────────────────────────────────────────────────
     "carbon": {
         "label": "Carbon Orange",
         "blurb": "Very dark with a single industrial orange. Looks like "
@@ -132,7 +108,6 @@ PALETTES = {
         "TEXT_LIGHT": "#e8e8e9", "TEXT_MUTED": "#8c8c8f", "TEXT_DIM": "#5c5c60",
     },
 
-    # ── 6 ─────────────────────────────────────────────────────────────
     "mono": {
         "label": "Pure Mono",
         "blurb": "Greyscale chrome, colour reserved entirely for state. "
@@ -147,9 +122,7 @@ PALETTES = {
         "TEXT_LIGHT": "#ededed", "TEXT_MUTED": "#8a8a8a", "TEXT_DIM": "#5a5a5a",
     },
 
-    # ── 0 ─────────────────────────────────────────────────────────────
-    # The scheme that was in place before this menu existed. Kept so the
-    # change is reversible rather than one-way.
+    # Scheme in place before this menu existed. Kept so change reversible, not one-way.
     "mint": {
         "label": "Mint (previous)",
         "blurb": "The original dark scheme with a mint primary.",
@@ -171,8 +144,8 @@ PALETTE_ORDER = ("graphite", "mono", "slate", "nord", "paper", "carbon", "mint")
 
 
 def load_active_name():
-    """Name of the scheme to use. Falls back to the default rather than
-    raising: a bad appearance file must never stop the app starting."""
+    """Scheme name to use. Falls back to default rather than raising — bad appearance file
+    must never stop app starting."""
     try:
         with open(PALETTE_FILE, "r", encoding="utf-8") as fh:
             name = json.load(fh).get("palette")

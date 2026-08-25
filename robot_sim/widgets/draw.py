@@ -1,30 +1,21 @@
 """Canvas drawing primitives — anti-aliased rounded surfaces.
 
-WHY THE OLD CORNERS LOOKED JAGGED
----------------------------------
-The previous version drew rounded rects with
-`create_polygon(..., smooth=True)`. That is not a rounded rectangle: Tk
-fits a cardinal spline through the points, which bulges the straight
-edges inward and produces a slightly lumpy outline. On top of that, the
-Tk canvas has no anti-aliasing at all, so every curve came out as hard
-stair-steps. Stacking six offset copies of that shape to fake a shadow
-multiplied the problem into visible banding.
+OLD CORNERS JAGGED: old code used create_polygon(..., smooth=True). Not
+real rounded rect — Tk fits cardinal spline thru points, bulges straight
+edges inward, lumpy outline. Tk canvas has zero anti-aliasing, curves
+came out stair-stepped. Stacking six offset copies for shadow
+multiplied into visible banding.
 
-WHAT IT DOES NOW
-----------------
-Corners are rendered as an IMAGE, drawn at 4x size and downsampled with
-LANCZOS. Averaging 16 subpixels per output pixel is what produces a
-genuinely smooth edge — it is real anti-aliasing rather than a smoother
-curve that still aliases. Images are cached by their exact parameters,
-so hover redraws are a dictionary lookup, not a re-render.
+NOW: corners rendered as IMAGE, drawn 4x size, downsampled w/ LANCZOS.
+Averaging 16 subpixels/output pixel = real anti-aliasing, not just
+smoother curve that still aliases. Images cached by exact params —
+hover redraw = dict lookup, not re-render.
 
-That path needs Pillow. Without it we fall back to arcs plus rectangles,
-which is still true circular geometry (unlike the spline) and looks
-markedly better than what was there — just without the soft edge.
+Needs Pillow. Without it: fallback to arcs+rectangles — still true
+circular geometry (unlike spline), looks much better, just no soft edge.
 
-The style is deliberately FLAT: solid fills, one hairline border, no
-shadow stacks. The depth cue is the fill colour changing on hover and
-press, which costs nothing visually and cannot band.
+Style deliberately FLAT: solid fills, one hairline border, no shadow
+stacks. Depth cue = fill colour change on hover/press — free, no banding.
 """
 
 import tkinter as tk
@@ -33,9 +24,8 @@ from ..theme import mix, shade
 
 try:                                        # pragma: no cover - env dependent
     from PIL import Image, ImageDraw, ImageTk
-    # Pillow moved the resampling constants under Image.Resampling in 10
-    # and keeps the old aliases only for now, so resolve it once rather
-    # than let a future release turn smooth corners into an AttributeError
+    # Pillow moved resampling consts under Image.Resampling in 10, old
+    # aliases kept only for now — resolve once, avoid future AttributeError
     # at draw time.
     _LANCZOS = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
     _HAVE_PIL = True
@@ -43,21 +33,19 @@ except Exception:                           # pragma: no cover
     _HAVE_PIL = False
     _LANCZOS = None
 
-#: Supersampling factor. 4 means each output pixel averages 16 rendered
-#: ones — past this the improvement is not visible but the cost is
-#: quadratic, and these images are rebuilt on every hover.
+#: Supersampling factor. 4 = each output pixel averages 16 rendered ones —
+#: past this, gain invisible but cost quadratic; images rebuilt every hover.
 SUPERSAMPLE = 4
 
-#: Rendered images, keyed by their full parameter tuple. Tk also requires
-#: a live Python reference to every PhotoImage or it is garbage collected
-#: and the canvas silently goes blank, so this cache is load-bearing, not
-#: just an optimisation.
+#: Rendered images, keyed by full param tuple. Tk needs live Python ref to
+#: every PhotoImage or GC collects it and canvas goes blank silently —
+#: cache is load-bearing, not just optimisation.
 _IMAGE_CACHE = {}
 _CACHE_LIMIT = 512
 
 
 def has_antialiasing():
-    """True when Pillow is available and corners will be smooth."""
+    """True if Pillow available, corners will be smooth."""
     return _HAVE_PIL
 
 
@@ -76,15 +64,12 @@ def _rgb(color):
     return tuple(int(c[i:i + 2], 16) for i in (0, 2, 4))
 
 
-# ══════════════════════════════════════════════════════════════════════
-# Anti-aliased image builders
-# ══════════════════════════════════════════════════════════════════════
 def rounded_image(w, h, radius, fill, surface, border=None, border_w=0):
-    """Anti-aliased rounded rectangle as a Tk image.
+    """Anti-aliased rounded rectangle as Tk image.
 
-    Composited onto `surface` rather than left transparent: the widget's
-    background is a known flat colour, so baking it in avoids relying on
-    RGBA compositing and renders identically everywhere.
+    Composited onto `surface`, not left transparent: widget background is
+    known flat colour — baking in avoids RGBA compositing, renders
+    identically everywhere.
     """
     w, h = max(1, int(w)), max(1, int(h))
     key = ("rect", w, h, round(radius, 2), fill, surface, border, border_w)
@@ -125,14 +110,12 @@ def circle_image(size, fill, surface, border=None, border_w=0):
     return _cache(key, build)
 
 
-# ══════════════════════════════════════════════════════════════════════
-# Fallback geometry — used only when Pillow is missing
-# ══════════════════════════════════════════════════════════════════════
+# fallback geometry, used only if Pillow missing
 def _rounded_arcs(canvas, x1, y1, x2, y2, r, fill, outline, width):
-    """True circular corners from four arcs plus two rectangles.
+    """True circular corners from four arcs + two rectangles.
 
-    Not anti-aliased, but geometrically correct — unlike the spline this
-    replaced, which pinched the straight edges.
+    Not anti-aliased, but geometrically correct — unlike spline it
+    replaced, which pinched straight edges.
     """
     r = max(0, min(r, (x2 - x1) / 2, (y2 - y1) / 2))
     d = r * 2
@@ -163,16 +146,13 @@ def _rounded_arcs(canvas, x1, y1, x2, y2, r, fill, outline, width):
                                   outline=outline, width=width)
 
 
-# ══════════════════════════════════════════════════════════════════════
-# Public painters — what the widgets actually call
-# ══════════════════════════════════════════════════════════════════════
 def paint_rounded(canvas, x, y, w, h, radius, fill, surface,
                   border=None, border_w=0, tag=None):
-    """Fills a rounded rect on `canvas`, anti-aliased where possible.
+    """Fills rounded rect on `canvas`, anti-aliased where possible.
 
-    The PhotoImage is stashed on the canvas (`_img_refs`) because Tk keeps
-    only a weak reference to images: without this the picture is collected
-    the moment the local goes out of scope and the widget renders blank.
+    PhotoImage stashed on canvas (`_img_refs`): Tk keeps only weak ref to
+    images — without this, picture collected moment local goes out of
+    scope, widget renders blank.
     """
     if _HAVE_PIL:
         img = rounded_image(w, h, radius, fill, surface, border, border_w)
@@ -204,20 +184,17 @@ def paint_circle(canvas, x, y, size, fill, surface, border=None, border_w=0):
 
 
 def clear(canvas):
-    """Wipes the canvas AND drops its image references.
+    """Wipes canvas AND drops image refs.
 
     Both halves matter: `delete("all")` alone leaks a PhotoImage per
-    redraw, and on a jog pad that redraws on every hover the leak is
-    continuous.
+    redraw — on jog pad redrawing every hover, leak is continuous.
     """
     canvas.delete("all")
     if hasattr(canvas, "_img_refs"):
         canvas._img_refs = []
 
 
-# ══════════════════════════════════════════════════════════════════════
-# Legacy shims — kept so nothing that still imports these breaks
-# ══════════════════════════════════════════════════════════════════════
+# legacy shims, kept so old imports don't break
 def rounded_rect_points(x1, y1, x2, y2, r):
     return [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
             x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
@@ -265,4 +242,4 @@ def draw_neumorph_circle_inset(canvas, x1, y1, x2, y2, surface, fill=None):
     return face
 
 
-_TK = tk  # keep the import meaningful for type checkers
+_TK = tk  # keeps import meaningful for type checkers

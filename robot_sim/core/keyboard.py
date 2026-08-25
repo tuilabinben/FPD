@@ -9,12 +9,12 @@ from ..config import JOG_STOP_COMMAND
 
 class KeyboardMixin:
     def _bind_keys(self):
-        """(Re)binds every jog key from the CURRENT layout.
+        """(Re)binds every jog key from CURRENT layout.
 
-        Safe to call again after a rebinding: the previous bindings are
-        cleared first, because bind_all only replaces a binding for the
-        SAME sequence — a key that is no longer used would otherwise keep
-        working and quietly move an axis nobody expects.
+        Safe to call again after rebinding: previous bindings cleared
+        first, because bind_all only replaces binding for SAME sequence —
+        key no longer used would otherwise keep working and quietly move
+        axis nobody expects.
         """
         for key in getattr(self, "_bound_jog_keys", ()):
             for k in ([key, key.upper()] if len(key) == 1 else [key]):
@@ -32,33 +32,30 @@ class KeyboardMixin:
                                    lambda e, s=start_cmd: self._key_release(s))
 
         self.root.bind_all("<KeyPress-space>", lambda e: self.emergency_stop_all())
-        # HOME is bound from keybinds.HOME_KEY rather than a literal, so the
-        # key that is RESERVED and the key that actually homes are the same
-        # one by construction. They had drifted: RESERVED_KEYS said
-        # backspace while this bound "h"/"H", so homing fired on a letter
-        # that was no longer protected and could also be taken by a jog
-        # axis — one keypress would then jog and home at the same time.
+        # HOME bound from keybinds.HOME_KEY not a literal, so RESERVED key
+        # and key that actually homes are same one by construction. had
+        # drifted: RESERVED_KEYS said backspace while this bound "h"/"H",
+        # so homing fired on unprotected letter that a jog axis could also
+        # take — one keypress would jog and home at same time.
         self.root.bind_all(f"<KeyPress-{keybinds.HOME_KEY}>",
                            lambda e: self._home_key_pressed())
 
-        # ENTER runs the loaded P2P program — the keyboard equivalent of
-        # pressing RUN PROGRAM. Gated on mode and focus the same way HOME
-        # is: only in P2P, and not while a text field has focus, so typing
-        # a coordinate and finishing the value with Enter cannot start an
-        # unattended run. p2p_run_program() itself still checks
-        # loaded_program and motion_locked, same as the button.
+        # ENTER runs loaded P2P program, keyboard equiv of RUN PROGRAM.
+        # gated on mode+focus like HOME: only in P2P, not while text field
+        # focused, so finishing a coordinate with Enter can't start
+        # unattended run. p2p_run_program() still checks loaded_program
+        # and motion_locked, same as button.
         self.root.bind_all("<KeyPress-Return>",
                            lambda e: self._run_key_pressed())
 
-        # ESC toggles Settings. Deliberately NOT gated on
-        # _jog_keys_enabled(): it is not a motion command, and being unable
-        # to reach the settings because a text field has focus would be its
-        # own small annoyance.
+        # ESC toggles Settings. deliberately NOT gated on
+        # _jog_keys_enabled(): not a motion command, being unable to reach
+        # settings because a text field has focus would be its own
+        # annoyance.
         #
-        # This is the ONLY Escape binding in the app. bind_all is
-        # application-wide, so it fires for the Settings window too — adding
-        # a second binding on that window made one keypress close and then
-        # immediately reopen it. "break" stops any further propagation.
+        # ONLY Escape binding in app. bind_all is application-wide, fires
+        # for Settings window too — second binding there made one keypress
+        # close then immediately reopen it. "break" stops propagation.
         self.root.bind_all("<KeyPress-Escape>", self._escape_pressed)
 
     def _jog_keys_enabled(self):
@@ -79,17 +76,16 @@ class KeyboardMixin:
         self.jog_start(start_cmd)
 
     def _key_release(self, start_cmd):
-        # Deliberately NOT gated on _jog_keys_enabled(): if the mode or focus
-        # changed while a key was held, the release must still stop the axis.
+        # deliberately NOT gated on _jog_keys_enabled(): if mode/focus
+        # changed while key held, release must still stop axis.
         if start_cmd in self.jog_pads:
             self.jog_pads[start_cmd].key_deactivate()
 
-        # RUNAWAY BUG: this used to bail out when `start_cmd` was not in
-        # jog_active. With LINK on, pressing W queues the PROMOTED command
-        # ("ARM_FWD"), not "A1_FWD" — so the check failed, the function
-        # returned, and no stop was ever sent. The axis kept moving until
-        # ESTOP. jog_stop() already resolves both spellings, so it must be
-        # called unconditionally and allowed to decide.
+        # RUNAWAY BUG: used to bail when `start_cmd` not in jog_active.
+        # With LINK on, pressing W queues PROMOTED command ("ARM_FWD") not
+        # "A1_FWD" — check failed, returned, no stop ever sent. axis kept
+        # moving until ESTOP. jog_stop() already resolves both spellings,
+        # must be called unconditionally and allowed to decide.
         self.jog_stop(start_cmd, JOG_STOP_COMMAND.get(start_cmd))
 
     def _home_key_pressed(self):
@@ -111,16 +107,16 @@ class KeyboardMixin:
         self.p2p_run_program()
 
     def _escape_pressed(self, _event=None):
-        """ESC toggles the Settings window.
+        """ESC toggles Settings window.
 
-        Refused mid-motion: Settings can change speeds and travel limits,
-        and re-teaching an envelope while an axis is moving is not something
-        a stray keypress should be able to start.
+        Refused mid-motion: Settings can change speeds/travel limits,
+        re-teaching envelope while axis moving not something a stray
+        keypress should start.
 
-        Returns "break" so the event stops here. Combined with this being
-        the app's only Escape binding, that guarantees one keypress
-        produces exactly one toggle — the close-then-reopen bug was two
-        handlers each doing their half of the job on the same event.
+        Returns "break" so event stops here. Combined with being app's
+        only Escape binding, guarantees one keypress produces exactly one
+        toggle — close-then-reopen bug was two handlers each doing their
+        half on same event.
         """
         if self.motion_locked:
             self.log("Settings unavailable while a program is running. "

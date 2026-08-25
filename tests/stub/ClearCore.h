@@ -150,6 +150,17 @@ struct EthernetClientStub {
   bool connect(IPAddress, uint16_t){ open = ETH_CONNECTED; return open; }
   bool connected(){ return open && ETH_CONNECTED; }
   void stop(){ open=false; }
+  // Raw byte write, with an explicit length. This is the ONLY send the
+  // firmware may use for a binary MC frame: print() on a String can stop
+  // at the frame's second byte, which is 0x00, and ship one byte instead
+  // of twenty-one. The desktop String has no such limit, so a stub that
+  // offered print() alone would record the whole frame and let that bug
+  // pass every test while the real board sent nothing the PLC could
+  // parse - the same trap Serial.println and digitalWrite were in.
+  size_t write(const unsigned char *buf, size_t len) {
+    ETH_TX.push_back(std::string((const char *)buf, len));
+    return len;
+  }
   void print(const String &x){ ETH_TX.push_back(x.s); }
   void println(const String &x){ ETH_TX.push_back(x.s); }
   void flush(){}

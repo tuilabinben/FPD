@@ -19,18 +19,17 @@ POS_RE = re.compile(
     re.IGNORECASE,
 )
 
-# v9 reports both elbows separately. The older single-ARM form is still
-# accepted so a board still running v8 firmware keeps working.
+# v9 reports both elbows separately. Older single-ARM form still accepted
+# so a board running v8 firmware keeps working.
 JOG_RE_V9 = re.compile(
     r"ROT:\s*(-?[\d.]+)\s*deg\s*\|\s*A1M:\s*(-?[\d.]+)\s*deg\s*\|\s*"
     r"A2M:\s*(-?[\d.]+)\s*deg\s*\|\s*Z:\s*(-?[\d.]+)\s*mm",
     re.IGNORECASE,
 )
-#: v9.2+ appends the derived frog-leg angle and reach. Its ABSENCE is how
-#: an older board is detected: a pre-v9.2 board reports the elbow in the old
-#: frame (it printed 60 at home), so adopting its numbers would make the
-#: readout jump to 60 and stay there, which looks exactly like a fault in
-#: this GUI. Those values are refused instead, loudly.
+#: v9.2+ appends derived frog-leg angle and reach. ABSENCE is how older
+#: board detected: pre-v9.2 board reports elbow in old frame (printed 60 at
+#: home) — adopting its numbers would jump readout to 60 and stick, looks
+#: exactly like a GUI fault. Values refused instead, loudly.
 FOLD_FIELDS_RE = re.compile(r"FOLD1:\s*-?[\d.]+", re.IGNORECASE)
 
 JOG_RE_LEGACY = re.compile(
@@ -54,8 +53,8 @@ class ProtocolMixin:
             return
 
         if "CLEARCORE POS" in upper:
-            # Joint-space telemetry: the board reports D1/ROT/A1M/A2M
-            # directly and no longer does any IK/FK itself.
+            # Joint-space telemetry: board reports D1/ROT/A1M/A2M directly,
+            # no longer does any IK/FK itself.
             m = POS_RE.search(text)
             if m:
                 d1, rot, a1, a2, pct = m.groups()
@@ -68,14 +67,14 @@ class ProtocolMixin:
             return
 
         if "JOG POS" in upper:
-            # Keep the simulation in step with the real machine so a later
-            # offline jog continues from the true position.
+            # Keeps simulation in step w/ real machine so later offline jog
+            # continues from true position.
             m = JOG_RE_V9.search(text)
             if m:
                 rot, a1, a2, z = (float(v) for v in m.groups())
                 if not self._board_reports_motor_degrees(text):
-                    # Still take the two axes whose frame did NOT change, so
-                    # the operator keeps a live RM and ZM readout.
+                    # Still take the two axes whose frame did NOT change —
+                    # keeps a live RM/ZM readout.
                     self.sim_rot, self.sim_z = rot, z
                     self._update_jog_readout()
                     return
@@ -98,9 +97,9 @@ class ProtocolMixin:
             self.status_var.set("LOADED — ClearCore acknowledged Point A/B.")
             return
 
-        # Completion ("[RUN] TARGET REACHED") must fall through to the
-        # dedicated check below, not be swallowed here as generic progress —
-        # it used to be, so real-hardware completion never unlocked the GUI.
+        # Completion ("[RUN] TARGET REACHED") must fall through to dedicated
+        # check below, not be swallowed here as generic progress — it used
+        # to be, so real-hardware completion never unlocked the GUI.
         if upper.startswith("[RUN]") and "TARGET REACHED" not in upper:
             self.status_var.set(f"RUNNING — {text.split(']', 1)[-1].strip()}")
             return
@@ -114,9 +113,9 @@ class ProtocolMixin:
             return
 
         if upper.startswith("[COORD_RESET]"):
-            # The board zeroed its counters, so the GUI's own reference is
-            # now valid too — whether the reset came from this app or from
-            # someone typing RESET_COORD into a terminal.
+            # Board zeroed its counters, so GUI's own reference now valid
+            # too — whether reset came from this app or someone typing
+            # RESET_COORD into a terminal.
             self.is_homed = True
             self._refresh_jog_status()
             self.log("ClearCore reset its coordinates — soft limits are now active.")
@@ -126,11 +125,10 @@ class ProtocolMixin:
             self.log("Board confirmed limit: " + text.split("]", 1)[-1].strip())
             return
 
-        # "[LIMITS] ..." and "[LIMITS_INFO] ..." are the board's own view of
-        # the envelope. Logged, not parsed back into the settings: the GUI
-        # is the system of record and re-sends on connect, so quietly
-        # adopting whatever the board says would let a stale board
-        # overwrite the operator's saved setup.
+        # "[LIMITS]"/"[LIMITS_INFO]" are board's own view of envelope.
+        # Logged, not parsed back into settings: GUI is system of record,
+        # re-sends on connect — quietly adopting whatever board says would
+        # let a stale board overwrite operator's saved setup.
         if upper.startswith("[LIMITS"):
             self.log(text, tag="rx")
             return
@@ -141,8 +139,8 @@ class ProtocolMixin:
 
         if upper.startswith("[LIMIT]"):
             # e.g. "[LIMIT] ROT_CW" / "[LIMIT] Z_UP" / "[LIMIT] A1_FWD — ..."
-            # v9.1 appends an explanation after an em dash; take only the
-            # axis token or the lookup in _on_limit_triggered fails.
+            # v9.1 appends an explanation after an em dash; take only axis
+            # token or lookup in _on_limit_triggered fails.
             payload = text.split("]", 1)[-1].strip()
             self._on_limit_triggered(payload.split()[0].upper() if payload else "")
             return
@@ -152,9 +150,9 @@ class ProtocolMixin:
             return
 
         if upper.startswith("[PLC_STATE]"):
-            # Polled every heartbeat tick, so it is NOT logged — 20 lines a
-            # minute of unchanged status would bury everything else. Only a
-            # CHANGE of state is worth a line.
+            # Polled every heartbeat tick, NOT logged — 20 lines/min of
+            # unchanged status would bury everything else. Only a CHANGE
+            # of state worth a line.
             self._on_plc_state(text)
             return
 
@@ -162,10 +160,10 @@ class ProtocolMixin:
             self.log(text, tag="rx")
             if "TCP SOCKET OPEN" in upper or "CONNECTED TO" in upper:
                 # A socket is not a conversation. Reporting this as CONNECTED
-                # is what made the lamp flap: the socket genuinely opens and
-                # closes every few seconds when the PLC answers nothing, so
-                # the lamp followed it. At best this is "no reply yet"; only
-                # a landed device read promotes it to CONNECTED.
+                # made the lamp flap: socket genuinely opens/closes every few
+                # seconds when PLC answers nothing, lamp followed it. At
+                # best "no reply yet"; only a landed device read promotes
+                # to CONNECTED.
                 if self._plc_led_state != "connected":
                     self._set_plc_led("no_reply")
             elif "NO REPLY WITHIN" in upper:
@@ -189,8 +187,8 @@ class ProtocolMixin:
                 self._on_home_complete(simulated="SIMULATED" in upper)
                 return
             if "FAILED" in upper or "TIMEOUT" in upper:
-                # The PLC never answered. Unlock the GUI — otherwise every
-                # control except STOP stays disabled forever.
+                # PLC never answered. Unlock GUI — else every control
+                # except STOP stays disabled forever.
                 self.is_homing = False
                 self._cancel_job("_home_sim_job")
                 self._set_motion_locked(False)
@@ -202,10 +200,10 @@ class ProtocolMixin:
                 return
             return
 
-        # Own branch, placed BEFORE the generic "TARGET REACHED" catch-all
-        # below — that check would otherwise treat this as a P2P RUN
-        # completion (wrong status text, wrong side effects), the same
-        # shadowing mistake "[RUN] TARGET REACHED" used to hit.
+        # Own branch, placed BEFORE generic "TARGET REACHED" catch-all
+        # below — else treated as P2P RUN completion (wrong status text,
+        # wrong side effects), same shadowing mistake "[RUN] TARGET
+        # REACHED" used to hit.
         if upper.startswith("[RESET_POSITION]"):
             if "TARGET REACHED" in upper:
                 self._on_reset_position_complete(simulated=False)
@@ -214,17 +212,17 @@ class ProtocolMixin:
             return
 
         if upper.startswith("[WATCHDOG]"):
-            # The board stopped a jog itself because our keep-alive stopped
-            # arriving. Clear the local axes so the UI matches the machine.
+            # Board stopped jog itself — keep-alive stopped arriving. Clear
+            # local axes so UI matches machine.
             self._release_all_jog_axes(send_stop=False)
             self.status_var.set("JOG STOPPED — board watchdog tripped.")
             self.log("The board stopped the jog itself — no JOG_HB keep-alive arrived. "
                      "Check CPU load and the serial link.", tag="warn")
             return
 
-        # v9.2 emits English. The Vietnamese strings a v8 board sends are
-        # still accepted so an un-flashed board keeps working — same
-        # back-compatibility rule as JOG_RE_LEGACY above.
+        # v9.2 emits English. Vietnamese strings a v8 board sends still
+        # accepted so an un-flashed board keeps working — same back-compat
+        # rule as JOG_RE_LEGACY above.
         if "TARGET REACHED" in upper or "DA DEN DIEM DICH THANH CONG" in upper:
             self.is_running = False
             self._set_motion_locked(False)
@@ -242,41 +240,43 @@ class ProtocolMixin:
             self.status_var.set("STOPPED — Emergency Stop Triggered!")
             return
 
-    # ── PLC Ethernet link lamp ───────────────────────────────────────
     _PLC_STATE_RE = _re.compile(r"link=(\w+)\s+socket=(\w+)", _re.IGNORECASE)
-    #: data=NONE|STALE|OK — whether DEVICE READS are landing. This, not the
-    #: socket, is what the lamp reports: a PLC that accepts connections but
-    #: answers nothing made the socket go up and down every few seconds, and
-    #: a socket-driven lamp flapped green/red with it.
+    #: data=NONE|STALE|OK — whether DEVICE READS are landing. Lamp reports
+    #: this, not the socket: a PLC that accepts connections but answers
+    #: nothing made the socket go up and down every few seconds, and a
+    #: socket-driven lamp flapped green/red with it.
     _PLC_DATA_RE = _re.compile(r"data=(NONE|STALE|OK)", _re.IGNORECASE)
-    #: conn=<succeeded>/<attempted>. A socket that has opened even once
-    #: proves the cable and the address are fine, so a currently-closed
-    #: socket is NOT "unreachable" — it is a conversation that is not
-    #: happening. Without this the lamp alternated NO REPLY / UNREACHABLE as
-    #: the socket cycled, which is the same flap one level down.
+    #: conn=<succeeded>/<attempted>. A socket that opened even once proves
+    #: cable and address are fine, so a currently-closed socket is NOT
+    #: "unreachable" — it's a conversation not happening yet. W/o this the
+    #: lamp alternated NO REPLY / UNREACHABLE as the socket cycled, same
+    #: flap one level down.
     _PLC_CONN_RE = _re.compile(r"conn=(\d+)/(\d+)", _re.IGNORECASE)
 
     def _on_plc_state(self, text: str):
         """Drives the PLC lamp from the board's [PLC_STATE] reply.
 
-        Three states are distinguished because they need different actions:
-        UNREACHABLE is a cable or address problem, NO REPLY means the socket
-        opened but the Ethernet module is not answering device reads (almost
-        always MC protocol not enabled on the port), and CONNECTED means
-        HOME can actually work.
+        Four states, different actions: DISABLED = SET_PLC_LINK:0, on
+        purpose — checked first so it can never be mistaken for a fault.
+        UNREACHABLE = cable/address problem. NO REPLY = socket opened but
+        Ethernet module not answering device reads (almost always MC
+        protocol not enabled on port). CONNECTED = HOME can actually work.
         """
         bits = self._PLC_HOME_BITS_RE.search(text)
         if bits:
             field = bits.group(1)
             if "?" in field or "NO DEVICE DATA" in text.upper():
-                # The board is telling us it does not know. Do NOT write
-                # False into the sensor state — that is exactly how a dead
-                # link came to look like four clear sensors.
+                # Board telling us it doesn't know. Do NOT write False into
+                # sensor state — exactly how a dead link came to look like
+                # four clear sensors.
                 self._mark_plc_sensors_unknown()
             else:
-                # Authoritative, and polled: an edge message can be missed,
-                # this cannot. Order is Z/R/A1/A2 == M5/M6/M7/M8.
-                for bit, ch in zip(("M5", "M6", "M7", "M8"), field):
+                # Authoritative, polled: an edge message can be missed, this
+                # can't. The field is ordered by AXIS (Z, then R, then A2),
+                # and the devices are NOT in tidy numeric order: M32 is ZM's
+                # and M30 is A2M's, measured on the machine. Decoding this
+                # positionally as M30/M31/M32 put ZM's lamp on A2M's switch.
+                for bit, ch in zip(("M32", "M31", "M30"), field):
                     self._set_plc_sensor(bit, ch == "1")
                 self._mark_plc_sensors_seen()
                 self._latch_home_state_if_new()
@@ -286,12 +286,15 @@ class ProtocolMixin:
             self.log(text, tag="rx")
             return
         link, socket = m.group(1).upper(), m.group(2).upper()
+        if link == "DISABLED":
+            self._set_plc_led("disabled", detail=text)
+            return
         data = self._PLC_DATA_RE.search(text)
         if data:
-            # Preferred: the board says whether reads are landing.
-            #   OK    -> the conversation works, which is what HOME needs
-            #   STALE -> it worked and stopped
-            #   NONE  -> the socket may open and close all day; no data ever
+            # Preferred: board says whether reads are landing.
+            #   OK    -> conversation works, what HOME needs
+            #   STALE -> worked, then stopped
+            #   NONE  -> socket may open/close all day; no data ever
             got = data.group(1).upper()
             conn = self._PLC_CONN_RE.search(text)
             ever_opened = bool(conn) and int(conn.group(1)) > 0
@@ -300,8 +303,8 @@ class ProtocolMixin:
             elif got == "STALE":
                 state = "no_reply"
             elif ever_opened:
-                # The endpoint answers TCP but not device reads. Steady, even
-                # while the socket itself opens and closes on each timeout.
+                # Endpoint answers TCP but not device reads. Steady even
+                # while the socket itself opens/closes on each timeout.
                 state = "no_reply"
             elif link != "UP" or socket != "OPEN":
                 state = "unreachable"
@@ -318,9 +321,9 @@ class ProtocolMixin:
     def _latch_home_state_if_new(self):
         """Fires the coordinate reset on the RISING edge of the home state.
 
-        Edge-triggered because the condition stays true while the machine
-        sits at home, and re-zeroing on every 3 s poll would quietly eat any
-        real motion away from the reference.
+        Edge-triggered: condition stays true while machine sits at home,
+        re-zeroing every 3 s poll would quietly eat any real motion away
+        from the reference.
         """
         now = self.plc_home_state()
         was = getattr(self, "_plc_home_state_prev", False)
@@ -333,12 +336,12 @@ class ProtocolMixin:
         self._adopt_home_state_reset()
 
     def _plc_link_lost(self):
-        """Serial or PLC link gone: the sensors are unknown, not clear."""
+        """Serial or PLC link gone: sensors unknown, not clear."""
         self._set_plc_led("unknown")
         self._mark_plc_sensors_unknown()
 
     def _set_plc_led(self, state: str, detail: str = ""):
-        """Sets the lamp, and logs ONLY on a change of state."""
+        """Sets the lamp, logs ONLY on a change of state."""
         label, colour_name = PLC_LED_STATES.get(state, PLC_LED_STATES["unknown"])
         if getattr(self, "_plc_led_state", None) == state:
             return
@@ -358,12 +361,11 @@ class ProtocolMixin:
             self.log("PLC Ethernet link DOWN — HOME will time out. Check the cable, "
                      "the subnet, and the PLC's Ethernet module.", tag="error")
 
-    # ── M5..M8 sensor state ──────────────────────────────────────────
-    # Accepts "????" as well as four bits: the board sends that when it has
-    # no device data, and it is the difference between "not covered" and
-    # "nobody knows".
+    # Accepts "????" as well as four bits: board sends that when it has no
+    # device data — the difference between "not covered" and "nobody
+    # knows".
     _PLC_HOME_BITS_RE = _re.compile(
-        r"home\s+Z/R/A1/A2\s*=\s*([01?]{4})", _re.IGNORECASE)
+        r"limit\s+Z/R/A2\s*=\s*([01?]{3})", _re.IGNORECASE)
     _PLC_HOME_LINE_RE = _re.compile(
         r"\[PLC_HOME\]\s+(\w+)\s+home sensor\s+(M\d)\b.*?\b(REACHED|left)\b",
         _re.IGNORECASE)
@@ -377,9 +379,8 @@ class ProtocolMixin:
             self._set_plc_sensor(bit, event == "REACHED")
             return
         if "HOME STATE" in text.upper():
-            # The board latched the home state and zeroed its counters, so
-            # the GUI's copy of the pose has to follow or the two disagree
-            # from this instant on.
+            # Board latched home state and zeroed its counters — GUI's copy
+            # of pose has to follow or the two disagree from this instant.
             self._adopt_home_state_reset()
 
     def _mark_plc_sensors_seen(self):
@@ -390,9 +391,9 @@ class ProtocolMixin:
     def _mark_plc_sensors_unknown(self):
         """Readings are unknown again — the board has no device data.
 
-        The stored bits are left alone rather than zeroed: plc_sensors_known()
-        gates every consumer, so there is nothing to gain from overwriting
-        them and something to lose if a later reader forgets the gate.
+        Stored bits left alone rather than zeroed: plc_sensors_known()
+        gates every consumer, so nothing to gain overwriting them and
+        something to lose if a later reader forgets the gate.
         """
         was = getattr(self, "plc_sensor_data_seen", False)
         self.plc_sensor_data_seen = False
@@ -408,9 +409,9 @@ class ProtocolMixin:
         state = getattr(self, "plc_sensor_state", None)
         if state is None or bit not in state:
             return
-        # All four sensors are wired and working now. Nothing is filtered
-        # out here, and nothing is latched: enforcement happens in P2P
-        # (_sensor_violation) and jog only warns.
+        # All four sensors wired and working now. Nothing filtered out
+        # here, nothing latched: enforcement happens in P2P
+        # (_sensor_violation), jog only warns.
         state[bit] = bool(covered)
         self._mark_plc_sensors_seen()
         if getattr(self, "plc_sensor_lamps", None):
@@ -419,8 +420,8 @@ class ProtocolMixin:
     def plc_sensor_covered_for_jog(self, command: str):
         """The bit a jog command would drive INTO, or None.
 
-        Jog is NOT blocked by it — see warn_if_jogging_into_sensor(). The
-        board does not block it either; both only warn.
+        Jog is NOT blocked by it — see warn_if_jogging_into_sensor().
+        Board doesn't block it either; both only warn.
         """
         state = getattr(self, "plc_sensor_state", {})
         for bit, _label, _axis, cmd, _end in PLC_SENSOR_PANEL:
@@ -431,10 +432,10 @@ class ProtocolMixin:
     def warn_if_jogging_into_sensor(self, command: str):
         """Warns, and lets the jog proceed.
 
-        Jog is a dead-man control: it moves only while held, the operator is
-        watching, and jogging is how you come OFF a tripped sensor. Blocking
+        Jog is a dead-man control: moves only while held, operator is
+        watching, jogging is how you come OFF a tripped sensor. Blocking
         it would also risk pinning the machine on its own switch. P2P is
-        where the sensors are enforced, because a program runs unattended.
+        where sensors are enforced, because a program runs unattended.
         """
         bit = self.plc_sensor_covered_for_jog(command)
         if bit is None:
@@ -444,7 +445,7 @@ class ProtocolMixin:
                  f"covered. Jog is not blocked — watch the machine.", tag="warn")
 
     def _adopt_home_state_reset(self):
-        """The board zeroed its counters because M5+M6 latched. Mirror it."""
+        """Board zeroed its counters because M30..M32 latched. Mirror it."""
         self.current_joints = [Z_HOME_MM, ROT_HOME_DEG, ARM_HOME_DEG, ARM_HOME_DEG]
         self.is_homed = True
         self._update_jog_readout()
@@ -452,20 +453,19 @@ class ProtocolMixin:
         self._refresh_jog_status()
         self._invalidate_loaded_program(
             reason="Coordinates reset at HOME state — LOAD again before RUN.")
-        self.log("HOME STATE (M5 + M6 covered, M7/M8 clear) — coordinates reset to "
-                 "d1=0.00 mm, RM=0.00°, A1M=A2M=0.00 motor°.")
-        self.status_var.set("AT HOME — coordinates reset from the PLC sensors.")
+        self.log("HOME STATE (M30, M31 and M32 all covered) — coordinates reset "
+                 "to d1=0.00 mm, RM=0.00°, A1M=A2M=0.00 motor°.")
+        self.status_var.set("AT HOME — coordinates reset from the PLC limits.")
 
     def _board_reports_motor_degrees(self, text: str) -> bool:
         """True when the board is new enough to report the elbow in MOTOR
         degrees, i.e. its telemetry carries the derived FOLD1/FOLD2 fields.
 
-        A pre-v9.2 board reports the elbow in the old frame, where the
+        Pre-v9.2 board reports the elbow in the old frame, where the
         retracted home pose read 60. Adopting that makes the A1M/A2M
         readout jump to 60 and stay there however the machine is jogged —
-        which looks like a bug in this GUI and is actually stale firmware.
-        Warned once per connection rather than on every 50 ms telemetry
-        line.
+        looks like a GUI bug, is actually stale firmware. Warned once per
+        connection, not on every 50 ms telemetry line.
         """
         if FOLD_FIELDS_RE.search(text):
             return True
@@ -484,13 +484,13 @@ class ProtocolMixin:
         """A finished HOME resets the coordinate system to the standard
         home pose, on BOTH sides.
 
-        The board zeroes its four step counters (see finishHoming). This
-        used to reset the GUI's own copies only in the SIMULATED case, so
-        after a real home the readouts kept whatever they happened to hold
-        — usually the pose the machine was in when HOME was pressed. Every
+        Board zeroes its four step counters (see finishHoming). Used to
+        reset the GUI's own copies only in the SIMULATED case, so after a
+        real home the readouts kept whatever they happened to hold —
+        usually the pose the machine was in when HOME was pressed. Every
         later jog and every offline preview then counted from a reference
         the machine did not share, and the first absolute move went to the
-        wrong place. The reset is unconditional now.
+        wrong place. Reset is unconditional now.
 
         Standard home is, by definition, zero on all four axes:
             d1  = 0 mm        lift at the bottom of its stroke
@@ -505,20 +505,20 @@ class ProtocolMixin:
         self.rot_limit = {k: False for k in self.rot_limit}
         self.z_limit = {k: False for k in self.z_limit}
         self._update_jog_readout()
-        # The P2P side keeps its own copy of the pose, and it has to agree
-        # or the progress bar and the Cartesian readout would be computed
-        # from a stale start point.
+        # P2P side keeps its own copy of the pose, has to agree or the
+        # progress bar and Cartesian readout would compute from a stale
+        # start point.
         self.current_joints = [Z_HOME_MM, ROT_HOME_DEG, ARM_HOME_DEG, ARM_HOME_DEG]
         self._update_p2p_telemetry(Z_HOME_MM, ROT_HOME_DEG, ARM_HOME_DEG,
                                    ARM_HOME_DEG, pct=0)
-        # A loaded program was solved against the OLD reference, so it must
-        # not be runnable against the new one.
+        # Loaded program was solved against the OLD reference, must not be
+        # runnable against the new one.
         self._invalidate_loaded_program(
             reason="Coordinates reset by HOME — LOAD again before RUN.")
         self.log("Coordinates reset to standard home: d1=0.00 mm, RM=0.00°, "
                  "A1M=0.00 motor°, A2M=0.00 motor° (fold 0.00°, R = 133.2 mm).")
-        # A completed home is what makes the joint positions meaningful,
-        # so this is the moment soft limits become enforceable.
+        # A completed home is what makes joint positions meaningful — this
+        # is the moment soft limits become enforceable.
         self.is_homed = True
         self.is_homing = False
         self._set_motion_locked(False)
@@ -531,9 +531,9 @@ class ProtocolMixin:
     def _on_reset_position_complete(self, simulated: bool):
         """RESET_POSITION drove to (0,0,0,0) under the board's own motor
         control — not a PLC handshake, so unlike _on_home_complete() this
-        does NOT set is_homed (no reference was re-anchored, the board's
-        existing zero didn't change) and does NOT invalidate the loaded
-        P2P program (the origin it was solved against is unchanged).
+        does NOT set is_homed (no reference re-anchored, board's existing
+        zero didn't change) and does NOT invalidate the loaded P2P program
+        (origin it was solved against is unchanged).
         """
         self.sim_rot = ROT_HOME_DEG
         self.sim_a1 = ARM_HOME_DEG

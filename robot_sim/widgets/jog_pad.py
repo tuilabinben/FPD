@@ -1,11 +1,10 @@
 """Dead-man-switch jog button: press to move, release to stop.
 
-Flat, with the axis colour doing the signalling. Idle is a plain surface
-tile with a coloured glyph; hover lifts the fill one step; ACTIVE floods
-the whole tile in the axis colour so a moving axis is unmistakable from
-across the room. That last part is the functional requirement — on a
-machine controller "which axis is live" has to be readable at a glance,
-and a subtle shadow change would not be.
+Flat, axis colour does signalling. Idle = plain surface tile w/ coloured
+glyph; hover lifts fill one step; ACTIVE floods whole tile in axis colour
+so moving axis is unmistakable across room. That last part is the
+functional requirement — on machine controller "which axis is live"
+must be readable at a glance, subtle shadow change would not be.
 """
 
 import tkinter as tk
@@ -58,7 +57,6 @@ class JogPad(tk.Canvas):
         self.bind("<Enter>", self._enter)
         self.bind("<Leave>", self._leave)
 
-    # ── rendering ────────────────────────────────────────────────────
     def _draw(self):
         clear(self)
         r = px(RADIUS_LG)
@@ -74,8 +72,8 @@ class JogPad(tk.Canvas):
             glyph_fill = label_fill = INK_DARK
         elif self.state == "hover":
             fill = SURFACE_HI
-            # The axis colour arrives on the border first, so hover already
-            # tells you which axis you are about to move.
+            # axis colour arrives on border first — hover already tells
+            # which axis you're about to move
             border = mix(SURFACE_HI, self.base_color, 0.55)
             glyph_fill, label_fill = self.hi_color, TEXT_LIGHT
         else:
@@ -92,8 +90,8 @@ class JogPad(tk.Canvas):
         self.create_text(cx, self.h * 0.60, text=self.label,
                          font=FONT_CAPTION, fill=label_fill)
 
-        # Keycap chip. Dark well normally; on an active pad it has to sit
-        # on a bright fill, so it inverts to stay readable.
+        # keycap chip: dark well normally; active pad sits on bright fill,
+        # so it inverts to stay readable
         kc_w, kc_h = px(22), px(15)
         kx1, ky1 = cx - kc_w / 2, self.h * 0.82 - kc_h / 2
         if active:
@@ -106,15 +104,14 @@ class JogPad(tk.Canvas):
         self.create_text(cx, self.h * 0.82, text=self.keycap,
                          font=FONT_KEYCAP, fill=cap_fill)
 
-    # ── public API ───────────────────────────────────────────────────
     def set_state(self, state):
         if self.state != state:
             self.state = state
             self._draw()
 
     def set_enabled(self, enabled):
-        # Releasing motion while being disabled must not leave the axis
-        # latched on: fire the release callback before greying out.
+        # disabling mid-motion must not leave axis latched on: fire
+        # release callback before greying out
         if not enabled and self.state == "active":
             self.state = "idle"
             self.on_release()
@@ -125,9 +122,8 @@ class JogPad(tk.Canvas):
         self._draw()
 
     def set_keycap(self, keycap):
-        """Updates the letter on the chip after a rebinding, without
-        rebuilding the panel — a pad showing the old key is worse than a
-        pad showing none."""
+        """Updates chip letter after rebinding, w/o rebuilding panel —
+        pad showing old key is worse than pad showing none."""
         if keycap != self.keycap:
             self.keycap = keycap
             self._draw()
@@ -139,7 +135,6 @@ class JogPad(tk.Canvas):
     def key_deactivate(self):
         self.set_state("idle")
 
-    # ── events ───────────────────────────────────────────────────────
     def _press(self, _=None):
         if not self.enabled:
             return

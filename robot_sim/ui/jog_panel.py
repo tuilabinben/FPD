@@ -1,8 +1,8 @@
 """Section 3 — Joystick / jog panel.
 
-A1M and A2M are separate motors driving separate frog-leg linkages, so
-each gets its own pair of pads. The LINK toggle re-couples them into the
-single "reach in / reach out" gesture that was tested on real hardware.
+A1M and A2M are separate motors, separate frog-leg linkages — each gets
+its own pad pair. LINK toggle re-couples them into single "reach in/out"
+gesture, tested on real hardware.
 """
 
 import tkinter as tk
@@ -42,18 +42,13 @@ class JogPanelMixin:
         self._build_jog_readout(parent)
         self._build_jog_status(parent)
 
-        # EMERGENCY STOP, back by request.
+        # EMERGENCY STOP, back by request. Removed once on argument jog is
+        # dead-man control and SPACE fires same path — both still true, but
+        # neither helps someone hand-on-mouse watching machine not keyboard.
+        # Stop control on one motion panel, not other, is its own hazard.
         #
-        # It was removed on the argument that jog is a dead-man control and
-        # SPACE fires the same path from anywhere. Both are still true, and
-        # neither helps somebody with one hand on the mouse who is looking
-        # at the machine rather than the keyboard. A stop control that
-        # exists on one motion panel and not the other is its own hazard:
-        # where the button is depends on which mode you happen to be in.
-        #
-        # It calls emergency_stop_all — the SAME single audited path as the
-        # P2P button and the SPACE key. There is no second stop
-        # implementation, which is the property worth protecting here.
+        # Calls emergency_stop_all — SAME single audited path as P2P button
+        # and SPACE key. No second stop implementation; that's the point.
         estop_row = tk.Frame(parent, bg=PANEL_BG)
         estop_row.pack(pady=(18, 0))
         self.jog_estop_btn = RoundedButton(
@@ -61,17 +56,14 @@ class JogPanelMixin:
             fg_color=INK_DARK, width=240, height=44,
             command=self.emergency_stop_all)
         self.jog_estop_btn.pack()
-        # Deliberately NOT added to motion_lock_widgets. Everything in that
-        # list is disabled while the machine is moving, which is precisely
-        # when this button has to work.
+        # NOT in motion_lock_widgets deliberately: that list disables while
+        # machine moves — precisely when this button must work.
 
-        # RESET COORDINATES, the same row P2P has. Declaring the reference
-        # IS a jogging job — you drive the machine to the pose by hand and
-        # then say "this is zero" — so having the buttons only on the P2P
-        # panel meant switching mode to finish an operation you were in the
-        # middle of, and switching mode auto-stops motion. Shared builder,
-        # see ui/coord_reset.py; the confirm-and-refuse-while-moving checks
-        # are in reset_coordinates() and are not duplicated here.
+        # RESET COORDINATES, same row P2P has. Declaring reference IS a
+        # jogging job — drive to pose by hand, say "zero" — P2P-only meant
+        # switching mode mid-operation, and mode switch auto-stops motion.
+        # Shared builder, see ui/coord_reset.py; confirm/refuse-while-moving
+        # checks live in reset_coordinates(), not duplicated here.
         self._build_plc_sensor_row(parent)
         self._build_coord_reset_row(parent, pady=(18, 0))
 
@@ -99,16 +91,15 @@ class JogPanelMixin:
                 + " · SPACE = E-STOP")
 
     def refresh_jog_keycaps(self):
-        """Repaints every pad's keycap and the hint strip from the live
-        layout. Called after the Controls tab applies a change."""
+        """Repaints every pad's keycap and hint strip from live layout.
+        Called after Controls tab applies a change."""
         from .. import keybinds
         caps = keybinds.to_keycaps(keybinds.active_map())
         for command, pad in self.jog_pads.items():
             if command in caps:
                 pad.set_keycap(caps[command])
-        # Every place a key name appears has to move together, or one of
-        # them ends up telling the operator to press a key that no longer
-        # does anything.
+        # Every key-name display must move together, or one keeps telling
+        # operator to press a key that no longer does anything.
         for var, args in (("rot_title_v", ("ROTATION RM", "ROT_CCW", "ROT_CW")),
                           ("z_title_v",   ("Z AXIS ZM", "Z_UP", "Z_DOWN")),
                           ("a1_title_v",  ("A1M", "A1_FWD", "A1_BACK")),
@@ -118,7 +109,6 @@ class JogPanelMixin:
         if hasattr(self, "jog_hint_v"):
             self.jog_hint_v.set(self._jog_hint_text())
 
-    # ── rotation + home ──────────────────────────────────────────────
     def _build_rot_card(self, parent):
         wrap = RoundedFrame(parent, bg=PANEL_BG, border=BORDER, border_w=1)
         wrap.pack(side="left", padx=(0, 10), fill="y")
@@ -135,7 +125,6 @@ class JogPanelMixin:
         self.home_btn.grid(row=0, column=1, padx=4, pady=4)
         self._jog_pad(grid, 0, 2, "▶", "ROT CW", "ROT_CW", ROT_COLOR, HI_ROT)
 
-    # ── the two independent arms ─────────────────────────────────────
     def _build_arm_cards(self, parent):
         wrap = RoundedFrame(parent, bg=PANEL_BG, border=BORDER, border_w=1)
         wrap.pack(side="left", padx=(0, 10), fill="y")
@@ -146,7 +135,6 @@ class JogPanelMixin:
         tk.Label(header, text="ARMS — INDEPENDENT", bg=PANEL_BG, fg=TEXT_MUTED,
                  font=FONT_CAPTION).pack(side="left")
 
-        # LINK re-couples the two elbows into one gesture.
         self.link_btn = RoundedButton(header, text="LINK: OFF", icon="🔗",
                                       bg_color=SURFACE, fg_color=TEXT_LIGHT,
                                       width=112, height=28, radius=12,
@@ -156,11 +144,9 @@ class JogPanelMixin:
         body = tk.Frame(card, bg=PANEL_BG)
         body.pack(padx=14, pady=(6, 14))
 
-        # A2M on the LEFT, A1M on the RIGHT. The default layout puts A2M on
-        # the left-hand pair and A1M on the right-hand one, so screen order
-        # matches hand order — which is what stops the wrong arm being
-        # driven into something. A custom binding can break that pairing;
-        # the labels are live so at least they never lie about it.
+        # A2M LEFT, A1M RIGHT: default layout matches screen order to hand
+        # order — stops wrong arm driven into something. Custom binding can
+        # break pairing; labels stay live so they never lie about it.
         a2 = tk.Frame(body, bg=PANEL_BG)
         a2.grid(row=0, column=0, padx=(0, 10))
         self.a2_title_v = tk.StringVar(
@@ -192,18 +178,17 @@ class JogPanelMixin:
 
         grid = tk.Frame(card, bg=PANEL_BG)
         grid.pack(padx=14, pady=(6, 14))
-        # JZ_COLOR, not ACCENT_GREEN. These pads were hardcoded green,
-        # which is why ZM looked identical in every scheme while every
-        # other axis changed — ACCENT_GREEN is the "go" colour and is
-        # roughly green everywhere by design. ZM is a base axis, so it
-        # shares RM's tone (JZ_COLOR == ROT_COLOR).
+        # JZ_COLOR not ACCENT_GREEN: pads were hardcoded green, so ZM looked
+        # same in every scheme while other axes changed — ACCENT_GREEN is
+        # "go" colour, roughly green everywhere by design. ZM shares RM's
+        # tone instead (JZ_COLOR == ROT_COLOR).
         self._jog_pad(grid, 0, 0, "▲", "Z UP", "Z_UP", JZ_COLOR, HI_ROT)
         tk.Frame(grid, bg=PANEL_BG, height=8).grid(row=1, column=0)
         self._jog_pad(grid, 2, 0, "▼", "Z DOWN", "Z_DOWN", JZ_COLOR, HI_ROT)
 
     def _jog_pad(self, parent, row, col, glyph, label, start_cmd, base, hi):
-        # The keycap is looked up from JOG_KEYCAPS rather than passed in,
-        # so a rebinding can never leave the pad showing the old letter.
+        # Keycap looked up from JOG_KEYCAPS, not passed in — rebinding can
+        # never leave pad showing old letter.
         from .. import keybinds
         keycap = keybinds.to_keycaps(keybinds.active_map()).get(start_cmd, "?")
         stop_cmd = JOG_STOP_COMMAND[start_cmd]
@@ -217,13 +202,12 @@ class JogPanelMixin:
         self.jog_pads[start_cmd] = pad
         return pad
 
-    # ── readouts + status ────────────────────────────────────────────
     def _build_jog_readout(self, parent):
         tk.Label(parent, text="LIVE JOG POSITION", bg=PANEL_BG, fg=TEXT_MUTED,
                  font=FONT_CAPTION).pack(anchor="w", pady=(16, 0))
 
         self.rot_pos_v = tk.StringVar(value="0.00 deg")
-        # MOTOR degrees, and 0 at home — not the old CAD-flavoured 60.
+        # MOTOR degrees, 0 at home — not old CAD-flavoured 60.
         self.a1_pos_v = tk.StringVar(value="0.00 motor deg")
         self.a2_pos_v = tk.StringVar(value="0.00 motor deg")
         self.jz_pos_v = tk.StringVar(value="0.00 mm")
@@ -235,7 +219,7 @@ class JogPanelMixin:
         make_led_card(row, 2, "A2M_MOTOR", self.a2_pos_v, ARM2_COLOR)
         make_led_card(row, 3, "Z_POS (d1)", self.jz_pos_v, JZ_COLOR)
 
-        # Elbow angle alone is hard to judge; show the radius it produces.
+        # Elbow angle alone hard to judge; show radius it produces.
         self.a1_reach_v = tk.StringVar(value="R1 = 133.2 mm")
         self.a2_reach_v = tk.StringVar(value="R2 = 133.2 mm")
         reach_row = tk.Frame(parent, bg=PANEL_BG)

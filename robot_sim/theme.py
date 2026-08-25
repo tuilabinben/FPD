@@ -1,41 +1,29 @@
 """Active colour scheme, switchable at runtime.
 
-HOW LIVE SWITCHING WORKS
-------------------------
-Every widget module does `from ..theme import PANEL_BG`, which copies the
-VALUE into that module's namespace at import time. That is why the first
-version of this needed a restart: rebinding `theme.PANEL_BG` alone left a
-dozen other modules still holding the old string.
+HOW LIVE SWITCHING WORKS: every widget module does `from ..theme import PANEL_BG`, copies the
+VALUE into that module's namespace at import time. Why first version needed restart: rebinding
+theme.PANEL_BG alone left a dozen other modules still holding old string.
 
-`apply_palette()` fixes that in three steps:
+apply_palette() fixes in three steps:
+  1. Rebind every constant in THIS module from new palette.
+  2. Walk every already-imported robot_sim.* module, rebind any name still holding OLD value.
+     Comparing against old value (not just name) is what makes blind sweep safe: module w/ its
+     own unrelated BORDER left alone, value won't match.
+  3. Tell app to rebuild widgets — Tk widget colours fixed at construction, can't restyle in
+     place.
 
-  1. Rebind every constant in THIS module from the new palette.
-  2. Walk every already-imported `robot_sim.*` module and rebind any
-     name that still holds the OLD value. Comparing against the old
-     value — rather than just matching by name — is what makes this safe:
-     a module that happens to define its own `BORDER` for an unrelated
-     reason is left alone, because its value will not match.
-  3. Tell the app to rebuild its widgets, since a Tk widget's colours are
-     fixed at construction and cannot be restyled in place.
+Alternative was `import theme` everywhere + `theme.PANEL_BG` at every use site — cleaner
+arguably, but several hundred edits across UI, noisier to read, same end result.
 
-The alternative was `import theme` everywhere and `theme.PANEL_BG` at
-every use site. That is arguably cleaner, but it is several hundred edits
-across the UI and makes every colour reference noisier to read, for the
-same end result.
+DESIGN NOTE — what colours are FOR. Machine controller: colour carries meaning before style.
+    ACCENT_RED     stop. Never anything else.
+    ACCENT_ORANGE  warning / above-recommended. Never primary accent.
+    ACCENT_MINT    primary accent — selection, focus, live axis.
+    axis colours   identity, distinguishable by lightness as well as hue, survive colour-vision
+                   deficiency.
 
-DESIGN NOTE — what the colours are FOR
---------------------------------------
-This is a machine controller, so colour carries meaning before style:
-
-    ACCENT_RED     stop. Never used for anything else.
-    ACCENT_ORANGE  warning / above-recommended. Never a primary accent.
-    ACCENT_MINT    the primary accent — selection, focus, a live axis.
-    axis colours   identity, kept distinguishable by lightness as well as
-                   hue so they survive colour-vision deficiency.
-
-The surface ladder (BG / PANEL_BG / SURFACE / SURFACE_HI) is what
-separates a control from the card behind it. Flat design has no shadows,
-so those steps do the work shadows used to.
+Surface ladder (BG/PANEL_BG/SURFACE/SURFACE_HI) separates control from card behind it. Flat
+design has no shadows, these steps do that work.
 """
 
 import sys
@@ -43,9 +31,6 @@ import sys
 from .palettes import PALETTES, load_active_name, save_active_name
 
 
-# ══════════════════════════════════════════════════════════════════════
-# Colour maths — defined first, the constants below are derived from it
-# ══════════════════════════════════════════════════════════════════════
 def shade(hex_color, factor):
     """factor < 1 darkens, factor > 1 lightens (clamped per channel)."""
     hex_color = hex_color.lstrip("#")
@@ -67,8 +52,8 @@ def mix(color_a, color_b, t):
 
 
 def luminance(hex_color):
-    """Perceived brightness, 0..255. Used by the palette self-test to
-    assert that a scheme's surface ladder steps far enough."""
+    """Perceived brightness, 0..255. Used by palette self-test to assert scheme's surface
+    ladder steps far enough."""
     r, g, b = (int(hex_color.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
@@ -76,11 +61,9 @@ def luminance(hex_color):
 def _tone(base, target_lum):
     """`base` shifted toward white or black until it hits `target_lum`.
 
-    Blending toward pure white/black keeps the hue recognisable while
-    moving the lightness freely, which is what lets a tonal ramp be both
-    unified (one colour family) and accessible (separated by lightness
-    rather than hue). Binary search because luminance is not linear in
-    the blend factor.
+    Blending toward pure white/black keeps hue recognisable while moving lightness freely —
+    lets tonal ramp be both unified (one colour family) and accessible (separated by lightness
+    not hue). Binary search since luminance not linear in blend factor.
     """
     have = luminance(base)
     toward = "#ffffff" if target_lum > have else "#000000"
@@ -95,11 +78,8 @@ def _tone(base, target_lum):
     return mix(base, toward, (lo + hi) / 2)
 
 
-# ══════════════════════════════════════════════════════════════════════
-# Constant binding
-# ══════════════════════════════════════════════════════════════════════
-#: Names this module owns. Only these are propagated on a palette change,
-#: and only where the receiving module still holds the previous value.
+#: Names this module owns. Only these propagated on palette change, only where receiving
+#: module still holds previous value.
 COLOUR_NAMES = (
     "BG", "PANEL_BG", "SURFACE", "SURFACE_HI", "ENTRY_BG", "LED_BG",
     "BORDER", "BORDER_SOFT", "SHADOW_DARK", "SHADOW_LIGHT",
@@ -122,7 +102,6 @@ def _bind(name):
     g["PALETTE_LABEL"] = p["label"]
     g["IS_DARK"] = p["dark"]
 
-    # surfaces
     g["BG"] = p["BG"]
     g["PANEL_BG"] = p["PANEL_BG"]
     g["SURFACE"] = p["SURFACE"]
@@ -133,8 +112,7 @@ def _bind(name):
     g["BORDER_SOFT"] = p["BORDER_SOFT"]
     g["INACTIVE_BG"] = p["SURFACE"]
 
-    # accents. ACCENT_MINT is a legacy name meaning "the primary accent",
-    # whatever colour the active scheme uses for it.
+    # ACCENT_MINT: legacy name meaning "primary accent", whatever colour active scheme uses.
     g["ACCENT_MINT"] = p["ACCENT"]
     g["ACCENT_CYAN"] = p["ACCENT"]
     g["ACCENT_GREEN"] = p["ACCENT_GREEN"]
@@ -143,42 +121,30 @@ def _bind(name):
     g["ACCENT_PURPLE"] = p["ACCENT_PURPLE"]
     g["INK_DARK"] = p["ACCENT_ON"]
 
-    # ── the motor / axis ramp ────────────────────────────────────────
-    # Previously these were six independently chosen hues — red, green,
-    # blue, amber, purple, teal — which made the readout row look like it
-    # belonged to a different application than everything around it.
+    # Motor/axis ramp. Previously six independently chosen hues (red, green, blue, amber,
+    # purple, teal) — readout row looked like a different app.
     #
-    # They are now DERIVED from the scheme's two accents, so the whole UI
-    # stays in one colour family. Separation still comes from lightness,
-    # not hue, which is what keeps them distinguishable under red-green
-    # colour blindness — and a tonal ramp does that naturally, so the
-    # unified look and the accessibility requirement pull the same way
-    # here rather than against each other.
-    # TWO groups, not four separate colours:
+    # Now DERIVED from scheme's two accents, whole UI stays one colour family. Separation from
+    # lightness not hue — keeps distinguishable under red-green colour blindness; tonal ramp
+    # does that naturally, unified look and accessibility pull same way here.
     #
-    #     A1M + A2M  share the primary accent    (the arms are a pair)
-    #     RM  + ZM   share the secondary accent  (the base axes)
+    # TWO groups not four separate colours:
+    #   A1M + A2M share primary accent   (arms are a pair)
+    #   RM  + ZM  share secondary accent (base axes)
+    # Four distinct tones was still four things to tell apart in a readout row. Grouping by
+    # what they physically are: colour answers "which kind of axis", label answers "which one".
     #
-    # Four distinct tones was still four things to tell apart in a row of
-    # readouts. Grouping them by what they physically are means the colour
-    # answers "which kind of axis" at a glance, and the label answers
-    # "which one" — which is the division of labour that actually matches
-    # how the readouts get scanned.
-    #
-    # The tones are solved for a TARGET LUMINANCE rather than mixed by a
-    # fixed ratio. Fixed ratios were the first attempt and they do not
-    # work: how far a 30% blend moves brightness depends entirely on where
-    # the accent started, so schemes whose accents happened to be close in
-    # lightness collapsed to a 2-unit separation — invisible, and worse
-    # than the clashing hues it replaced.
+    # Tones solved for TARGET LUMINANCE not mixed by fixed ratio. Fixed ratio was first
+    # attempt, doesn't work: how far a 30% blend moves brightness depends on where accent
+    # started, so schemes w/ accents close in lightness collapsed to 2-unit separation —
+    # invisible, worse than clashing hues it replaced.
     a1, a2 = p["ACCENT"], p["ACCENT_2"]
     if p["dark"]:
-        # Bright: these sit on the darkest plane in the app (LED_BG), so
-        # they can afford to be near the top of the range.
+        # Bright: sit on darkest plane in app (LED_BG), can afford near top of range.
         arm_t, base_t = 214, 168
         c_targets = (206, 180, 154)
     else:
-        # On a light card the tones must go DOWN, or they vanish.
+        # On light card tones must go DOWN or they vanish.
         arm_t, base_t = 74, 116
         c_targets = (78, 106, 134)
 
@@ -186,9 +152,9 @@ def _bind(name):
     base = _tone(a2, base_t)
 
     g["ARM_COLOR"] = arms          # A1M
-    g["ARM2_COLOR"] = arms         # A2M — same colour, by design
+    g["ARM2_COLOR"] = arms         # A2M — same colour by design
     g["ROT_COLOR"] = base          # RM
-    g["JZ_COLOR"] = base           # ZM  — same colour, by design
+    g["JZ_COLOR"] = base           # ZM — same colour by design
 
     g["AXIS_X_COLOR"] = _tone(a1, c_targets[0])
     g["AXIS_Y_COLOR"] = _tone(a2, c_targets[1])
@@ -198,19 +164,18 @@ def _bind(name):
     g["TEXT_MUTED"] = p["TEXT_MUTED"]
     g["TEXT_DIM"] = p["TEXT_DIM"]
 
-    # Retained for stragglers; the flat style changes fills, not shadows.
+    # Retained for stragglers; flat style changes fills not shadows.
     g["SHADOW_DARK"] = "#000000" if p["dark"] else "#9aa0aa"
     g["SHADOW_LIGHT"] = "#2b3037" if p["dark"] else "#ffffff"
 
-    # Field states. Borders, not fills: the point is to draw the eye
-    # without making the number itself harder to read.
+    # Field states. Borders not fills — draw eye w/o making number itself harder to read.
     g["WARN_BORDER"] = p["ACCENT_ORANGE"]
     g["ERROR_BORDER"] = p["ACCENT_RED"]
     g["FOCUS_BORDER"] = p["ACCENT"]
     g["NEUTRAL_BORDER"] = p["BORDER"]
 
-    # Highlights. Lighten on dark schemes, darken on light ones — a
-    # "brighter" hover on a light theme has nowhere to go.
+    # Highlights: lighten on dark schemes, darken on light ones — "brighter" hover on light
+    # theme has nowhere to go.
     lift = 1.18 if p["dark"] else 0.88
     g["HI_CYAN"] = shade(p["ACCENT"], lift)
     g["HI_MINT"] = shade(p["ACCENT"], lift)
@@ -223,23 +188,18 @@ def _bind(name):
 _bind(load_active_name())
 
 
-# ── corner radii — not palette dependent ─────────────────────────────
-# Generous and consistent. Corners are anti-aliased now, so a larger
-# radius reads as soft instead of as a longer staircase.
+# Corner radii, not palette dependent. Generous+consistent — corners anti-aliased now, larger
+# radius reads soft instead of longer staircase.
 RADIUS_SM = 8       # chips, keycaps
 RADIUS_MD = 12      # buttons, fields
 RADIUS_LG = 16      # jog pads
 RADIUS_CARD = 14    # section cards
 
-# ── type scale ───────────────────────────────────────────────────────
-# Sizes are in POINTS, which Tk resolves against the real DPI once
-# `tk scaling` is set — so these are NOT multiplied by the DPI factor
-# anywhere. Doing both was the bug that made every label overflow its
-# button.
+# Type scale. Sizes in POINTS, Tk resolves against real DPI once `tk scaling` set — NOT
+# multiplied by DPI factor anywhere (doing both was the bug making labels overflow buttons).
 #
-# Six steps, each with one job. The previous code picked a size per call
-# site, which drifted into eleven different sizes and is why some labels
-# looked oversized next to their neighbours.
+# Six steps, each one job. Previous code picked size per call site, drifted into eleven
+# different sizes — why some labels looked oversized next to neighbours.
 UI_FAMILY = "Segoe UI"
 MONO_FAMILY = "Consolas"
 
@@ -257,20 +217,14 @@ FONT_GLYPH = (UI_FAMILY, 16, "bold")      # jog-pad arrows
 FONT_KEYCAP = (MONO_FAMILY, 8, "bold")    # keycap chips
 
 
-# ══════════════════════════════════════════════════════════════════════
-# Live switching
-# ══════════════════════════════════════════════════════════════════════
 def _propagate(old_values):
     """Rebinds theme names in every module that imported them.
 
-    Only rewrites an attribute when it still equals the OLD theme value.
-    That guard is what makes a blind sweep over `sys.modules` safe: a
-    module with its own unrelated `BORDER` keeps it, because the value
-    will not match.
+    Only rewrites attribute when it still equals OLD theme value — guard makes blind sweep
+    over sys.modules safe: module w/ own unrelated BORDER keeps it, value won't match.
 
-    Returns the number of attributes updated, which the self-test asserts
-    is non-zero — a silent no-op here would look exactly like a working
-    theme switch that simply had nothing to do.
+    Returns count of attributes updated; self-test asserts non-zero — silent no-op here would
+    look exactly like a working theme switch that had nothing to do.
     """
     updated = 0
     for mod_name, module in list(sys.modules.items()):
@@ -292,10 +246,8 @@ def _propagate(old_values):
 def apply_palette(name, persist=True):
     """Switches scheme in place. Returns (ok, attributes_updated).
 
-    Does NOT touch widgets — a Tk widget's colours are fixed when it is
-    constructed, so the caller has to rebuild the UI afterwards. That
-    split is deliberate: this function is pure state, and testable
-    without a display.
+    Does NOT touch widgets — Tk widget colours fixed at construction, caller must rebuild UI
+    afterwards. Deliberate split: this fn is pure state, testable w/o display.
     """
     if name not in PALETTES:
         return False, 0
@@ -306,8 +258,7 @@ def apply_palette(name, persist=True):
     _bind(name)
     updated = _propagate(old_values)
 
-    # Rendered surfaces are cached by colour, so old entries are simply
-    # unreachable rather than wrong — but they are also dead weight.
+    # Rendered surfaces cached by colour — old entries unreachable not wrong, but dead weight.
     try:
         from .widgets import draw as _draw
         _draw._IMAGE_CACHE.clear()

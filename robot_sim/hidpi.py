@@ -1,66 +1,53 @@
 """High-DPI support.
 
-WHY THE UI LOOKED LOW-RESOLUTION
--------------------------------
-Tk declares itself DPI-unaware. On a Windows display running above 100%
-scaling — which is every modern laptop, usually 125% or 150% — the OS
-therefore does NOT let the app draw at native resolution. It lets the app
-render a small window at 96 DPI and then BITMAP-STRETCHES the result to
-the real size.
+WHY UI LOOKED LOW-RES: Tk declares itself DPI-unaware. On Windows display above 100% scaling
+(every modern laptop, usually 125-150%), OS does NOT let app draw at native res — renders
+small window at 96 DPI then BITMAP-STRETCHES to real size.
 
-So every line, every glyph and every one of our anti-aliased corners was
-being drawn correctly and then blown up with nearest-neighbour-ish
-filtering. That is what "low res" was: not the drawing, the stretching
-after it. Nothing done inside the app could have fixed it, because the
-damage happened after Tk had finished.
+Every line/glyph/AA corner drawn correctly then blown up w/ nearest-neighbour-ish filtering.
+"Low res" = the stretching, not the drawing. Nothing inside app could fix it — damage happens
+after Tk finished.
 
-`enable()` tells Windows the process handles DPI itself. Windows then
-stops stretching and hands over the real pixel grid. Two consequences,
-both of which have to be dealt with here:
+`enable()` tells Windows process handles DPI itself. Windows stops stretching, hands over real
+pixel grid. Two consequences to handle:
+  1. Text comes out tiny — Tk still assumes 72 points/inch. `tk scaling` fixes for point sizes.
+  2. PIXEL-sized things (canvas widgets, explicit widths) stay physically small. `px()` scales
+     those.
 
-  1. Text would come out tiny, because Tk still assumes 72 points per
-     inch. `tk scaling` fixes that for anything sized in points.
-  2. Anything sized in PIXELS — our canvas widgets, which are given
-     explicit widths — would stay physically small. `px()` scales those.
-
-The result is a UI that draws at the monitor's real resolution instead of
-being upscaled into it.
+Result: UI draws at monitor's real resolution instead of upscaled into it.
 """
 
 import sys
 
-#: Multiply hard-coded pixel dimensions by this. 1.0 until enable() runs,
-#: so importing this module has no effect on its own.
+#: Multiply hard-coded pixel dims by this. 1.0 until enable() runs — importing module alone
+#: has no effect.
 SCALE = 1.0
 
-#: The DPI we were designed against. Windows' "100%" setting.
+#: DPI designed against. Windows "100%" setting.
 BASE_DPI = 96.0
 
 
 def enable(root=None):
-    """Declares DPI awareness and computes SCALE. Safe to call anywhere;
-    returns the scale factor.
+    """Declares DPI awareness, computes SCALE. Safe to call anywhere, returns scale factor.
 
-    Must run BEFORE the first widget is created, or Tk caches the old
-    metrics and the window ends up half-scaled.
+    Must run BEFORE first widget created, or Tk caches old metrics and window ends up
+    half-scaled.
     """
     global SCALE
 
     if sys.platform == "win32":
         try:
             import ctypes
-            # 2 = PROCESS_PER_MONITOR_DPI_AWARE. Preferred, because it
-            # also handles being dragged to a second monitor with
-            # different scaling.
+            # 2 = PROCESS_PER_MONITOR_DPI_AWARE. Preferred: also handles drag to 2nd monitor
+            # w/ different scaling.
             ctypes.windll.shcore.SetProcessDpiAwareness(2)
         except Exception:
             try:
                 # Windows 7/8 fallback: system-wide awareness only.
                 ctypes.windll.user32.SetProcessDPIAware()
             except Exception:
-                # Not Windows, or the call is unavailable. The app still
-                # runs; it just stays blurry on a scaled display, which
-                # is exactly where it was before.
+                # Not Windows, or call unavailable. App still runs, stays blurry on scaled
+                # display — same as before.
                 return SCALE
 
     if root is not None:
@@ -68,9 +55,8 @@ def enable(root=None):
             dpi = root.winfo_fpixels("1i")
             if dpi > 0:
                 SCALE = max(1.0, dpi / BASE_DPI)
-                # Tk sizes fonts in points and assumes 72 per inch. Telling
-                # it the real value is what keeps text crisp AND correctly
-                # sized rather than tiny.
+                # Tk sizes fonts in points, assumes 72/inch. Real value keeps text crisp AND
+                # correctly sized instead of tiny.
                 root.tk.call("tk", "scaling", dpi / 72.0)
         except Exception:
             pass
@@ -78,29 +64,24 @@ def enable(root=None):
 
 
 def px(value):
-    """Scales a pixel dimension that was written for a 96-DPI display.
+    """Scales a pixel dimension written for 96-DPI display.
 
-    Rounded to whole pixels: a canvas widget given a fractional width gets
-    a fractional layout, and the half-pixel seams that produces are their
-    own kind of blurry.
+    Rounded to whole pixels: fractional width -> fractional layout -> half-pixel seams, its own
+    kind of blurry.
     """
     return int(round(value * SCALE))
 
 
 def font(spec):
-    """Returns the font spec UNCHANGED. Deliberately a no-op.
+    """Returns font spec UNCHANGED. Deliberately no-op.
 
-    This used to multiply the point size by SCALE, which was wrong and
-    produced text roughly 1.5x too large on a scaled display: `tk scaling`
-    (set in enable() above) ALREADY makes Tk resolve point sizes against
-    the real DPI, so applying SCALE on top scaled everything twice. The
-    symptom was labels overflowing their buttons.
+    Used to multiply point size by SCALE — wrong, produced text ~1.5x too large on scaled
+    display: `tk scaling` (set in enable() above) ALREADY resolves point sizes against real
+    DPI, so SCALE on top double-scaled. Symptom: labels overflowing buttons.
 
-    Kept as an identity function rather than deleted so the call sites
-    still read as "this size is DPI-managed", and so any new one that
-    reaches for it cannot reintroduce the double scaling.
+    Kept as identity fn rather than deleted so call sites still read "DPI-managed", and no new
+    call site can reintroduce double scaling.
 
-    Sizes in POINTS (positive numbers, which is what this app uses) scale
-    automatically. Only PIXEL dimensions need px().
+    Sizes in POINTS (what this app uses) scale automatically. Only PIXEL dims need px().
     """
     return spec

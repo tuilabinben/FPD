@@ -12,7 +12,7 @@ except ImportError:                                   # pragma: no cover
     HAS_SERIAL = False
 
     class SerialException(Exception):
-        """Stand-in so `except SerialException` still parses without pyserial."""
+        """Stand-in so `except SerialException` still parses w/o pyserial."""
 
 
 def available_ports():
@@ -25,10 +25,9 @@ def available_ports():
 def open_port(port, baudrate, timeout=0.05, write_timeout=0.5):
     if not HAS_SERIAL:
         raise SerialException("pyserial is not installed")
-    # write_timeout matters as much as the read timeout: pyserial's default
-    # is None, which blocks forever on a stalled USB link. send() runs on
-    # the Tk main thread, so an unbounded write() freezes the whole GUI
-    # until the OS driver gives up -- with this set, write() raises instead
-    # and send()'s existing except-clause disconnects cleanly.
+    # write_timeout matters as much as read timeout: pyserial default None blocks forever on
+    # stalled USB link. send() runs on Tk main thread, unbounded write() freezes whole GUI
+    # until OS driver gives up — with this set, write() raises instead, send()'s existing
+    # except-clause disconnects cleanly.
     return serial.Serial(port=port, baudrate=int(baudrate),
                          timeout=timeout, write_timeout=write_timeout)
