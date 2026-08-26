@@ -921,6 +921,34 @@ ro._update_jog_readout()
 check(ro.a1_pos_v.get() == "90.00 base deg",
       "A1M at the rated fold angle reads 90.00 base deg, not the raw motor figure")
 check(ro.a2_pos_v.get() == "0.00 base deg", "  ...and A2M at home reads 0.00 base deg")
+# The BOARD's telemetry path writes the same cards. It used to write them
+# itself, in motor degrees, AFTER the jog readout had written base degrees
+# -- so the panel showed the base angle only until the next [POS] line
+# landed, which is what "A1M_BASE 0.00 motor deg" on the machine was.
+import robot_sim.core.p2p_control as _P2C_EARLY
+class Telemetry:
+    _update_p2p_telemetry = _P2C_EARLY.P2PControlMixin._update_p2p_telemetry
+    _update_jog_readout = JC.JogControlMixin._update_jog_readout
+    def _refresh_p2p_pose_readout(self): self.p2p_repaints += 1
+    def _set_progress(self, pct): pass
+    def __init__(self):
+        self.current_joints = [0.0, 0.0, 0.0, 0.0]
+        self.p2p_repaints = 0
+        for v in ("rot_pos_v", "a1_pos_v", "a2_pos_v", "jz_pos_v",
+                  "a1_reach_v", "a2_reach_v"):
+            setattr(self, v, tk.StringVar())
+    sim_z = property(lambda self: self.current_joints[0])
+    sim_rot = property(lambda self: self.current_joints[1])
+    sim_a1 = property(lambda self: self.current_joints[2])
+    sim_a2 = property(lambda self: self.current_joints[3])
+tm = Telemetry()
+tm._update_p2p_telemetry(0.0, 0.0, C.FOLD_ANGLE_SPEC_MAX_DEG * C.ARM_GEAR_RATIO,
+                         0.0, pct=50)
+check(tm.a1_pos_v.get() == "90.00 base deg" and tm.a2_pos_v.get() == "0.00 base deg",
+      "board telemetry writes the SAME base-angle cards as the jog readout")
+check(tm.p2p_repaints == 1,
+      "  ...through one readout, repainting each panel once, so they cannot drift")
+
 check("th3_cad, 60 deg = retracted" not in fw,
       "the boot banner no longer announces the th3_cad convention")
 check("HOME IS 0" in fw, "  ...it says HOME IS 0")

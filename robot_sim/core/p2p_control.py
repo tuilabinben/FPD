@@ -521,20 +521,18 @@ class P2PControlMixin:
         # the format changed.
         self.current_joints = [float(d1), float(rot), float(a1), float(a2)]
         self._set_progress(pct)
-        self._refresh_p2p_pose_readout()
-        # Jog reads the same pose; repaint it unless its widgets do not
-        # exist yet (this runs once during construction).
+        # Jog reads the same pose, and _update_jog_readout() repaints the
+        # P2P labels at the end of itself, so one call covers both panels.
+        #
+        # It used to write the six jog labels here as well, in MOTOR
+        # degrees, and it ran AFTER the jog readout -- so the elbow cards
+        # showed the base angle right up until the next telemetry line
+        # overwrote them with "motor deg". Two copies of one readout is
+        # what made that possible; there is now one.
         if getattr(self, "rot_pos_v", None) is not None:
-            self.rot_pos_v.set(f"{rot:.2f} deg")
-            self.a1_pos_v.set(f"{a1:.2f} motor deg")
-            self.a2_pos_v.set(f"{a2:.2f} motor deg")
-            self.jz_pos_v.set(f"{d1:.2f} mm")
-            self.a1_reach_v.set(
-                f"fold {fold_angle_from_motor_deg(a1):.2f}° · "
-                f"R1 = {motor_deg_to_reach(a1):.1f} mm")
-            self.a2_reach_v.set(
-                f"fold {fold_angle_from_motor_deg(a2):.2f}° · "
-                f"R2 = {motor_deg_to_reach(a2):.1f} mm")
+            self._update_jog_readout()
+        else:
+            self._refresh_p2p_pose_readout()   # still building the jog panel
 
     def _refresh_p2p_pose_readout(self):
         """Repaints the P2P live-pose labels from the shared pose."""
