@@ -12,6 +12,9 @@ unsigned long MOCK_MILLIS = 0;
 // to start at the right level would prove nothing, so the array starts at
 // a value digitalWrite can never produce.
 int PIN_LEVEL[64];
+int           ANALOG_VALUE[16];
+unsigned long PULSE_US = 0;
+long          TRIG_PULSES = 0;
 static const bool PIN_LEVEL_INIT = [] {
   for (int i = 0; i < 64; i++) PIN_LEVEL[i] = -1;
   return true;
@@ -1102,6 +1105,141 @@ int main() {
   check(saw("[RESET_POSITION] TARGET REACHED"), "distinct completion message");
   check(!saw("[RUN] TARGET REACHED"), "  ...not the RUN text");
   check(!isMoving && runPhase == PHASE_NONE, "  ...and the move is fully finished");
+
+    printf("\n=== S. the 340 degree scan ===\n");
+  {
+    // The scan sweeps RM and lifts ZM with the SAME jog primitives a key
+    // press uses, so it inherits every soft limit and PLC stop. These
+    // checks are about the sequencing and the sensor, not the safety --
+    // the safety is already tested above and applies here unchanged.
+    OUT.clear(); clearTx(); ETH_RX.clear();
+    isMoving = false; isHoming = false; runPhase = PHASE_NONE;
+    rotDir = a1Dir = a2Dir = jzDir = 0;
+    ConnectorM1.pos = 0; ConnectorM0.pos = 0;
+    scanPhase = SCAN_OFF;
+
+    // ---- refusals, before anything moves ----------------------------
+    run("SCAN_START:0.0,1,4");
+    check(saw("[ERROR] Z step must be at least"), "a zero Z step is refused");
+    run("SCAN_START:5,120,4");
+    check(saw("[ERROR] angular step must be between"), "an angular step past a quarter turn is refused");
+    run("SCAN_START:5,1,0");
+    check(saw("[ERROR] layers must be between 1 and"), "zero layers is refused");
+    run("SCAN_START:5,1");
+    check(saw("[ERROR] SCAN_START needs"), "a short payload is refused");
+    // 285 mm of stroke: 60 layers 5 mm apart needs 295 mm from the bottom.
+    run("SCAN_START:5,1,60");
+    check(saw("out of") || saw("past the"), "a scan that would run off the top is refused");
+    // ...but the LAST layer is the one that has to fit, so exactly 58 does.
+    check(scanPhase == SCAN_OFF, "  ...and none of those started a scan");
+
+    // ---- the sensor reads --------------------------------------------
+    run("SET_SCAN_SENSOR:BOGUS");
+    check(saw("[ERROR] SET_SCAN_SENSOR takes"), "an unknown sensor kind is refused");
+    run("SET_SCAN_SENSOR:ULTRASONIC");
+    check(saw("[SCAN_SENSOR] ULTRASONIC"), "the ultrasonic sensor is selectable");
+    PULSE_US = 5828;                     // 5828 us / 2 * 0.343 mm/us = 999.5 mm
+    OUT.clear(); run("SCAN_READ");
+    check(saw("999.5"), "an echo of 5828 us reads as 999.5 mm");
+    PULSE_US = 0;
+    OUT.clear(); run("SCAN_READ");
+    check(saw("-1.00"), "a timed-out echo reads NEGATIVE, never 0 -- 0 mm is a real distance");
+
+    run("SET_SCAN_SENSOR:ANALOG");
+    OUT.clear(); run("SCAN_READ");
+    check(saw("-1.00"), "an uncalibrated analog sensor reads -1 rather than a plausible number");
+    run("SET_SCAN_CAL:0,5");
+    check(saw("[ERROR] mmPerCount must be positive"), "a zero scale is refused");
+    run("SET_SCAN_CAL:0.5,10");
+    check(saw("[SCAN_CAL] 0.50000"), "the calibration is accepted");
+    ANALOG_VALUE[9] = 400;               // 400 * 0.5 + 10 = 210 mm
+    OUT.clear(); run("SCAN_READ");
+    check(saw("210.00"), "  ...and the analog reading uses it");
+    run("SET_SCAN_SENSOR:ULTRASONIC");
+    PULSE_US = 5828;
+
+    // ---- a real two-layer scan ---------------------------------------
+    OUT.clear();
+    run("SCAN_START:10,90,2");
+    check(saw("[SCAN_BEGIN]"), "a valid scan starts");
+    check(saw("sensor=ULTRASONIC"), "  ...naming the sensor it will use");
+    check(scanPhase == SCAN_SWEEP, "  ...and goes straight into the first sweep");
+    check(rotDir == 1, "  ...driving RM forward through the ordinary jog path");
+    serviceScan();
+    check(saw("[SCAN_PT] 1,0.00"), "the first service takes the sample at the start angle");
+
+    // Walk RM round. currentRot() is pulses / pulsesPerDegRot(), and the
+    // stub position is settable, so this is the machine actually turning.
+    for (int deg = 1; deg <= 340; deg++) {
+      ConnectorM1.pos = (int32_t)(deg * pulsesPerDegRot()) * (INVERT_ROT ? -1 : 1);
+      serviceScan();
+    }
+    check(saw("[SCAN_PT] 1,90.00") && saw("[SCAN_PT] 1,180.00")
+          && saw("[SCAN_PT] 1,270.00"),
+          "one point every 90 deg, all the way round");
+    check(scanPhase == SCAN_REWIND, "at 340 deg the sweep ends and it rewinds");
+    check(rotDir == -1, "  ...backwards, so every layer is sampled in ONE direction");
+
+    // Rewind home, then it should lift by the Z step.
+    ConnectorM1.pos = 0;
+    OUT.clear();
+    serviceScan();
+    check(scanPhase == SCAN_LIFT, "back at the start angle it lifts");
+    check(jzDir == 1, "  ...driving ZM up through the jog path too");
+    check(scanLayerTargetZ > 9.9 && scanLayerTargetZ < 10.1,
+          "  ...by exactly the Z step it was given");
+
+    ConnectorM0.pos = (int32_t)(10.0 * pulsesPerMmZ()) * (INVERT_Z ? -1 : 1);
+    OUT.clear();
+    serviceScan();
+    check(saw("[SCAN_LAYER] 2/2"), "at height, layer 2 begins");
+    check(jzDir == 0 && rotDir == 1, "  ...ZM stops and RM sweeps again");
+
+    for (int deg = 1; deg <= 340; deg++) {
+      ConnectorM1.pos = (int32_t)(deg * pulsesPerDegRot()) * (INVERT_ROT ? -1 : 1);
+      serviceScan();
+    }
+    ConnectorM1.pos = 0;
+    OUT.clear();
+    serviceScan();
+    check(saw("[SCAN_DONE]"), "the last layer finishes the scan instead of lifting again");
+    check(scanPhase == SCAN_OFF, "  ...and the scan is over");
+    check(rotDir == 0 && jzDir == 0, "  ...with nothing left running");
+
+    // ---- stopping ----------------------------------------------------
+    OUT.clear();
+    run("SCAN_START:10,90,2");
+    check(scanPhase == SCAN_SWEEP, "a second scan can be started");
+    OUT.clear();
+    run("SCAN_STOP");
+    check(saw("[SCAN_ABORT]"), "SCAN_STOP aborts it");
+    check(scanPhase == SCAN_OFF && rotDir == 0, "  ...and stops the turntable");
+
+    OUT.clear();
+    run("SCAN_START:10,90,2");
+    OUT.clear();
+    run("ESTOP");
+    check(saw("[SCAN_ABORT]"), "E-STOP aborts a running scan as well");
+    check(scanPhase == SCAN_OFF, "  ...it is not left running after an E-STOP");
+
+    // A sweep whose axis gets stopped underneath it must SAY so rather
+    // than reporting a layer that quietly covered a third of the circle.
+    OUT.clear();
+    run("SCAN_START:10,90,2");
+    rotDir = 0;                       // as a soft limit or PLC switch would
+    OUT.clear();
+    serviceScan();
+    check(saw("[SCAN_ABORT]") && saw("RM was stopped"),
+          "a sweep stopped by a limit aborts loudly, it does not finish short");
+
+    OUT.clear();
+    run("SCAN_STATUS");
+    check(saw("[SCAN_STATUS] phase=IDLE"), "SCAN_STATUS reports an idle scanner");
+
+    ConnectorM1.pos = 0; ConnectorM0.pos = 0;
+    rotDir = jzDir = 0;
+    scanPhase = SCAN_OFF;
+  }
 
   printf("\n%s  (%d passed, %d failed)\n",
          FAIL ? "FIRMWARE CHECKS FAILED" : "ALL FIRMWARE CHECKS PASSED",

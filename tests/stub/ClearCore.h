@@ -18,6 +18,7 @@
 typedef unsigned char byte;
 
 #define OUTPUT 1
+#define INPUT 3
 #define INPUT_PULLUP 2
 #define HIGH 1
 #define LOW 0
@@ -93,10 +94,16 @@ template<class T> T constrain(T v,T lo,T hi){return v<lo?lo:(v>hi?hi:v);}
 namespace StepGenerator{enum{MOVE_TARGET_ABSOLUTE=1};}
 namespace Connector{enum{CPM_MODE_STEP_AND_DIR=1};}
 struct MotorConn{
+  // POSITION IS SETTABLE and defaults to 0, so every test written before
+  // this still sees the 0 it was written against. A test that needs the
+  // machine to be somewhere -- the scan sweep, which only advances when
+  // RM does -- sets pos directly. Without it the firmware could only ever
+  // be tested standing still at the origin.
+  int32_t pos = 0;
   void VelMax(int32_t){} void AccelMax(int32_t){} void EnableRequest(bool){}
   void Move(int32_t,int){} bool StepsComplete(){return true;}
   void MoveStopDecel(int32_t){} void MoveVelocity(int32_t){}
-  int32_t PositionRefCommanded(){return 0;} void PositionRefSet(int32_t){}
+  int32_t PositionRefCommanded(){return pos;} void PositionRefSet(int32_t v){pos=v;}
 };
 extern MotorConn ConnectorM0,ConnectorM1,ConnectorM2,ConnectorM3;
 struct MotorManager{enum{CLOCK_RATE_LOW=0,MOTOR_ALL=0};
@@ -108,6 +115,25 @@ extern MotorManager MotorMgr;
 #define IO3 3
 #define IO4 4
 #define IO5 5
+// ClearCore's analog inputs. Only A9 is used (the scan's analog distance
+// sensor); the rest are here so a future pin choice does not need a stub
+// change to compile.
+#define A9  9
+#define A10 10
+#define A11 11
+#define A12 12
+
+// --- scan sensor stubs -------------------------------------------------
+// Both RECORD what the firmware asked for and REPLAY what the test set,
+// for the same reason Serial.println captures into OUT: a stub that
+// swallowed the call would let every scan assertion pass while the sensor
+// was never read.
+extern int           ANALOG_VALUE[16];   // what analogRead() hands back
+extern unsigned long PULSE_US;           // what pulseIn() hands back, 0 = timeout
+extern long          TRIG_PULSES;        // how many times the trigger fired
+inline int analogRead(int p){ return (p>=0&&p<16) ? ANALOG_VALUE[p] : 0; }
+inline unsigned long pulseIn(int, int, unsigned long){ return PULSE_US; }
+inline void delayMicroseconds(unsigned long){}
 
 // Arduino core constants the sketch relies on.
 #define LED_BUILTIN 13

@@ -48,6 +48,7 @@ void resetLimitsToFactory();
 void cancelJog();
 void cancelRun();
 void cancelHoming();
+void cancelScan(const String &why);
 bool anyJogActive();
 void sendFeedback(const String &line);
 String pidSummary();
@@ -369,6 +370,75 @@ const int PLC_MC_RES_HEADER_UNITS = 7;
 #define PLC_LIMIT_LED_A2_PIN   IO5
 #define PLC_LIMIT_LED_PIN_NAMES "IO-3/IO-4/IO-5"
 const unsigned long PLC_LIMIT_LED_BLINK_MS = 250;
+
+// ==============================================================
+// 340 DEGREE SCAN  --  distance sensor on the arm, one sweep per layer
+// ==============================================================
+// A separate application (Scan/) drives this. It is in THIS firmware and
+// not a second sketch on purpose: the scan sweeps RM with the same jog
+// primitives an operator's key press uses, so every soft limit, every PLC
+// travel switch and the E-STOP path apply to it unchanged. A second sketch
+// would have had to reimplement all of that, and would have got it wrong.
+//
+// PINS. IO-3/4/5 are the PLC limit lamps and IO-1/IO-2 belong to the opt-in
+// rotary limit sensors, so the scan takes IO-0 and, for the echo, IO-1 --
+// which is free while ENABLE_ROT_Z_LIMIT_SENSORS is 0. Check that flag
+// before wiring.
+#define SCAN_TRIG_PIN    IO0    // ultrasonic trigger out
+#define SCAN_ECHO_PIN    IO1    // ultrasonic echo in
+#define SCAN_ANALOG_PIN  A9     // analog laser / IR distance in
+
+// TWO SENSOR TYPES, chosen at runtime with SET_SCAN_SENSOR. The rig has not
+// settled on ultrasonic vs laser, and re-flashing to try the other one is a
+// bad way to find out which reads better on a shiny wafer edge.
+enum ScanSensorKind { SCAN_SENSOR_ULTRASONIC = 0, SCAN_SENSOR_ANALOG = 1 };
+int scanSensorKind = SCAN_SENSOR_ULTRASONIC;
+
+// Ultrasonic: HC-SR04 family. 10 us trigger, echo pulse width is the round
+// trip, so the distance is half of it. 30 ms of echo is about 5 m, past
+// which there is nothing this machine can see and waiting costs sweep
+// accuracy -- a blocking read smears the angle the sample is stamped with.
+const unsigned long SCAN_TRIG_US       = 10;
+const unsigned long SCAN_ECHO_TIMEOUT_US = 30000;
+const double SCAN_MM_PER_US = 0.1715;        // 343 m/s, halved for the return trip
+
+// Analog: raw counts -> mm, straight line. BOTH ZERO BY DEFAULT, so an
+// uncalibrated analog sensor reads 0 mm rather than a plausible-looking
+// number nobody has any reason to trust. SET_SCAN_CAL supplies them.
+double scanAnalogMmPerCount = 0.0;
+double scanAnalogOffsetMm   = 0.0;
+
+// Scanning sweeps slowly. At full RM speed a 30 ms ultrasonic read happens
+// over 3 degrees of travel, which is the width of the feature you are
+// trying to find. A quarter of that is the point of this scale.
+const float SCAN_SPEED_SCALE = 0.20f;
+
+const double SCAN_SWEEP_DEG_DEF  = 340.0;   // the turntable's whole travel
+const double SCAN_DEG_STEP_MIN   = 0.10;
+const double SCAN_DEG_STEP_MAX   = 90.0;   // a quarter turn, the coarsest that still means anything
+const double SCAN_Z_STEP_MIN_MM  = 0.10;
+const int    SCAN_LAYERS_MAX     = 500;
+
+// Positions are integer step counts divided by a pulses-per-unit figure, so
+// an axis commanded to exactly 340 deg reads 339.998. Every arrival test
+// here needs a tolerance or the phase never advances -- the sweep would run
+// into the RM soft limit waiting for a number it cannot land on.
+const double SCAN_ANGLE_EPS_DEG  = 0.05;
+const double SCAN_Z_EPS_MM       = 0.02;
+
+enum ScanPhase { SCAN_OFF, SCAN_SWEEP, SCAN_REWIND, SCAN_LIFT };
+ScanPhase scanPhase = SCAN_OFF;
+
+int    scanLayer = 0;             // 1-based once running
+int    scanLayers = 0;
+double scanZStepMm = 0.0;
+double scanDegStep = 1.0;
+double scanSweepDeg = SCAN_SWEEP_DEG_DEF;
+double scanStartRot = 0.0;
+double scanStartZ = 0.0;
+double scanNextDeg = 0.0;         // absolute RM angle the next sample is due at
+double scanLayerTargetZ = 0.0;
+long   scanPointsSent = 0;
 
 // -1 = axis minimum, +1 = axis maximum
 // ZM sits at the BOTTOM of the stroke, so it stops Z_DOWN and Z_UP comes
@@ -1214,7 +1284,8 @@ int homeDirFor(int i) {
 }
 
 void applyJogVelocities() {
-  float scale = isHoming ? HOME_SPEED_SCALE : 1.0f;
+  float scale = isHoming ? HOME_SPEED_SCALE
+              : (scanPhase != SCAN_OFF ? SCAN_SPEED_SCALE : 1.0f);
   int32_t rotV = (int32_t)(rotVelPulses * boostMultiplier * scale);
   int32_t armV = (int32_t)(armVelPulses * boostMultiplier * scale);
   int32_t zV   = (int32_t)(zVelPulses   * boostMultiplier * scale);
@@ -2289,6 +2360,214 @@ void serviceLimitSensors() {
 // ══════════════════════════════════════════════════════════════
 // COMMAND DISPATCH
 // ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+// 340 DEGREE SCAN
+// ══════════════════════════════════════════════════════════════
+
+// One distance reading, in mm. Returns a NEGATIVE number when the sensor
+// did not answer -- never 0, because 0 mm is a legitimate reading and
+// "nothing came back" is not. The scan reports the miss as a hole in the
+// layer rather than dropping the point, so a dead sensor looks like a dead
+// sensor and not like a small object.
+double scanReadDistanceMm() {
+  if (scanSensorKind == SCAN_SENSOR_ANALOG) {
+    if (scanAnalogMmPerCount == 0.0) return -1.0;   // never calibrated
+    int raw = analogRead(SCAN_ANALOG_PIN);
+    return raw * scanAnalogMmPerCount + scanAnalogOffsetMm;
+  }
+  digitalWrite(SCAN_TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(SCAN_TRIG_PIN, HIGH);
+  delayMicroseconds(SCAN_TRIG_US);
+  digitalWrite(SCAN_TRIG_PIN, LOW);
+  unsigned long us = pulseIn(SCAN_ECHO_PIN, HIGH, SCAN_ECHO_TIMEOUT_US);
+  if (us == 0) return -1.0;                          // echo timed out
+  return (double)us * SCAN_MM_PER_US;
+}
+
+const char *scanSensorName() {
+  return scanSensorKind == SCAN_SENSOR_ANALOG ? "ANALOG" : "ULTRASONIC";
+}
+
+void cancelScan(const String &why) {
+  if (scanPhase == SCAN_OFF) return;
+  scanPhase = SCAN_OFF;
+  rotDir = jzDir = 0;
+  applyJogVelocities();
+  sendFeedback("[SCAN_ABORT] " + why);
+}
+
+// Samples are stamped with the angle read just BEFORE the sensor fires, not
+// after. An ultrasonic read blocks for the whole 30 ms timeout when nothing
+// comes back, and stamping afterwards would file every miss at an angle the
+// arm had already left.
+void scanEmitPoint() {
+  double deg = currentRot();
+  // INVERT_ROT makes currentRot() hand back NEGATIVE zero at the reference,
+  // so the first sample of every layer would be stamped "-0.00". Harmless
+  // arithmetically, ugly in a CSV, and it makes the first column look
+  // signed when it is not. -0.0 == 0.0 is true, so this replaces it.
+  if (deg == 0.0) deg = 0.0;
+  double mm  = scanReadDistanceMm();
+  scanPointsSent++;
+  sendFeedback("[SCAN_PT] " + String(scanLayer) + "," + String(deg, 2)
+             + "," + String(mm, 2));
+}
+
+void scanBeginLayer() {
+  scanPhase = SCAN_SWEEP;
+  scanNextDeg = scanStartRot;
+  sendFeedback("[SCAN_LAYER] " + String(scanLayer) + "/" + String(scanLayers)
+             + " z=" + String(currentD1(), 2) + " mm");
+  rotDir = 1;
+  jzDir = 0;
+  applyJogVelocities();
+}
+
+void serviceScan() {
+  if (scanPhase == SCAN_OFF) return;
+
+  // The jog soft-limit and PLC-switch services can zero rotDir/jzDir under
+  // us -- that is the whole reason the scan drives through them rather than
+  // commanding the motors itself. If the axis it needs has been stopped by
+  // one of them the scan cannot finish, and saying so beats sweeping a
+  // layer that quietly stopped a third of the way round.
+  if (scanPhase == SCAN_SWEEP && rotDir == 0) {
+    cancelScan("RM was stopped mid-sweep by a soft limit or a PLC switch");
+    return;
+  }
+  if (scanPhase == SCAN_LIFT && jzDir == 0) {
+    cancelScan("ZM was stopped by a soft limit or a PLC switch before the next layer");
+    return;
+  }
+
+  if (scanPhase == SCAN_SWEEP) {
+    double end = scanStartRot + scanSweepDeg;
+    while (scanNextDeg <= currentRot() + SCAN_ANGLE_EPS_DEG
+           && scanNextDeg <= end + SCAN_ANGLE_EPS_DEG) {
+      scanEmitPoint();
+      scanNextDeg += scanDegStep;
+    }
+    if (currentRot() >= end - SCAN_ANGLE_EPS_DEG) {
+      // Rewind rather than sweeping back the other way. Alternating would
+      // halve the time and put every other layer on the far side of the
+      // drivetrain backlash -- which is the half a degree the scan exists
+      // to resolve.
+      scanPhase = SCAN_REWIND;
+      rotDir = -1;
+      applyJogVelocities();
+    }
+    return;
+  }
+
+  if (scanPhase == SCAN_REWIND) {
+    if (currentRot() > scanStartRot + SCAN_ANGLE_EPS_DEG) return;
+    rotDir = 0;
+    applyJogVelocities();
+    if (scanLayer >= scanLayers) {
+      scanPhase = SCAN_OFF;
+      sendFeedback("[SCAN_DONE] " + String(scanLayers) + " layers, "
+                 + String(scanPointsSent) + " points");
+      return;
+    }
+    scanLayerTargetZ = scanStartZ + scanZStepMm * (double)scanLayer;
+    scanPhase = SCAN_LIFT;
+    jzDir = 1;
+    applyJogVelocities();
+    return;
+  }
+
+  if (scanPhase == SCAN_LIFT) {
+    if (currentD1() < scanLayerTargetZ - SCAN_Z_EPS_MM) return;
+    jzDir = 0;
+    applyJogVelocities();
+    scanLayer++;
+    scanBeginLayer();
+  }
+}
+
+void handleScanStart(const String &payload) {
+  if (isMoving || isHoming || anyJogActive()) {
+    sendFeedback("[ERROR] SCAN refused - the machine is already moving.");
+    return;
+  }
+  if (scanPhase != SCAN_OFF) {
+    sendFeedback("[ERROR] SCAN refused - a scan is already running.");
+    return;
+  }
+  int c1 = payload.indexOf(',');
+  int c2 = payload.indexOf(',', c1 + 1);
+  int c3 = payload.indexOf(',', c2 + 1);
+  if (c1 < 0 || c2 < 0) {
+    sendFeedback("[ERROR] SCAN_START needs zStepMm,degStep,layers[,sweepDeg]");
+    return;
+  }
+  double zStep = payload.substring(0, c1).toFloat();
+  double dStep = payload.substring(c1 + 1, c2).toFloat();
+  int layers = (c3 < 0 ? payload.substring(c2 + 1)
+                       : payload.substring(c2 + 1, c3)).toInt();
+  double sweep = (c3 < 0) ? SCAN_SWEEP_DEG_DEF : payload.substring(c3 + 1).toFloat();
+
+  if (zStep < SCAN_Z_STEP_MIN_MM) {
+    sendFeedback("[ERROR] Z step must be at least " + String(SCAN_Z_STEP_MIN_MM, 2)
+               + " mm, got " + String(zStep, 3));
+    return;
+  }
+  if (dStep < SCAN_DEG_STEP_MIN || dStep > SCAN_DEG_STEP_MAX) {
+    sendFeedback("[ERROR] angular step must be between " + String(SCAN_DEG_STEP_MIN, 2)
+               + " and " + String(SCAN_DEG_STEP_MAX, 0) + " deg, got " + String(dStep, 3));
+    return;
+  }
+  if (layers < 1 || layers > SCAN_LAYERS_MAX) {
+    sendFeedback("[ERROR] layers must be between 1 and " + String(SCAN_LAYERS_MAX)
+               + ", got " + String(layers));
+    return;
+  }
+  // The LAST layer is the one that has to fit. The lift only moves between
+  // layers, so the top of the scan is startZ + zStep * (layers - 1) -- using
+  // layers there would refuse scans that actually fit.
+  double topZ = currentD1() + zStep * (double)(layers - 1);
+  if (topZ > D1_MAX_MM) {
+    sendFeedback("[ERROR] SCAN would need Z = " + String(topZ, 1)
+               + " mm, past the " + String(D1_MAX_MM, 0) + " mm stroke. "
+                 "Lower the start height, the step, or the layer count.");
+    return;
+  }
+  if (scanSensorKind == SCAN_SENSOR_ANALOG && scanAnalogMmPerCount == 0.0) {
+    sendFeedback("[WARN] the analog sensor has no calibration, so every reading "
+                 "will come back -1. Send SET_SCAN_CAL first.");
+  }
+
+  scanZStepMm = zStep;
+  scanDegStep = dStep;
+  scanLayers  = layers;
+  scanSweepDeg = sweep;
+  scanStartRot = currentRot();
+  scanStartZ   = currentD1();
+  scanPointsSent = 0;
+  scanLayer = 1;
+  sendFeedback("[SCAN_BEGIN] sensor=" + String(scanSensorName())
+             + " layers=" + String(layers)
+             + " zStep=" + String(zStep, 2)
+             + " degStep=" + String(dStep, 2)
+             + " sweep=" + String(sweep, 1)
+             + " fromRot=" + String(scanStartRot, 2)
+             + " fromZ=" + String(scanStartZ, 2));
+  scanBeginLayer();
+}
+
+void sendScanStatus() {
+  const char *phase = scanPhase == SCAN_OFF ? "IDLE"
+                    : scanPhase == SCAN_SWEEP ? "SWEEP"
+                    : scanPhase == SCAN_REWIND ? "REWIND" : "LIFT";
+  sendFeedback(String("[SCAN_STATUS] phase=") + phase
+             + " sensor=" + String(scanSensorName())
+             + " layer=" + String(scanLayer) + "/" + String(scanLayers)
+             + " points=" + String(scanPointsSent)
+             + " cal=" + String(scanAnalogMmPerCount, 5)
+             + "," + String(scanAnalogOffsetMm, 2));
+}
+
 void handleCommand(String cmd) {
   cmd.trim();
   if (cmd.length() == 0) return;
@@ -2524,12 +2803,14 @@ void handleCommand(String cmd) {
 
   // ---- emergency / stop first, so they can never be starved ----
   if (upper == "ESTOP") {
+    cancelScan("emergency stop");
     cancelJog(); cancelRun(); cancelHoming();
     decelStopAll(true);
     sendFeedback("[ESTOP] EMERGENCY STOP");
     return;
   }
   if (upper == "STOP") {
+    cancelScan("STOP");
     cancelJog(); cancelRun(); cancelHoming();
     decelStopAll(false);
     sendFeedback("[ESTOP] EMERGENCY STOP");
@@ -2778,6 +3059,56 @@ void handleCommand(String cmd) {
     sendFeedback("[ARM_RATIO] " + String(armGearRatio, 4)
                + " motor deg per fold deg (default " + String(ARM_GEAR_RATIO_DEF, 2)
                + ", derived from the Simscape -2 knee gain — confirm on the bench)");
+    return;
+  }
+
+  // ---- 340 degree scan -------------------------------------------
+  if (upper.startsWith("SCAN_START:")) {
+    handleScanStart(cmd.substring(11));
+    return;
+  }
+  if (upper == "SCAN_STOP") {
+    if (scanPhase == SCAN_OFF) sendFeedback("[SCAN_STATUS] phase=IDLE - nothing to stop");
+    else cancelScan("stopped by the operator");
+    return;
+  }
+  if (upper == "SCAN_STATUS") { sendScanStatus(); return; }
+  if (upper == "SCAN_READ") {
+    // One shot, for aiming the sensor and checking the calibration without
+    // committing to a sweep.
+    sendFeedback("[SCAN_READ] " + String(scanReadDistanceMm(), 2) + " mm ("
+               + String(scanSensorName()) + ")");
+    return;
+  }
+  if (upper.startsWith("SET_SCAN_SENSOR:")) {
+    String kind = upper.substring(16);
+    kind.trim();
+    if (kind == "ULTRASONIC")   scanSensorKind = SCAN_SENSOR_ULTRASONIC;
+    else if (kind == "ANALOG")  scanSensorKind = SCAN_SENSOR_ANALOG;
+    else {
+      sendFeedback("[ERROR] SET_SCAN_SENSOR takes ULTRASONIC or ANALOG, got " + kind);
+      return;
+    }
+    sendFeedback(String("[SCAN_SENSOR] ") + scanSensorName());
+    return;
+  }
+  if (upper.startsWith("SET_SCAN_CAL:")) {
+    String payload = cmd.substring(13);
+    int comma = payload.indexOf(',');
+    if (comma < 0) {
+      sendFeedback("[ERROR] SET_SCAN_CAL needs mmPerCount,offsetMm");
+      return;
+    }
+    double perCount = payload.substring(0, comma).toFloat();
+    double offset = payload.substring(comma + 1).toFloat();
+    if (perCount <= 0.0) {
+      sendFeedback("[ERROR] mmPerCount must be positive, got " + String(perCount, 5));
+      return;
+    }
+    scanAnalogMmPerCount = perCount;
+    scanAnalogOffsetMm = offset;
+    sendFeedback("[SCAN_CAL] " + String(perCount, 5) + " mm/count, offset "
+               + String(offset, 2) + " mm");
     return;
   }
 
@@ -3032,6 +3363,9 @@ void setup() {
   uint32_t t0 = millis();
   while (!Serial && (millis() - t0) < 3000) {  }
 
+  pinMode(SCAN_TRIG_PIN, OUTPUT);
+  digitalWrite(SCAN_TRIG_PIN, LOW);
+  pinMode(SCAN_ECHO_PIN, INPUT);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
@@ -3108,6 +3442,7 @@ void loop() {
   serviceRun();
   servicePlc();
   serviceHoming();
+  serviceScan();
 
   unsigned long now = millis();
   if (isConnected && (now - lastAliveTime >= ALIVE_INTERVAL_MS)) {
