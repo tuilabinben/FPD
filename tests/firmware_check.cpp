@@ -791,6 +791,71 @@ int main() {
     jzDir = rotDir = 0;
   }
 
+  printf("\n=== I0b2. A2M's switch is wired at BOTH ends of its travel ===\n");
+  {
+    // One PLC device, two physical switches, so the bit cannot say which
+    // end tripped it. The direction the axis was travelling on the rising
+    // edge can, and that is the whole mechanism.
+    OUT.clear(); clearTx(); ETH_RX.clear();
+    a2Dir = rotDir = jzDir = 0;
+    plcPoll3(0, 0, 0);
+    plcServiceLimitLatch();
+    check(plcLimitEndFor(2) == PLC_LIMIT_END_A2,
+          "with nothing latched the end falls back to the HOME side");
+    check(PLC_LIMIT_BOTH_ENDS_A2 && !PLC_LIMIT_BOTH_ENDS_Z && !PLC_LIMIT_BOTH_ENDS_ROT,
+          "  ...and only A2M is wired that way");
+
+    // --- tripped while driving FORWARD -> the forward limit -----------
+    // OUT cleared BEFORE the poll: plcPoll3 services the link, so the
+    // latch has already fired by the time it returns.
+    a2Dir = +1;
+    OUT.clear();
+    plcPoll3(0, BIT(14) | BIT(15), BIT(0));   // all three covered
+    plcServiceLimitLatch();
+    check(plcLimitEndFor(2) == +1, "covered while driving forward = the FORWARD end");
+    for (auto &l : OUT) printf("DEBUG [%s]\n", l.c_str());
+    check(saw("FORWARD"), "  ...and the board names the end it caught");
+    check(!plcHomeStateActive(),
+          "  ...a FAR-end trip is not the reference, so it cannot zero the counters");
+
+    plcServiceLimitStops();
+    check(a2Dir == 0, "forward is refused while it sits on the forward switch");
+    a2Dir = -1;
+    plcServiceLimitStops();
+    check(a2Dir == -1, "  ...and backward is still allowed, so it is never pinned");
+
+    String why;
+    check(runLegBlockedByLimit(currentD1(), currentRot(), currentA2() + 50.0f, why),
+          "a run leg driving it further forward is refused");
+    check(!runLegBlockedByLimit(currentD1(), currentRot(), currentA2() - 50.0f, why),
+          "  ...and one retracting it is allowed");
+
+    // --- clearing forgets the end, and the next trip re-decides -------
+    a2Dir = 0;
+    plcPoll3(0, 0, 0);
+    plcServiceLimitLatch();
+    check(plcLimitEndFor(2) == PLC_LIMIT_END_A2,
+          "clearing the switch forgets which end it was");
+
+    a2Dir = -1;
+    plcPoll3(0, BIT(14) | BIT(15), BIT(0));
+    plcServiceLimitLatch();
+    check(plcLimitEndFor(2) == -1, "covered while driving back = the BACK end");
+    check(plcHomeStateActive(),
+          "  ...and THAT one is the reference, so the home state stands");
+    plcServiceLimitStops();
+    check(a2Dir == 0, "  ...with backward now the refused direction");
+
+    OUT.clear();
+    run("PLC_STATUS");
+    check(saw("end Z/R/A2="),
+          "PLC_STATUS carries the live end, which is all the GUI has to go on");
+
+    a2Dir = rotDir = jzDir = 0;
+    plcPoll3(0, 0, 0);
+    plcServiceLimitLatch();
+  }
+
   printf("\n=== I0c. a DISABLED switch is never driven blind during HOME ===\n");
   {
     // beginHoming() actively drives each axis onto its own switch. A

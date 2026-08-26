@@ -493,6 +493,29 @@ PLC_SENSOR_PANEL = (
     ("M30", "A2M arm 2",     "A2",  "A2_BACK", -1),
 )
 
+# A2M's switch is wired at BOTH ends of its travel: one PLC device, two
+# physical switches. The bit alone cannot say which end tripped it, so the
+# BOARD works it out from the direction the axis was travelling on the
+# rising edge and reports the answer in the "end Z/R/A2=" field. The GUI
+# never derives this itself -- it would have to guess between polls, and a
+# wrong guess refuses the one direction that comes off the switch.
+#
+# The end named in PLC_SENSOR_PANEL above stays the HOME-side end: the
+# fallback until something is latched, and the only end that may count
+# toward the home state.
+PLC_SENSOR_BOTH_ENDS = frozenset({"M30"})
+
+# Which jog command drives INTO a switch sitting at that end. Two entries
+# per axis now, because a both-ends switch refuses whichever end it caught.
+PLC_SENSOR_JOG_CMD = {
+    ("Z",   -1): "Z_DOWN",
+    ("Z",   +1): "Z_UP",
+    ("ROT", +1): "ROT_CW",
+    ("ROT", -1): "ROT_CCW",
+    ("A2",  -1): "A2_BACK",
+    ("A2",  +1): "A2_FWD",
+}
+
 PLC_SENSOR_JOINT_INDEX = {"Z": 0, "ROT": 1, "A1": 2, "A2": 3}
 
 PLC_SENSOR_UNKNOWN_TEXT = "NO DATA"

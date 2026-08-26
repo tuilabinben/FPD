@@ -327,15 +327,21 @@ class P2PControlMixin:
         for bit, label, axis, _cmd, end in PLC_SENSOR_PANEL:
             if not state.get(bit, False):
                 continue
+            # A2M's switch sits at BOTH ends, so the end it is refusing is
+            # whichever one the board latched, not the fixed home-side end
+            # in the table. Using the table blocked legs retracting the arm
+            # while it was actually stuck on the FORWARD switch.
+            end = self.plc_sensor_end_for(bit)
             idx = PLC_SENSOR_JOINT_INDEX[axis]
             now, want = self.current_joints[idx], target[idx]
             if abs(want - now) < 1e-3:
                 continue                     # axis not moving
             if (1 if want > now else -1) != end:
                 continue                     # moving away, allowed
-            return (f"{label.strip()} is sitting on {bit}, and this point would "
-                    f"drive it further in ({now:.2f} → {want:.2f}). Jog it off "
-                    f"the sensor first.")
+            side = "MAX" if end > 0 else "MIN"
+            return (f"{label.strip()} is sitting on {bit} at its {side} end, and "
+                    f"this point would drive it further in ({now:.2f} → "
+                    f"{want:.2f}). Jog it off the sensor first.")
         return None
 
     def _limit_violation(self, d1, rot, a1, a2):

@@ -208,15 +208,15 @@ class JogPanelMixin:
 
         self.rot_pos_v = tk.StringVar(value="0.00 deg")
         # MOTOR degrees, 0 at home — not old CAD-flavoured 60.
-        self.a1_pos_v = tk.StringVar(value="0.00 motor deg")
-        self.a2_pos_v = tk.StringVar(value="0.00 motor deg")
+        self.a1_pos_v = tk.StringVar(value="0.00 base deg")
+        self.a2_pos_v = tk.StringVar(value="0.00 base deg")
         self.jz_pos_v = tk.StringVar(value="0.00 mm")
 
         row = tk.Frame(parent, bg=PANEL_BG)
         row.pack(fill="x", pady=(4, 0))
         make_led_card(row, 0, "ROT_POS", self.rot_pos_v, ROT_COLOR)
-        make_led_card(row, 1, "A1M_MOTOR", self.a1_pos_v, ARM_COLOR)
-        make_led_card(row, 2, "A2M_MOTOR", self.a2_pos_v, ARM2_COLOR)
+        make_led_card(row, 1, "A1M_BASE", self.a1_pos_v, ARM_COLOR)
+        make_led_card(row, 2, "A2M_BASE", self.a2_pos_v, ARM2_COLOR)
         make_led_card(row, 3, "Z_POS (d1)", self.jz_pos_v, JZ_COLOR)
 
         # Elbow angle alone hard to judge; show radius it produces.

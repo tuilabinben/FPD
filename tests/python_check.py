@@ -897,9 +897,30 @@ src_jp = open(os.path.join(os.path.dirname(HERE), "robot_sim", "ui",
                            "jog_panel.py"), encoding="utf-8").read()
 check('value="60.00 deg"' not in src_jp,
       "the jog readout no longer STARTS at 60.00 — that was the 60° jump")
-check('value="0.00 motor deg"' in src_jp, "  ...it starts at 0.00 motor deg")
-check("A1M_MOTOR" in src_jp and "A2M_MOTOR" in src_jp,
-      "  ...and the cards say MOTOR so the number cannot be misread")
+# Primary card moved from raw motor deg to the derived BASE angle (the
+# operator's working 0..90 scale) — motor deg alone was the old bug this
+# section title refers to (shown as if it were the arm angle).
+check('value="0.00 base deg"' in src_jp, "  ...it starts at 0.00 base deg")
+check("A1M_BASE" in src_jp and "A2M_BASE" in src_jp,
+      "  ...and the cards say BASE so the number cannot be misread as raw motor deg")
+
+print("\n  -- and the readout actually computes base angle, not motor deg --")
+class Readout:
+    _update_jog_readout = JC.JogControlMixin._update_jog_readout
+    def _refresh_p2p_pose_readout(self): pass
+    def __init__(self, a1, a2):
+        self.sim_rot = 0.0
+        self.sim_a1 = a1
+        self.sim_a2 = a2
+        self.sim_z = 0.0
+        for v in ("rot_pos_v", "a1_pos_v", "a2_pos_v", "jz_pos_v",
+                  "a1_reach_v", "a2_reach_v"):
+            setattr(self, v, tk.StringVar())
+ro = Readout(a1=C.FOLD_ANGLE_SPEC_MAX_DEG * C.ARM_GEAR_RATIO, a2=0.0)
+ro._update_jog_readout()
+check(ro.a1_pos_v.get() == "90.00 base deg",
+      "A1M at the rated fold angle reads 90.00 base deg, not the raw motor figure")
+check(ro.a2_pos_v.get() == "0.00 base deg", "  ...and A2M at home reads 0.00 base deg")
 check("th3_cad, 60 deg = retracted" not in fw,
       "the boot banner no longer announces the th3_cad convention")
 check("HOME IS 0" in fw, "  ...it says HOME IS 0")
@@ -1163,6 +1184,7 @@ class Lamp:
         self.status_var = tk.StringVar(value="")
         self.plc_led_card = None      # set_led is skipped, state still tracks
         self.plc_sensor_state = {b: False for b, *_r in C.PLC_SENSOR_PANEL}
+        self.plc_sensor_end = {b: e for b, _l, _a, _c, e in C.PLC_SENSOR_PANEL}
         self.plc_sensor_lamps = {}
         self.rot_limit = {"ROT_CW": False, "ROT_CCW": False}
         self.z_limit = {"Z_UP": False, "Z_DOWN": False}
@@ -1178,6 +1200,10 @@ class Lamp:
     _PLC_DATA_RE = PR2.ProtocolMixin._PLC_DATA_RE
     _PLC_CONN_RE = PR2.ProtocolMixin._PLC_CONN_RE
     _PLC_HOME_BITS_RE = PR2.ProtocolMixin._PLC_HOME_BITS_RE
+    _PLC_LIMIT_END_RE = PR2.ProtocolMixin._PLC_LIMIT_END_RE
+    _read_plc_limit_ends = PR2.ProtocolMixin._read_plc_limit_ends
+    plc_sensor_end_for = SP.SensorPanelMixin.plc_sensor_end_for
+    plc_sensor_at_home_end = SP.SensorPanelMixin.plc_sensor_at_home_end
     _set_plc_sensor = PR2.ProtocolMixin._set_plc_sensor
     plc_sensor_covered_for_jog = PR2.ProtocolMixin.plc_sensor_covered_for_jog
     warn_if_jogging_into_sensor = PR2.ProtocolMixin.warn_if_jogging_into_sensor
@@ -1799,14 +1825,23 @@ check(C.PLC_HOME_STATE_ON_BITS == ("M30", "M31", "M32")
 print("\n=== 24. JOG warns, P2P refuses ===")
 class Sensed:
     """Enough app for both paths."""
-    def __init__(self, covered=(), pose=(0.0, 0.0, 0.0, 0.0)):
+    def __init__(self, covered=(), pose=(0.0, 0.0, 0.0, 0.0), ends=None):
         self.plc_sensor_state = {b: (b in covered) for b, *_r in C.PLC_SENSOR_PANEL}
         self.current_joints = list(pose)
         self.logged = []
+        self.__init_ends__(ends)
     def log(self, m, tag="default"): self.logged.append((m, tag))
+    def __init_ends__(self, ends=None):
+        self.plc_sensor_end = {b: e for b, _l, _a, _c, e in C.PLC_SENSOR_PANEL}
+        if ends:
+            self.plc_sensor_end.update(ends)
     plc_sensor_covered_for_jog = PR2.ProtocolMixin.plc_sensor_covered_for_jog
     warn_if_jogging_into_sensor = PR2.ProtocolMixin.warn_if_jogging_into_sensor
     _sensor_violation = P2C.P2PControlMixin._sensor_violation
+    plc_sensor_end_for = SP.SensorPanelMixin.plc_sensor_end_for
+    plc_sensor_at_home_end = SP.SensorPanelMixin.plc_sensor_at_home_end
+    _PLC_LIMIT_END_RE = PR2.ProtocolMixin._PLC_LIMIT_END_RE
+    _read_plc_limit_ends = PR2.ProtocolMixin._read_plc_limit_ends
 
 print("\n  -- jog: a warning, and nothing is blocked --")
 sj = Sensed(covered=("M32", "M31"))
@@ -1861,6 +1896,57 @@ check(sp0._sensor_violation(0.0, 0.0, 0.0, 0.0) is None,
 check("_sensor_violation" in src_p2c, "LOAD runs the check")
 check("Blocked by a PLC sensor" in src_p2c, "  ...and says so distinctly")
 
+print("\n  -- A2M's switch is wired at BOTH ends, and the board says which --")
+check(C.PLC_SENSOR_BOTH_ENDS == frozenset({"M30"}),
+      "only A2M's device is wired at both ends of its travel")
+check(C.PLC_SENSOR_JOG_CMD[("A2", -1)] == "A2_BACK"
+      and C.PLC_SENSOR_JOG_CMD[("A2", +1)] == "A2_FWD",
+      "  ...so it has a jog command for each end, not one")
+# The GUI never works the end out for itself: between two polls it cannot
+# see the edge the board latches on, and a wrong guess refuses the ONE
+# direction that comes off the switch.
+sf = Sensed(covered=("M30",), pose=(50.0, 100.0, 100.0, 100.0), ends={"M30": +1})
+check(sf._sensor_violation(50.0, 100.0, 100.0, 140.0) is not None,
+      "latched FORWARD: a leg extending A2M further is refused")
+check(sf._sensor_violation(50.0, 100.0, 100.0, 60.0) is None,
+      "  ...and one retracting it is allowed, so the arm is never pinned")
+check("MAX" in sf._sensor_violation(50.0, 100.0, 100.0, 140.0),
+      "  ...and the message names the end, since the device alone cannot")
+sb = Sensed(covered=("M30",), pose=(50.0, 100.0, 100.0, 100.0))
+check(sb._sensor_violation(50.0, 100.0, 100.0, 60.0) is not None
+      and sb._sensor_violation(50.0, 100.0, 100.0, 140.0) is None,
+      "unlatched falls back to the BACK end, which is what HOME looks like")
+check(sf.plc_sensor_covered_for_jog("A2_FWD") == "M30"
+      and sf.plc_sensor_covered_for_jog("A2_BACK") is None,
+      "jog warns on A2_FWD while it sits on the forward switch")
+check(sb.plc_sensor_covered_for_jog("A2_BACK") == "M30"
+      and sb.plc_sensor_covered_for_jog("A2_FWD") is None,
+      "  ...and on A2_BACK at the back one -- the opposite command")
+check(sf.plc_sensor_at_home_end("M30") is False
+      and sb.plc_sensor_at_home_end("M30") is True,
+      "only the BACK end is the reference: a fully extended arm is not home")
+sf.warn_if_jogging_into_sensor("A2_FWD")
+check(any("not blocked" in m for m, _t in sf.logged),
+      "jog still only WARNS at either end -- it is how you come off a switch")
+sw = Sensed(covered=("M30",))
+sw._read_plc_limit_ends("limit Z/R/A2=001 end Z/R/A2=-++ enforce Z/R/A2=111")
+check(sw.plc_sensor_end_for("M30") == +1
+      and sw.plc_sensor_end_for("M31") == +1
+      and sw.plc_sensor_end_for("M32") == -1,
+      "the board's end field is read positionally as M32/M31/M30, like the bits")
+sw._read_plc_limit_ends("NO DEVICE DATA | limit Z/R/A2=??? end Z/R/A2=???")
+check(sw.plc_sensor_end_for("M30") == +1,
+      "  ...and '?' leaves the last known end alone rather than inventing one")
+sold = Sensed(covered=("M30",), ends={"M30": +1})
+sold._read_plc_limit_ends("limit Z/R/A2=001 enforce Z/R/A2=111")
+check(sold.plc_sensor_end_for("M30") == +1,
+      "  ...a board too old to send the field changes nothing")
+check("PLC_LIMIT_BOTH_ENDS_A2  = true" in fw
+      and "PLC_LIMIT_BOTH_ENDS_Z   = false" in fw,
+      "the board is the one that knows A2M's switch has two ends")
+check(fw.index("plcServiceLimitLatch();") < fw.index("plcServiceLimitStops();\n"),
+      "  ...and it latches the end BEFORE the stop zeroes the direction it reads")
+
 print("\n  -- the firmware splits it the same way --")
 check("PLC_LIMIT_END_Z   = -1" in fw and "PLC_LIMIT_END_ROT = +1" in fw,
       "the board agrees on which end each limit is at")
@@ -1884,6 +1970,7 @@ print("\n=== 25. a dead PLC link must NOT look like four clear sensors ===")
 class Panel(SP.SensorPanelMixin):
     def __init__(self):
         self.plc_sensor_state = {b: False for b, *_r in C.PLC_SENSOR_PANEL}
+        self.plc_sensor_end = {b: e for b, _l, _a, _c, e in C.PLC_SENSOR_PANEL}
         self.plc_sensor_data_seen = False
         self._plc_sensor_seen_at = None
         self.plc_sensor_lamps = {}
@@ -1925,6 +2012,7 @@ b_un = Board2 = None
 class Lamp2:
     def __init__(self):
         self.plc_sensor_state = {b: False for b, *_r in C.PLC_SENSOR_PANEL}
+        self.plc_sensor_end = {b: e for b, _l, _a, _c, e in C.PLC_SENSOR_PANEL}
         self.plc_sensor_data_seen = True
         self._plc_sensor_seen_at = None
         self.plc_sensor_lamps = {}
@@ -1945,6 +2033,10 @@ class Lamp2:
     _PLC_DATA_RE = PR2.ProtocolMixin._PLC_DATA_RE
     _PLC_CONN_RE = PR2.ProtocolMixin._PLC_CONN_RE
     _PLC_HOME_BITS_RE = PR2.ProtocolMixin._PLC_HOME_BITS_RE
+    _PLC_LIMIT_END_RE = PR2.ProtocolMixin._PLC_LIMIT_END_RE
+    _read_plc_limit_ends = PR2.ProtocolMixin._read_plc_limit_ends
+    plc_sensor_end_for = SP.SensorPanelMixin.plc_sensor_end_for
+    plc_sensor_at_home_end = SP.SensorPanelMixin.plc_sensor_at_home_end
     _set_plc_sensor = PR2.ProtocolMixin._set_plc_sensor
     _mark_plc_sensors_seen = PR2.ProtocolMixin._mark_plc_sensors_seen
     _mark_plc_sensors_unknown = PR2.ProtocolMixin._mark_plc_sensors_unknown
@@ -2043,6 +2135,7 @@ class Flap:
         self.status_var = tk.StringVar()
         self.plc_led_card = None
         self.plc_sensor_state = {b: False for b, *_r in C.PLC_SENSOR_PANEL}
+        self.plc_sensor_end = {b: e for b, _l, _a, _c, e in C.PLC_SENSOR_PANEL}
         self.plc_sensor_data_seen = False
         self._plc_sensor_seen_at = None
         self.plc_sensor_lamps = {}
@@ -2059,6 +2152,10 @@ class Flap:
     _PLC_DATA_RE = PR2.ProtocolMixin._PLC_DATA_RE
     _PLC_CONN_RE = PR2.ProtocolMixin._PLC_CONN_RE
     _PLC_HOME_BITS_RE = PR2.ProtocolMixin._PLC_HOME_BITS_RE
+    _PLC_LIMIT_END_RE = PR2.ProtocolMixin._PLC_LIMIT_END_RE
+    _read_plc_limit_ends = PR2.ProtocolMixin._read_plc_limit_ends
+    plc_sensor_end_for = SP.SensorPanelMixin.plc_sensor_end_for
+    plc_sensor_at_home_end = SP.SensorPanelMixin.plc_sensor_at_home_end
     _set_plc_sensor = PR2.ProtocolMixin._set_plc_sensor
     _mark_plc_sensors_seen = PR2.ProtocolMixin._mark_plc_sensors_seen
     _mark_plc_sensors_unknown = PR2.ProtocolMixin._mark_plc_sensors_unknown

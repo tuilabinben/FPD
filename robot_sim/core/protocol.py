@@ -7,6 +7,8 @@ import re as _re
 from ..config import (
     ARM_HOME_DEG,
     PLC_LED_STATES,
+    PLC_SENSOR_BOTH_ENDS,
+    PLC_SENSOR_JOG_CMD,
     PLC_SENSOR_PANEL,
     ROT_HOME_DEG,
     Z_HOME_MM,
@@ -278,6 +280,7 @@ class ProtocolMixin:
                 # positionally as M30/M31/M32 put ZM's lamp on A2M's switch.
                 for bit, ch in zip(("M32", "M31", "M30"), field):
                     self._set_plc_sensor(bit, ch == "1")
+                self._read_plc_limit_ends(text)
                 self._mark_plc_sensors_seen()
                 self._latch_home_state_if_new()
 
@@ -366,6 +369,12 @@ class ProtocolMixin:
     # knows".
     _PLC_HOME_BITS_RE = _re.compile(
         r"limit\s+Z/R/A2\s*=\s*([01?]{3})", _re.IGNORECASE)
+    #: end Z/R/A2=-+- — which end each switch is refusing right now. Fixed
+    #: for ZM and RM; A2M's switch is wired at both ends and the board is
+    #: the only side that can tell them apart, from the direction of travel
+    #: when the bit went on. "?" while it has no device data.
+    _PLC_LIMIT_END_RE = _re.compile(
+        r"end\s+Z/R/A2\s*=\s*([-+?]{3})", _re.IGNORECASE)
     _PLC_HOME_LINE_RE = _re.compile(
         r"\[PLC_HOME\]\s+(\w+)\s+home sensor\s+(M\d)\b.*?\b(REACHED|left)\b",
         _re.IGNORECASE)
@@ -382,6 +391,25 @@ class ProtocolMixin:
             # Board latched home state and zeroed its counters — GUI's copy
             # of pose has to follow or the two disagree from this instant.
             self._adopt_home_state_reset()
+
+    def _read_plc_limit_ends(self, text: str):
+        """Adopts the board's "end Z/R/A2=" field.
+
+        Only the board can answer this for a switch wired at both ends: it
+        watches the rising edge against the direction the axis was going.
+        A missing field means an older board, and the panel's HOME-side end
+        stays -- which is what that firmware enforced anyway.
+        """
+        m = self._PLC_LIMIT_END_RE.search(text)
+        if not m:
+            return
+        ends = getattr(self, "plc_sensor_end", None)
+        if ends is None:
+            return
+        for bit, ch in zip(("M32", "M31", "M30"), m.group(1)):
+            if bit not in ends or ch == "?":
+                continue
+            ends[bit] = 1 if ch == "+" else -1
 
     def _mark_plc_sensors_seen(self):
         import time
@@ -424,8 +452,16 @@ class ProtocolMixin:
         Board doesn't block it either; both only warn.
         """
         state = getattr(self, "plc_sensor_state", {})
-        for bit, _label, _axis, cmd, _end in PLC_SENSOR_PANEL:
-            if cmd == command and state.get(bit, False):
+        for bit, _label, axis, cmd, _end in PLC_SENSOR_PANEL:
+            if not state.get(bit, False):
+                continue
+            # A both-ends switch refuses whichever end it caught, so the
+            # command that drives INTO it is not fixed. Looking only at the
+            # panel's cmd warned about A2_BACK while the arm was on the
+            # FORWARD switch, and said nothing when it mattered.
+            if bit in PLC_SENSOR_BOTH_ENDS:
+                cmd = PLC_SENSOR_JOG_CMD.get((axis, self.plc_sensor_end_for(bit)), cmd)
+            if cmd == command:
                 return bit
         return None
 
@@ -441,8 +477,10 @@ class ProtocolMixin:
         if bit is None:
             return
         label = next((l for b, l, _a, _c, _e in PLC_SENSOR_PANEL if b == bit), bit)
+        end = "MAX" if self.plc_sensor_end_for(bit) > 0 else "MIN"
         self.log(f"⚠ {command} is driving INTO {bit} ({label.strip()}), which is "
-                 f"covered. Jog is not blocked — watch the machine.", tag="warn")
+                 f"covered at its {end} end. Jog is not blocked — watch the "
+                 f"machine.", tag="warn")
 
     def _adopt_home_state_reset(self):
         """Board zeroed its counters because M30..M32 latched. Mirror it."""

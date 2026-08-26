@@ -36,6 +36,7 @@ String plcStatusSummary();
 bool plcBit(int number);
 bool plcHomeStateActive();
 extern bool plcLimitSensorEnabled[3];   // order Z/ROT/A2 — defined near plcLimitBitFor()
+int plcLimitEndFor(int i);              // which end that switch refuses RIGHT NOW
 bool runLegBlockedByLimit(float d1, float rot, float a2, String &why);
 void applyMotionParams();
 void applyJogVelocities();
@@ -376,6 +377,34 @@ const int PLC_LIMIT_END_Z   = -1;
 const int PLC_LIMIT_END_ROT = +1;
 const int PLC_LIMIT_END_A2  = -1;
 
+// A2M's switch is wired at BOTH ends of its travel; the other two are not.
+// One PLC device, two physical switches in parallel, so the bit alone
+// cannot say which end tripped it. The DIRECTION THE AXIS WAS TRAVELLING
+// when the bit went on does say, and that is what plcServiceLimitLatch()
+// records: covered while driving forward is the FORWARD limit, covered
+// while driving back is the BACK limit. Only that direction is refused;
+// the other stays available, or the axis would be pinned on its own
+// switch with no way off.
+//
+// PLC_LIMIT_END_* above stays the HOME-side end. It is what the latch
+// falls back to when the bit comes on with the axis stopped (which is
+// what sitting at HOME looks like), it is the end HOME drives toward, and
+// it is the only end that may count toward the home state -- a bit that
+// is on because the arm is fully EXTENDED must never be read as "at home"
+// and zero the counters.
+//
+// KNOWN GAP, deliberate: a board that boots with the bit ALREADY on has
+// no edge to latch from, so it assumes the home end. Powering up with the
+// arm parked at home is the normal case and that assumption is right; if
+// the machine was powered down sitting on the FAR switch it will read as
+// the back end until the switch clears once. The alternative -- refusing
+// to guess -- either pins the axis (both directions refused) or blocks
+// HOME forever, since HOME is what would produce the edge in the first
+// place.
+const bool PLC_LIMIT_BOTH_ENDS_Z   = false;
+const bool PLC_LIMIT_BOTH_ENDS_ROT = false;
+const bool PLC_LIMIT_BOTH_ENDS_A2  = true;
+
 #if PLC_LINK_MODE == PLC_LINK_DIGITAL_IO
   #define PLC_HOME_DONE_PIN DI6
 #endif
@@ -427,6 +456,10 @@ bool isHoming = false;
 // Which axes HOME is still driving. Declared here, not beside
 // beginHoming(), because cancelHoming() above needs it too.
 bool homeAxisActive[3] = {false, false, false};
+// Set when HOME starts with a both-ends switch already tripped at its FAR
+// end. That axis has to drive OFF the far switch before the bit means
+// "arrived" again, or HOME finishes instantly at the wrong end.
+bool homeWaitForClear[3] = {false, false, false};
 unsigned long lastHomeReportTime = 0;
 unsigned long homeRequestedAt = 0;
 HomeState homeState = HOME_IDLE;
@@ -853,7 +886,7 @@ void cancelRun() {
 // half speed toward their switches with nothing watching for arrival.
 void cancelHoming() {
   isHoming = false;
-  for (int i = 0; i < 3; i++) homeAxisActive[i] = false;
+  for (int i = 0; i < 3; i++) { homeAxisActive[i] = false; homeWaitForClear[i] = false; }
   jzDir = rotDir = a2Dir = 0;
   applyJogVelocities();
 }
@@ -1351,7 +1384,7 @@ bool plcBit(int number) {
 
 String plcStatusSummary() {
   if (!plcStatusValid) {
-    return String("NO DEVICE DATA | limit Z/R/A2=???");
+    return String("NO DEVICE DATA | limit Z/R/A2=??? end Z/R/A2=???");
   }
   // M30..M32, the only bits read, and the ones that stop an axis.
   String s = "limit Z/R/A2=" + String(plcBit(PLC_M_LIMIT_Z) ? 1 : 0)
@@ -1360,6 +1393,10 @@ String plcStatusSummary() {
   // Per-sensor boundary switch — SET_PLC_SENSOR_ENFORCE. A 0 here means
   // that bit above is cosmetic: it no longer stops the axis or counts
   // toward HOME.
+  // Which end each switch is refusing right now. Fixed for ZM and RM;
+  // A2M's follows the latch, and the GUI cannot work it out on its own.
+  s += " end Z/R/A2=";
+  for (int i = 0; i < 3; i++) s += (plcLimitEndFor(i) > 0) ? "+" : "-";
   s += " enforce Z/R/A2=" + String(plcLimitSensorEnabled[0] ? 1 : 0)
      + String(plcLimitSensorEnabled[1] ? 1 : 0)
      + String(plcLimitSensorEnabled[2] ? 1 : 0);
@@ -1818,13 +1855,48 @@ bool plcLimitWarned[3] = {false, false, false};
 // broken switch blocks HOME forever with no way to say "trust the rest".
 bool plcLimitSensorEnabled[3] = {true, true, true};
 
+// Rising-edge detection and the end a both-ends switch caught. 0 = nothing
+// latched, so plcLimitEndFor() falls back to the home end.
+bool plcLimitPrevBit[3] = {false, false, false};
+int  plcLimitLatchedEnd[3] = {0, 0, 0};
+
 int plcLimitBitFor(int i) {
   const int bits[3] = {PLC_M_LIMIT_Z, PLC_M_LIMIT_ROT, PLC_M_LIMIT_A2};
   return bits[i];
 }
-int plcLimitEndFor(int i) {
+// The HOME-side end of each switch. Fixed, and the fallback for a
+// both-ends switch that has nothing latched.
+int plcLimitHomeEndFor(int i) {
   const int ends[3] = {PLC_LIMIT_END_Z, PLC_LIMIT_END_ROT, PLC_LIMIT_END_A2};
   return ends[i];
+}
+bool plcLimitBothEndsFor(int i) {
+  const bool both[3] = {PLC_LIMIT_BOTH_ENDS_Z, PLC_LIMIT_BOTH_ENDS_ROT,
+                        PLC_LIMIT_BOTH_ENDS_A2};
+  return both[i];
+}
+// Which end is CURRENTLY refusing. Same as the home end for a
+// single-ended switch; for A2M it is whichever end the latch caught.
+int plcLimitEndFor(int i) {
+  if (!plcLimitBothEndsFor(i)) return plcLimitHomeEndFor(i);
+  return plcLimitLatchedEnd[i] ? plcLimitLatchedEnd[i] : plcLimitHomeEndFor(i);
+}
+
+// Which way this axis is going right now: the jog direction if it is being
+// jogged, otherwise the sign of the remaining distance on the run leg.
+// 0 when it is not moving at all, which is the case the latch has to guess
+// its way out of.
+int plcAxisTravelDir(int i) {
+  const int jog[3] = {jzDir, rotDir, a2Dir};
+  if (jog[i] > 0) return +1;
+  if (jog[i] < 0) return -1;
+  if (runPhase != PHASE_NONE) {
+    const float now[3]  = {currentD1(), currentRot(), currentA2()};
+    const float want[3] = {runTargetD1, runTargetRot, runTargetA2};
+    float delta = want[i] - now[i];
+    if (fabs(delta) > 1e-3) return (delta > 0) ? +1 : -1;
+  }
+  return 0;
 }
 // -1 if the axis token isn't one of the three PLC-sensored axes.
 int plcLimitSensorIndexFor(const String &axis) {
@@ -1837,7 +1909,12 @@ int plcLimitSensorIndexFor(const String &axis) {
 // told not to matter. Used ONLY for HOME — jog/run stops still need the
 // real bit, since "satisfied" here is not "safe to drive into".
 bool plcLimitSensorSatisfied(int i) {
-  return !plcLimitSensorEnabled[i] || plcBit(plcLimitBitFor(i));
+  if (!plcLimitSensorEnabled[i]) return true;
+  if (!plcBit(plcLimitBitFor(i))) return false;
+  // A both-ends switch caught at the FAR end is not the reference. Without
+  // this, an arm parked fully extended satisfies the home state and the
+  // counters are zeroed at the wrong end of the travel.
+  return plcLimitEndFor(i) == plcLimitHomeEndFor(i);
 }
 
 void plcServiceLimitLeds() {
@@ -1851,6 +1928,32 @@ void plcServiceLimitLeds() {
   digitalWrite(PLC_LIMIT_LED_Z_PIN,   z   ? HIGH : (plcLimitLedBlink ? HIGH : LOW));
   digitalWrite(PLC_LIMIT_LED_ROT_PIN, rot ? HIGH : (plcLimitLedBlink ? HIGH : LOW));
   digitalWrite(PLC_LIMIT_LED_A2_PIN,  a2  ? HIGH : (plcLimitLedBlink ? HIGH : LOW));
+}
+
+// Works out which end a both-ends switch just caught, and forgets it again
+// when the switch clears. Must run BEFORE plcServiceLimitStops(), which is
+// what zeroes the direction this reads.
+void plcServiceLimitLatch() {
+  if (!plcStatusValid) return;   // stale data: keep whatever was latched
+  const char *names[3] = {"ZM", "RM", "A2M"};
+  const char *devs[3]  = {"M32", "M31", "M30"};
+  for (int i = 0; i < 3; i++) {
+    bool on = plcBit(plcLimitBitFor(i));
+    if (plcLimitBothEndsFor(i)) {
+      if (on && !plcLimitPrevBit[i]) {
+        int dir = plcAxisTravelDir(i);
+        plcLimitLatchedEnd[i] = dir ? dir : plcLimitHomeEndFor(i);
+        sendFeedback("[PLC_LIMIT] " + String(names[i]) + " tripped "
+                   + String(devs[i]) + " at its "
+                   + String(plcLimitLatchedEnd[i] > 0 ? "FORWARD" : "BACK")
+                   + " end"
+                   + String(dir ? "" : " (nothing was moving, assumed)") + ".");
+      } else if (!on) {
+        plcLimitLatchedEnd[i] = 0;
+      }
+    }
+    plcLimitPrevBit[i] = on;
+  }
 }
 
 void plcServiceLimitStops() {
@@ -1869,7 +1972,9 @@ void plcServiceLimitStops() {
       if (!plcLimitWarned[i]) {
         plcLimitWarned[i] = true;
         sendFeedback("[PLC_LIMIT] " + String(names[i]) + " stopped — "
-                   + String(devs[i]) + " is ON. Jog the other way to come off it.");
+                   + String(devs[i]) + " is ON at its "
+                   + String(plcLimitEndFor(i) > 0 ? "FORWARD" : "BACK")
+                   + " end. Jog the other way to come off it.");
       }
     }
   }
@@ -1962,6 +2067,7 @@ void servicePlc() {
   // blink has to keep ticking between polls, and a jog started after the
   // last reply must still be stopped by an already-tripped switch.
   plcServiceLimitLeds();
+  plcServiceLimitLatch();
   plcServiceLimitStops();
   if (plcStatusValid && plcLastPollOk != lastActedOn) {
     lastActedOn = plcLastPollOk;
@@ -2032,13 +2138,29 @@ void beginHoming() {
     // (SET_PLC_SENSOR_ENFORCE:<axis>,0 — broken sensor) is treated the
     // same way: never driven, since there would be nothing to stop it
     // arriving at its mechanical end blind.
-    if (!plcLimitSensorEnabled[i] || plcBit(plcLimitBitFor(i))) {
+    // Reads the LATCH directly rather than the effective-end helper: the
+    // question here is "do we KNOW this is the far switch", and a bit with
+    // nothing latched must answer no, or HOME would drive an axis that is
+    // already sitting on its reference.
+    bool tripped = plcBit(plcLimitBitFor(i));
+    bool atFarEnd = tripped && plcLimitBothEndsFor(i)
+                 && plcLimitLatchedEnd[i] != 0
+                 && plcLimitLatchedEnd[i] != plcLimitHomeEndFor(i);
+    if (!plcLimitSensorEnabled[i] || (tripped && !atFarEnd)) {
       homeAxisActive[i] = false;
+      homeWaitForClear[i] = false;
       *dirs[i] = 0;
       already += String(already.length() ? ", " : "") + names[i];
       continue;
     }
     homeAxisActive[i] = true;
+    // Tripped, but at the FAR end: the bit is already on and means the
+    // opposite of arrival. Ignore it until the axis drives clear of it.
+    homeWaitForClear[i] = atFarEnd;
+    if (atFarEnd) {
+      sendFeedback("[HOME] " + String(names[i]) + " is on its FAR switch -- "
+                   "driving off it before homing.");
+    }
     *dirs[i] = homeDirFor(i);            // backward until this axis's switch trips
     moving += String(moving.length() ? ", " : "") + names[i];
   }
@@ -2112,7 +2234,13 @@ void serviceHoming() {
   bool changed = false;
   for (int i = 0; i < 3; i++) {
     if (!homeAxisActive[i]) continue;
-    if (!plcBit(plcLimitBitFor(i))) continue;
+    bool on = plcBit(plcLimitBitFor(i));
+    if (homeWaitForClear[i]) {
+      if (on) continue;                 // still on the far switch
+      homeWaitForClear[i] = false;      // clear of it; the next ON is arrival
+      continue;
+    }
+    if (!on) continue;
     homeAxisActive[i] = false;
     *dirs[i] = 0;
     changed = true;

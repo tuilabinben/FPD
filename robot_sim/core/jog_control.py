@@ -23,7 +23,11 @@ from ..config import (
     rot_speed_deg_s,
     z_speed_mm_s,
 )
-from ..kinematics import fold_angle_from_motor_deg, motor_deg_to_reach
+from ..kinematics import (
+    base_angle_from_motor_deg,
+    fold_angle_from_motor_deg,
+    motor_deg_to_reach,
+)
 from ..theme import ACCENT_MINT, ACCENT_ORANGE, SURFACE, INK_DARK, TEXT_LIGHT, TEXT_MUTED
 
 IDLE_STATUS = "Idle — hold a key or button to jog"
@@ -146,13 +150,14 @@ class JogControlMixin:
 
     def _update_jog_readout(self):
         """sim_a1/sim_a2 are MOTOR degrees — raw rotation board counts.
-        Frog-leg angle and reach are derived, shown alongside not instead:
-        motor figure exact, frog-leg figure is what operator thinks in.
-        Motor-only was old bug (labelled as if arm angle); frog-leg-only
-        would hide it rests on ratio taken from model."""
+        Primary card shows the derived BASE angle (0..90, the operator's
+        working scale) instead — motor deg alone was the old bug (shown as
+        if it were the arm angle). Fold + reach stay in the line below,
+        alongside, for anyone who wants the raw figure or the reach it
+        implies."""
         self.rot_pos_v.set(f"{self.sim_rot:.2f} deg")
-        self.a1_pos_v.set(f"{self.sim_a1:.2f} motor deg")
-        self.a2_pos_v.set(f"{self.sim_a2:.2f} motor deg")
+        self.a1_pos_v.set(f"{base_angle_from_motor_deg(self.sim_a1):.2f} base deg")
+        self.a2_pos_v.set(f"{base_angle_from_motor_deg(self.sim_a2):.2f} base deg")
         self.jz_pos_v.set(f"{self.sim_z:.2f} mm")
         self.a1_reach_v.set(
             f"fold {fold_angle_from_motor_deg(self.sim_a1):.2f}° · "

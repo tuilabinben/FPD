@@ -20,6 +20,7 @@ import tkinter as tk
 from ..config import (
     PLC_HOME_STATE_CLEAR_BITS,
     PLC_HOME_STATE_ON_BITS,
+    PLC_SENSOR_BOTH_ENDS,
     PLC_SENSOR_PANEL,
     PLC_SENSOR_STALE_MS,
     PLC_SENSOR_UNKNOWN_TEXT,
@@ -56,7 +57,11 @@ class SensorPanelMixin:
             # ZM and A2M stop at their minimum, RM at its maximum because it
             # is mounted inverted. "Covered" means the opposite thing for
             # them, so reading the lamp without the end is guesswork.
-            suffix = "max" if end > 0 else "min"
+            # A2M's is wired at BOTH ends, so its caption cannot name one.
+            # Which end it caught shows in the lamp text instead, because it
+            # changes while the machine runs.
+            suffix = ("min/max" if bit in PLC_SENSOR_BOTH_ENDS
+                      else ("max" if end > 0 else "min"))
             # Starts UNKNOWN not CLEAR. Until device read lands, board has
             # no idea; CLEAR would claim good news.
             card = make_status_led(row, f"{bit}  {label} ({suffix})",
@@ -96,6 +101,30 @@ class SensorPanelMixin:
         except Exception:
             return True
 
+    def plc_sensor_end_for(self, bit: str):
+        """Which end that switch is refusing: -1 minimum, +1 maximum.
+
+        Fixed for ZM and RM. A2M's switch is wired at BOTH ends, and only
+        the BOARD can tell them apart -- it watches the rising edge against
+        the direction the axis was travelling. This just reads what it
+        reported; deriving it here would mean guessing between polls, and a
+        wrong guess refuses the one direction that comes off the switch.
+        """
+        ends = getattr(self, "plc_sensor_end", None)
+        if ends and bit in ends:
+            return ends[bit]
+        return next((e for b, _l, _a, _c, e in PLC_SENSOR_PANEL if b == bit), -1)
+
+    def plc_sensor_at_home_end(self, bit: str):
+        """True when this switch is tripped at its HOME-side end.
+
+        Only that end is the reference. A both-ends switch caught at the far
+        end says the arm is fully EXTENDED, and reading that as "at home"
+        would zero the counters at the wrong end of the travel.
+        """
+        home_end = next((e for b, _l, _a, _c, e in PLC_SENSOR_PANEL if b == bit), -1)
+        return self.plc_sensor_end_for(bit) == home_end
+
     def plc_home_state(self):
         """True when machine sits on its reference: home-end sensors
         covered, far-end ones clear.
@@ -106,7 +135,12 @@ class SensorPanelMixin:
         if not self.plc_sensors_known():
             return False
         st = getattr(self, "plc_sensor_state", {})
-        return (all(st.get(b, False) for b in PLC_HOME_STATE_ON_BITS)
+        # at_home_end matters for A2M only, and it is the whole point of
+        # tracking the end: its switch also trips fully EXTENDED, and
+        # reading that as the reference would zero the counters 90 deg away
+        # from where the machine actually is.
+        return (all(st.get(b, False) and self.plc_sensor_at_home_end(b)
+                    for b in PLC_HOME_STATE_ON_BITS)
                 and not any(st.get(b, False) for b in PLC_HOME_STATE_CLEAR_BITS))
 
     def _refresh_plc_sensor_lamps(self):
@@ -124,7 +158,11 @@ class SensorPanelMixin:
                     # which is the older half of this same bug.
                     set_led(card, PLC_SENSOR_UNKNOWN_TEXT, ACCENT_PURPLE)
                 elif st.get(bit, False):
-                    set_led(card, "COVERED", ACCENT_ORANGE)
+                    if bit in PLC_SENSOR_BOTH_ENDS:
+                        side = "MAX" if self.plc_sensor_end_for(bit) > 0 else "MIN"
+                        set_led(card, f"COVERED {side}", ACCENT_ORANGE)
+                    else:
+                        set_led(card, "COVERED", ACCENT_ORANGE)
                 else:
                     set_led(card, "CLEAR", TEXT_DIM)
         for card in getattr(self, "plc_home_state_lamps", ()):

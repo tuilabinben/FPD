@@ -330,6 +330,10 @@ class RobotControlApp(
         # flag, not the bits, is what lamps and every consumer read. Until
         # a device read lands, panel says NO DATA.
         self.plc_sensor_state = {bit: False for bit, *_r in PLC_SENSOR_PANEL}
+        # Which end each switch is refusing, from the board. Starts at the
+        # HOME-side end from the panel table, which is what the board falls
+        # back to as well until it catches an edge.
+        self.plc_sensor_end = {bit: end for bit, _l, _a, _c, end in PLC_SENSOR_PANEL}
         self.plc_sensor_data_seen = False
         self._plc_sensor_seen_at = None
         self._plc_home_state_prev = False
