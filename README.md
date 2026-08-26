@@ -18,7 +18,7 @@ python robot_simulator_launcher.py
 4. [Arm Angle Convention](#arm-angle-convention)  
 5. [Boundaries & Coordinate Reference](#boundaries--coordinate-reference)  
 6. [Calibration](#calibration)  
-7. [Jog Keys & Gamepad](#jog-keys--gamepad)  
+7. [Jog Keys](#jog-keys)  
 8. [Appearance](#appearance)  
 9. [Settings](#settings)  
 10. [Serial Protocol Reference](#serial-protocol-reference)  
@@ -32,7 +32,7 @@ python robot_simulator_launcher.py
 A desktop control application for the STCR4000S frog-leg robot, built on Python/Tkinter with a ClearCore firmware backend. It merges two control modes on one shared connection:
 
 - **Point-to-Point (P2P):** Absolute X/Y/Z target motion with full inverse kinematics
-- **Joystick:** Held-key (or gamepad) jog on RM / A1M / A2M / ZM axes
+- **Joystick:** Held-key jog on RM / A1M / A2M / ZM axes
 
 Both modes share:
 - One serial connection panel with 3-LED status (COM Port / ClearCore IO0 / Heartbeat)
@@ -143,25 +143,15 @@ The software ships with theoretical constants from the MATLAB/Simscape CAD model
 
 ---
 
-## Jog Keys & Gamepad
+## Jog Keys
 
 ### Keyboard
 Default layout: `A/D` = RM · `I/K` = A1M · `O/L` = A2M · `W/S` = ZM.
 
 - Fully customizable in **Settings → Controls**. Click a key box, press the new key. If it's already in use, the two rows **swap** (no axis is ever left unbound).
-- Reserved keys: `SPACE` (E-STOP), `ESC` (Settings), `H` (Home) — cannot be reassigned.
+- Reserved keys: `SPACE` (E-STOP), `ESC` (Settings), `BACKSPACE` (Home) — cannot be reassigned.
 - Saved to `robot_sim/keybinds.json` and restored on startup.
 - A corrupt or incomplete keybinds file is discarded whole rather than half-merged.
-
-### Xbox Gamepad
-| Input | Axis |
-|:------|:-----|
-| RT / RB | A1M forward / backward |
-| LT / LB | A2M forward / backward |
-| X / B | RM CW / CCW |
-| A / Y | ZM up / down |
-
-Both arms can be driven simultaneously and independently. The gamepad goes through the same `jog_start()`/`jog_stop()` path as the keyboard — it never talks to the board directly.
 
 ---
 

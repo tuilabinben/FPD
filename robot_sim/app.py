@@ -31,7 +31,6 @@ from .config import (
 )
 from .core import (
     EventLogMixin,
-    GamepadMixin,
     HeartbeatMixin,
     JogControlMixin,
     KeyboardMixin,
@@ -54,7 +53,6 @@ class RobotControlApp(
     HeartbeatMixin,
     ProtocolMixin,
     JogControlMixin,
-    GamepadMixin,
     P2PControlMixin,
     SafetyMixin,
     KeyboardMixin,
@@ -80,7 +78,6 @@ class RobotControlApp(
         self._configure_styles()
         self._build_ui()
         self._bind_keys()
-        self._init_gamepad()
         # Paint readouts from real initial pose instead of leaving hard-coded
         # "0.00" placeholders, which disagreed with state.
         self._update_jog_readout()

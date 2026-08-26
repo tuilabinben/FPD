@@ -2303,94 +2303,31 @@ app.root.bindings["<KeyPress-BackSpace>"](None)
 check(app.homed == 1, "  ...and still refuses from P2P")
 
 
-print("\n=== 29. Xbox controller maps onto the same jog commands as the keyboard ===")
-import robot_sim.core.gamepad_control as GP
-
-# Every command the pad can send is a real jog action the board understands.
-_all_gamepad_cmds = set(GP.BUTTON_COMMAND.values()) | set(GP.TRIGGER_COMMAND.values())
-check(_all_gamepad_cmds <= set(C.JOG_STOP_COMMAND),
-      "every gamepad command has a matching JOG_STOP_COMMAND entry")
-check(_all_gamepad_cmds == {"A1_FWD", "A1_BACK", "A2_FWD", "A2_BACK",
-                             "ROT_CW", "ROT_CCW", "Z_UP", "Z_DOWN"},
-      "the pad reaches exactly the eight jog axes, same as the keyboard")
-
-# LT/LB drive AM2, RT/RB drive AM1 (the mirror), as asked for.
-check(GP.TRIGGER_COMMAND["lefttrigger"] == "A2_FWD"
-      and GP.BUTTON_COMMAND["leftshoulder"] == "A2_BACK",
-      "LT = AM2 forward, LB = AM2 backward")
-check(GP.TRIGGER_COMMAND["righttrigger"] == "A1_FWD"
-      and GP.BUTTON_COMMAND["rightshoulder"] == "A1_BACK",
-      "RT = AM1 forward, RB = AM1 backward -- the mirror of LT/LB")
-check({GP.BUTTON_COMMAND["x"], GP.BUTTON_COMMAND["b"]} == {"ROT_CCW", "ROT_CW"},
-      "X and B drive RM")
-check({GP.BUTTON_COMMAND["a"], GP.BUTTON_COMMAND["y"]} == {"Z_UP", "Z_DOWN"},
-      "A and Y drive ZM")
-
-# No two inputs claim the same command -- a stuck double-mapping would be
-# invisible until two buttons fought over one axis on the bench.
-_cmds_seen = list(GP.BUTTON_COMMAND.values()) + list(GP.TRIGGER_COMMAND.values())
-check(len(_cmds_seen) == len(set(_cmds_seen)), "no jog command is claimed twice")
-
-# gamepad_commands_from_state() is the pure function the poll loop reduces
-# raw SDL input to -- tested with synthetic state, no controller required.
-check(GP.gamepad_commands_from_state({}, {}) == set(),
-      "nothing held -> nothing active")
-check(GP.gamepad_commands_from_state({"x": True}, {}) == {"ROT_CCW"},
-      "a held button maps straight across")
-check(GP.gamepad_commands_from_state({}, {"lefttrigger": 32768}) == {"A2_FWD"},
-      "a fully-pulled trigger reads as held")
-check(GP.gamepad_commands_from_state({}, {"lefttrigger": 0}) == set(),
-      "a released trigger (0) does not")
-check(GP.gamepad_commands_from_state({}, {"lefttrigger": GP.TRIGGER_THRESHOLD - 1}) == set(),
-      "  ...and a light touch below the threshold is still released")
-check(GP.gamepad_commands_from_state({}, {"lefttrigger": GP.TRIGGER_THRESHOLD}) == {"A2_FWD"},
-      "  ...right at the threshold it counts as pressed")
-check(GP.gamepad_commands_from_state(
-        {"leftshoulder": True, "rightshoulder": True},
-        {"lefttrigger": 32768, "righttrigger": 32768})
-      == {"A2_BACK", "A1_BACK", "A2_FWD", "A1_FWD"},
-      "both arms can be driven at once, independently")
-
-# The mixin only ever touches the shared jog path (jog_start/jog_stop),
-# never the serial link directly -- so LINK, the limit sensors and the
-# heartbeat all apply exactly as they do for the keyboard and the pads.
+print("\n=== 29. the Xbox controller is GONE, not merely unwired ===")
+# Removed on request: jog is keyboard and on-screen pads only. Asserted as
+# an ABSENCE, the way PLC_SENSOR_BLOCKS_* is, because a half-removal --
+# module deleted but the mixin still listed, or the reverse -- would fail
+# at import time on the machine rather than here.
 import inspect as _inspect
-_gp_src = _inspect.getsource(GP)
-check("self.send(" not in _gp_src, "GamepadMixin never talks to the board directly")
-check("jog_start" in _gp_src and "jog_stop" in _gp_src,
-      "  ...it goes through jog_start()/jog_stop(), same as every other input")
-
-
-class GamepadApp(GP.GamepadMixin):
-    def __init__(self):
-        self.root = tk.Tk()
-        self.mode = "JOG"
-        self.motion_locked = False
-        self.jog_pads = {}
-        self._gamepad_active = set()
-        self.started = []
-        self.stopped = []
-
-    def _schedule(self, attr, ms, fn, *a): setattr(self, attr, "job")
-    def _cancel_job(self, attr): setattr(self, attr, None)
-    def log(self, *a, **k): pass
-    def jog_start(self, c): self.started.append(c)
-    def jog_stop(self, c, s=None): self.stopped.append(c)
-
-
-gapp = GamepadApp()
-gapp._gamepad_apply({"ROT_CCW", "Z_UP"})
-check(sorted(gapp.started) == ["ROT_CCW", "Z_UP"],
-      "newly-wanted commands are started")
-gapp._gamepad_apply({"Z_UP"})
-check(gapp.stopped == ["ROT_CCW"], "  ...and dropped ones are stopped")
-gapp.mode = "P2P"
-check(gapp._gamepad_jog_enabled() is False,
-      "the pad is gated off outside JOYSTICK mode, same as the keyboard")
-gapp.mode = "JOG"
-gapp.motion_locked = True
-check(gapp._gamepad_jog_enabled() is False,
-      "  ...and while a P2P program is running")
+check(not os.path.exists(os.path.join(os.path.dirname(HERE), "robot_sim",
+                                      "core", "gamepad_control.py")),
+      "gamepad_control.py is deleted, not left orphaned in the tree")
+import robot_sim.core as _CORE
+check("GamepadMixin" not in _CORE.__all__ and not hasattr(_CORE, "GamepadMixin"),
+      "  ...and core no longer imports or exports GamepadMixin")
+import robot_sim.app as _APP
+_app_src = _inspect.getsource(_APP)
+check("Gamepad" not in _app_src and "_init_gamepad" not in _app_src,
+      "the app neither mixes it in nor starts a poll loop")
+import robot_sim.core.safety as _SF
+check("_gamepad_quit" not in _inspect.getsource(_SF),
+      "  ...and shutdown no longer tries to close a controller")
+# The jog commands themselves are untouched: the pad was only ever an
+# extra input onto jog_start()/jog_stop(), so removing it takes no axis
+# with it.
+check(set(C.JOG_STOP_COMMAND) >= {"A1_FWD", "A1_BACK", "A2_FWD", "A2_BACK",
+                                  "ROT_CW", "ROT_CCW", "Z_UP", "Z_DOWN"},
+      "all eight jog commands survive -- only the input path went")
 
 
 print("\n" + ("ALL PYTHON CHECKS PASSED" if not FAIL else "FAILURES: %s" % FAIL))

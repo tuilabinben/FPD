@@ -5,7 +5,6 @@ created in `RobotControlApp.__init__`.
 """
 
 from .event_log import EventLogMixin
-from .gamepad_control import GamepadMixin
 from .heartbeat import HeartbeatMixin
 from .jog_control import JogControlMixin
 from .keyboard import KeyboardMixin
@@ -18,7 +17,6 @@ from .timers import TimerMixin
 __all__ = [
     "TimerMixin",
     "EventLogMixin",
-    "GamepadMixin",
     "HeartbeatMixin",
     "JogControlMixin",
     "KeyboardMixin",

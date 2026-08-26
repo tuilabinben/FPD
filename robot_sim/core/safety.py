@@ -292,7 +292,6 @@ class SafetyMixin:
     _on_close = on_close
 
     def _finish_close(self):
-        self._gamepad_quit()
         self._close_port()
         try:
             self.root.destroy()
