@@ -20,6 +20,12 @@ Type how far the lift should **step up between sweeps**, press **START SCAN**.
 With no board connected it runs simulated, so the whole thing can be demonstrated
 away from the machine.
 
+> **What the simulation draws.** A rectangular chamber, 800 x 560 mm, with the machine
+> standing off-centre in it — so the plot shows four straight walls and four corners.
+> That shape is deliberate: straight walls only come out straight if the polar mapping
+> is right, so the picture checks itself. Anything you see there is the fake room, not
+> a sensor.
+
 ---
 
 ## What it does

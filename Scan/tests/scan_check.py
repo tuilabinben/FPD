@@ -259,6 +259,24 @@ check(any(l.startswith("[SCAN_LAYER] 2/2") and "dir=+" in l for l in seen),
 check(sum(1 for l in seen if l.startswith("[SCAN_REF]")) == 2,
       "  ...and re-references when it arrives back on the switch")
 check(any(l.startswith("[SCAN_DONE]") for l in seen), "and finishes with [SCAN_DONE]")
+
+# The fake room is a RECTANGLE the machine stands off-centre in. Straight
+# walls only come out straight if the polar mapping is right, so the shape
+# is a running check on the plot; a circle would look identical however
+# wrong the maths was. Opposite walls must add up to the room, which is the
+# one invariant that does not depend on where the machine stands in it.
+import statistics
+def _wall(deg):
+    hits = [sim._distance(deg, 0.0) for _ in range(41)]
+    return statistics.median([h for h in hits if h >= 0])
+check(abs((_wall(0) + _wall(180)) - 2 * sim.ROOM_HALF_X) < 3.0,
+      "the simulated room is 800 mm across, measured through the machine")
+check(abs((_wall(90) + _wall(270)) - 2 * sim.ROOM_HALF_Y) < 3.0,
+      "  ...and 560 mm deep, whichever way it is measured")
+check(abs(_wall(0) - _wall(180)) > 50.0,
+      "  ...with the machine off-centre, so the four walls are four distances")
+check(_wall(45) > _wall(0) and _wall(45) > _wall(90),
+      "a corner is further away than either wall meeting at it")
 seen.clear()
 sim.send("SCAN_STOP")
 check(any("phase=IDLE" in l for l in seen),

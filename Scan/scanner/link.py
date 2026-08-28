@@ -106,9 +106,9 @@ class SerialLink:
 class SimulatedBoard:
     """Answers the scan commands with the firmware's own vocabulary.
 
-    Shapes a slightly off-centre elliptical chamber with a notch in it, so
-    the polar plot shows something recognisable rather than a circle that
-    would look the same however wrong the plotting was.
+    Stands the machine off-centre in a rectangular chamber, so the plot
+    shows four straight walls and four corners -- recognisable at a glance,
+    and a running check on the polar mapping, which a circle would not be.
     """
 
     POINT_INTERVAL_S = 0.004
@@ -217,13 +217,43 @@ class SimulatedBoard:
         self._begin_layer(-self.direction)
 
     # -- the model ------------------------------------------------------
+    # A RECTANGULAR chamber, with the machine standing off-centre in it.
+    #
+    # A box is the right shape to fake. Straight walls only come out
+    # straight if the polar-to-canvas mapping is right, so the plot is
+    # checking itself every time it draws; a circle would look identical
+    # however wrong the maths was. Off-centre so the four walls sit at four
+    # different distances, and the corners fall at angles nobody could have
+    # hard-coded by accident.
+    #
+    # An earlier version used a lobed curve with a 160 mm step in it to
+    # stand for a doorway. It made the outline break into pieces, which
+    # reads as a broken sensor -- exactly the wrong instinct to train before
+    # a real sensor goes on the machine.
+    ROOM_HALF_X = 400.0        # chamber is 800 mm across
+    ROOM_HALF_Y = 280.0        # ...and 560 mm deep
+    ROOM_OFFSET_X = 60.0       # where the turntable stands in it
+    ROOM_OFFSET_Y = -40.0
+
     def _distance(self, deg, z):
         rad = math.radians(deg)
-        r = 300.0 + 90.0 * math.cos(rad) + 40.0 * math.sin(2 * rad)
-        r += 0.25 * z                                   # walls lean outward
-        if 150.0 <= deg <= 172.0:                       # a doorway
-            r += 160.0
-        if random.random() < 0.02:                      # the odd lost echo
+        cos, sin = math.cos(rad), math.sin(rad)
+        # Distance from an interior point to the box, along one ray: how far
+        # until X hits a side wall, how far until Y hits an end wall, take
+        # whichever comes first. The guards are for a ray exactly parallel
+        # to a wall, which never reaches it.
+        far = 1e9
+        tx = far
+        if abs(cos) > 1e-9:
+            tx = ((self.ROOM_HALF_X if cos > 0 else -self.ROOM_HALF_X)
+                  - self.ROOM_OFFSET_X) / cos
+        ty = far
+        if abs(sin) > 1e-9:
+            ty = ((self.ROOM_HALF_Y if sin > 0 else -self.ROOM_HALF_Y)
+                  - self.ROOM_OFFSET_Y) / sin
+        r = min(tx, ty)
+        r *= 1.0 + 0.0004 * z                           # walls lean out a little
+        if random.random() < 0.015:                     # the odd lost echo
             return -1.0
         return r + random.gauss(0.0, 1.5)
 
