@@ -43,6 +43,17 @@ std::string lastTx() { return ETH_TX.empty() ? std::string() : ETH_TX.back(); }
 void clearTx() { ETH_TX.clear(); }
 void advance(unsigned long ms) { MOCK_MILLIS += ms; }
 
+// Put an axis at a real position. The raw counts carry the INVERT_* sign,
+// so these read back through currentRot()/currentD1() as the degrees and
+// millimetres asked for -- without that a test that sets 340 gets -340 and
+// every arrival check is inverted.
+void setRot(double deg) {
+  ConnectorM1.pos = (int32_t)(deg * pulsesPerDegRot()) * (INVERT_ROT ? -1 : 1);
+}
+void setZ(double mm) {
+  ConnectorM0.pos = (int32_t)(mm * pulsesPerMmZ()) * (INVERT_Z ? -1 : 1);
+}
+
 // Builds the reply a real PLC sends to a 1-word batch read: header, then a
 // data length (end code + one word), end code 0000, then the word. Tracks
 // PLC_MC_ASCII so every OTHER test in this file — HOME sequencing, sensor
@@ -1110,27 +1121,42 @@ int main() {
   {
     // The scan sweeps RM and lifts ZM with the SAME jog primitives a key
     // press uses, so it inherits every soft limit and PLC stop. These
-    // checks are about the sequencing and the sensor, not the safety --
-    // the safety is already tested above and applies here unchanged.
+    // checks are about the sequencing, the reference and the sensor --
+    // the safety is tested above and applies here unchanged.
+    //
+    // M31 is RM's travel switch and sits at the +1 (CW) end. It is the
+    // scan's reference: every layer starts from it and every other layer
+    // ends back on it.
     OUT.clear(); clearTx(); ETH_RX.clear();
     isMoving = false; isHoming = false; runPhase = PHASE_NONE;
     rotDir = a1Dir = a2Dir = jzDir = 0;
-    ConnectorM1.pos = 0; ConnectorM0.pos = 0;
+    setRot(0.0); setZ(0.0);
     scanPhase = SCAN_OFF;
+    plcLimitSensorEnabled[1] = true;
 
     // ---- refusals, before anything moves ----------------------------
+    plcStatusValid = false;
+    run("SCAN_START:5,1,4");
+    check(saw("[ERROR] SCAN refused - no PLC device data"),
+          "without device data there is no switch to reference, so it is refused");
+    plcPoll3(0, 0, 0);                       // data, nothing tripped
+    plcLimitSensorEnabled[1] = false;
+    run("SCAN_START:5,1,4");
+    check(saw("[ERROR] SCAN refused - RM's switch is disabled"),
+          "  ...and a switched-off RM sensor is refused for the same reason");
+    plcLimitSensorEnabled[1] = true;
+
     run("SCAN_START:0.0,1,4");
     check(saw("[ERROR] Z step must be at least"), "a zero Z step is refused");
     run("SCAN_START:5,120,4");
-    check(saw("[ERROR] angular step must be between"), "an angular step past a quarter turn is refused");
+    check(saw("[ERROR] angular step must be between"),
+          "an angular step past a quarter turn is refused");
     run("SCAN_START:5,1,0");
     check(saw("[ERROR] layers must be between 1 and"), "zero layers is refused");
     run("SCAN_START:5,1");
     check(saw("[ERROR] SCAN_START needs"), "a short payload is refused");
-    // 285 mm of stroke: 60 layers 5 mm apart needs 295 mm from the bottom.
     run("SCAN_START:5,1,60");
-    check(saw("out of") || saw("past the"), "a scan that would run off the top is refused");
-    // ...but the LAST layer is the one that has to fit, so exactly 58 does.
+    check(saw("past the"), "a scan that would run off the top of the stroke is refused");
     check(scanPhase == SCAN_OFF, "  ...and none of those started a scan");
 
     // ---- the sensor reads --------------------------------------------
@@ -1138,7 +1164,7 @@ int main() {
     check(saw("[ERROR] SET_SCAN_SENSOR takes"), "an unknown sensor kind is refused");
     run("SET_SCAN_SENSOR:ULTRASONIC");
     check(saw("[SCAN_SENSOR] ULTRASONIC"), "the ultrasonic sensor is selectable");
-    PULSE_US = 5828;                     // 5828 us / 2 * 0.343 mm/us = 999.5 mm
+    PULSE_US = 5828;                     // 5828 us * 0.1715 mm/us = 999.5 mm
     OUT.clear(); run("SCAN_READ");
     check(saw("999.5"), "an echo of 5828 us reads as 999.5 mm");
     PULSE_US = 0;
@@ -1147,7 +1173,7 @@ int main() {
 
     run("SET_SCAN_SENSOR:ANALOG");
     OUT.clear(); run("SCAN_READ");
-    check(saw("-1.00"), "an uncalibrated analog sensor reads -1 rather than a plausible number");
+    check(saw("-1.00"), "an uncalibrated analog sensor reads -1, not a plausible number");
     run("SET_SCAN_CAL:0,5");
     check(saw("[ERROR] mmPerCount must be positive"), "a zero scale is refused");
     run("SET_SCAN_CAL:0.5,10");
@@ -1158,58 +1184,107 @@ int main() {
     run("SET_SCAN_SENSOR:ULTRASONIC");
     PULSE_US = 5828;
 
-    // ---- a real two-layer scan ---------------------------------------
+    // ---- it goes and finds the switch first --------------------------
     OUT.clear();
+    setRot(100.0);                        // somewhere in the middle, switch clear
+    plcPoll3(0, 0, 0);
     run("SCAN_START:10,90,2");
     check(saw("[SCAN_BEGIN]"), "a valid scan starts");
-    check(saw("sensor=ULTRASONIC"), "  ...naming the sensor it will use");
-    check(scanPhase == SCAN_SWEEP, "  ...and goes straight into the first sweep");
-    check(rotDir == 1, "  ...driving RM forward through the ordinary jog path");
-    serviceScan();
-    check(saw("[SCAN_PT] 1,0.00"), "the first service takes the sample at the start angle");
+    check(saw("[SCAN_SEEK]"), "  ...by going to look for the RM switch");
+    check(scanPhase == SCAN_SEEK, "  ...so the first phase is SEEK, not a sweep");
+    check(rotDir == PLC_LIMIT_END_ROT,
+          "  ...turning toward the end the switch is actually at");
 
-    // Walk RM round. currentRot() is pulses / pulsesPerDegRot(), and the
-    // stub position is settable, so this is the machine actually turning.
-    for (int deg = 1; deg <= 340; deg++) {
-      ConnectorM1.pos = (int32_t)(deg * pulsesPerDegRot()) * (INVERT_ROT ? -1 : 1);
-      serviceScan();
-    }
-    check(saw("[SCAN_PT] 1,90.00") && saw("[SCAN_PT] 1,180.00")
-          && saw("[SCAN_PT] 1,270.00"),
-          "one point every 90 deg, all the way round");
-    check(scanPhase == SCAN_REWIND, "at 340 deg the sweep ends and it rewinds");
-    check(rotDir == -1, "  ...backwards, so every layer is sampled in ONE direction");
+    setRot(150.0); serviceScan();
+    check(scanPhase == SCAN_SEEK, "still seeking while the switch reads clear");
 
-    // Rewind home, then it should lift by the Z step.
-    ConnectorM1.pos = 0;
+    // Arrival. In the real loop plcServiceLimitStops() has already zeroed
+    // rotDir by now -- driving into a covered switch is the one direction
+    // it refuses -- so the scan has to read arrival from the BIT, not from
+    // the fact that the axis stopped.
+    setRot(340.0);
+    plcPoll3(0, BIT(15), 0);              // M31 covered
+    rotDir = 0;
     OUT.clear();
     serviceScan();
-    check(scanPhase == SCAN_LIFT, "back at the start angle it lifts");
-    check(jzDir == 1, "  ...driving ZM up through the jog path too");
+    check(saw("[SCAN_REF]"), "reaching the switch is announced as the reference");
+    check(saw("[SCAN_LAYER] 1/2"), "  ...and layer 1 begins from there");
+    check(scanPhase == SCAN_SWEEP, "  ...sweeping");
+    check(rotDir == -PLC_LIMIT_END_ROT,
+          "  ...AWAY from the switch, since there is nothing past it");
+    check(saw("[SCAN_PT] 1,340.00"), "the sample at the reference angle is taken");
+
+    // ---- layer 1: away from the switch, 340 -> 0 ---------------------
+    plcPoll3(0, 0, 0);                    // moved off the switch
+    for (int deg = 339; deg >= 0; deg--) {
+      setRot((double)deg);
+      serviceScan();
+    }
+    check(saw("[SCAN_PT] 1,250.00") && saw("[SCAN_PT] 1,160.00")
+          && saw("[SCAN_PT] 1,70.00"),
+          "one point every 90 deg on the way out");
+    check(scanPhase == SCAN_LIFT, "340 deg later the layer ends and it lifts");
+    check(jzDir == 1, "  ...driving ZM up through the jog path");
     check(scanLayerTargetZ > 9.9 && scanLayerTargetZ < 10.1,
           "  ...by exactly the Z step it was given");
 
-    ConnectorM0.pos = (int32_t)(10.0 * pulsesPerMmZ()) * (INVERT_Z ? -1 : 1);
+    // ---- layer 2: back TOWARD the switch -----------------------------
+    setZ(10.0);
     OUT.clear();
     serviceScan();
     check(saw("[SCAN_LAYER] 2/2"), "at height, layer 2 begins");
-    check(jzDir == 0 && rotDir == 1, "  ...ZM stops and RM sweeps again");
+    check(rotDir == PLC_LIMIT_END_ROT,
+          "  ...turning back the other way, so the return leg collects a layer");
+    check(jzDir == 0, "  ...and ZM has stopped");
 
-    for (int deg = 1; deg <= 340; deg++) {
-      ConnectorM1.pos = (int32_t)(deg * pulsesPerDegRot()) * (INVERT_ROT ? -1 : 1);
+    for (int deg = 1; deg <= 180; deg++) {
+      setRot((double)deg);
       serviceScan();
     }
-    ConnectorM1.pos = 0;
+    check(saw("[SCAN_PT] 2,90.00"), "it samples on the way back too");
+    check(scanPhase == SCAN_SWEEP, "  ...and is still sweeping half way round");
+
+    // The switch, not the angle count, is what ends a return leg -- so a
+    // turntable that has drifted still finishes square with its reference.
+    setRot(300.0);
+    plcPoll3(0, BIT(15), 0);
+    rotDir = 0;
     OUT.clear();
     serviceScan();
-    check(saw("[SCAN_DONE]"), "the last layer finishes the scan instead of lifting again");
-    check(scanPhase == SCAN_OFF, "  ...and the scan is over");
-    check(rotDir == 0 && jzDir == 0, "  ...with nothing left running");
+    check(saw("[SCAN_REF]"),
+          "hitting the switch ends the return leg early and re-references");
+    check(saw("[SCAN_DONE]"), "  ...and that was the last layer");
+    check(scanPhase == SCAN_OFF && rotDir == 0 && jzDir == 0,
+          "  ...nothing is left running");
+
+    // ---- starting from ON the switch ---------------------------------
+    OUT.clear();
+    setRot(340.0); setZ(0.0);
+    plcPoll3(0, BIT(15), 0);
+    run("SCAN_START:10,90,2");
+    check(!saw("[SCAN_SEEK]"), "already on the switch, there is nothing to seek");
+    check(scanPhase == SCAN_SWEEP && rotDir == -PLC_LIMIT_END_ROT,
+          "  ...so it sweeps away immediately");
+
+    // ---- a seek that never finds it ----------------------------------
+    OUT.clear();
+    scanPhase = SCAN_OFF; rotDir = jzDir = 0;
+    setRot(0.0);
+    plcPoll3(0, 0, 0);
+    run("SCAN_START:10,90,2");
+    check(scanPhase == SCAN_SEEK, "seeking again");
+    setRot(SCAN_SEEK_MAX_DEG + 10.0);
+    OUT.clear();
+    serviceScan();
+    check(saw("[SCAN_ABORT]") && saw("without finding its switch"),
+          "a switch that never comes aborts instead of grinding on forever");
 
     // ---- stopping ----------------------------------------------------
+    setRot(340.0);
+    plcPoll3(0, BIT(15), 0);
     OUT.clear();
     run("SCAN_START:10,90,2");
-    check(scanPhase == SCAN_SWEEP, "a second scan can be started");
+    check(scanPhase == SCAN_SWEEP, "a scan can be started again");
     OUT.clear();
     run("SCAN_STOP");
     check(saw("[SCAN_ABORT]"), "SCAN_STOP aborts it");
@@ -1222,11 +1297,13 @@ int main() {
     check(saw("[SCAN_ABORT]"), "E-STOP aborts a running scan as well");
     check(scanPhase == SCAN_OFF, "  ...it is not left running after an E-STOP");
 
-    // A sweep whose axis gets stopped underneath it must SAY so rather
-    // than reporting a layer that quietly covered a third of the circle.
+    // A sweep AWAY from the switch that gets stopped underneath it must
+    // say so rather than reporting a layer that covered a third of a turn.
     OUT.clear();
     run("SCAN_START:10,90,2");
-    rotDir = 0;                       // as a soft limit or PLC switch would
+    plcPoll3(0, 0, 0);                    // off the switch, mid-sweep
+    setRot(200.0);
+    rotDir = 0;                           // as a soft limit would leave it
     OUT.clear();
     serviceScan();
     check(saw("[SCAN_ABORT]") && saw("RM was stopped"),
@@ -1236,9 +1313,10 @@ int main() {
     run("SCAN_STATUS");
     check(saw("[SCAN_STATUS] phase=IDLE"), "SCAN_STATUS reports an idle scanner");
 
-    ConnectorM1.pos = 0; ConnectorM0.pos = 0;
+    setRot(0.0); setZ(0.0);
     rotDir = jzDir = 0;
     scanPhase = SCAN_OFF;
+    plcPoll3(0, 0, 0);
   }
 
   printf("\n%s  (%d passed, %d failed)\n",

@@ -349,7 +349,15 @@ class ScannerApp:
             self.log(line)
             return
 
-        if line.startswith(C.TAG_DONE):
+        if line.startswith(C.TAG_SEEK):
+            # Nothing is being measured yet, and the turntable IS moving.
+            # Saying so stops it looking like a scan that started and then
+            # produced no points.
+            self.progress_var.set("Finding the RM switch…")
+            self.log(line, "warn")
+        elif line.startswith(C.TAG_REF):
+            self.log(line, "ok")
+        elif line.startswith(C.TAG_DONE):
             self._scan_ended("Finished")
             self.log(line, "ok")
         elif line.startswith(C.TAG_ABORT):

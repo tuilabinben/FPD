@@ -24,10 +24,15 @@ away from the machine.
 
 ## What it does
 
-One layer is a **340° sweep** of the turntable with the distance sensor sampled every
-*n* degrees. At the end of a sweep the turntable rewinds to 0°, the lift rises by your
-step, and the next layer starts. Stack the layers and you have the shape of whatever
-surrounds the machine.
+Pressing START turns the turntable until it reaches the **RM travel switch**, and that is
+where the scan is referenced from. Then:
+
+1. **Sweep 340° away from the switch**, sampling the distance sensor every *n* degrees
+2. **Lift** by your step
+3. **Sweep 340° back**, until the switch is reached again — sampling all the way
+4. **Lift**, and repeat, alternating direction
+
+Stack the layers and you have the shape of whatever surrounds the machine.
 
 | Field | Meaning | Default |
 | :--- | :--- | ---: |
@@ -54,11 +59,21 @@ decision here:
 > all of that, and would have got it wrong.
 
 If a soft limit or a PLC switch stops the axis mid-sweep, the scan **aborts and says so**
-rather than quietly finishing a layer that only covered a third of the circle.
+rather than quietly finishing a layer that only covered a third of the circle. A return
+leg is the exception — being stopped there is arrival, not a fault.
 
-The turntable **rewinds** between layers instead of sweeping back the other way.
-Alternating would halve the scan time and put every other layer on the far side of the
-drivetrain's backlash — which is the half a degree the scan exists to resolve.
+**Every layer is referenced to the switch, not to a degree count.** A return leg ends
+when the switch trips, whatever the counter says, so the turntable is re-squared every
+other layer and the start angle cannot drift over a tall scan.
+
+Sweeping in **alternating** directions means the return leg collects a layer instead of
+being dead rewind travel, so a scan takes half as long. The cost is a fixed backlash
+offset between odd and even layers — a constant, measurable and removable afterwards,
+unlike drift, which is not.
+
+The scan is **refused outright** if there is no PLC device data or if RM's switch has
+been disabled: without the switch there is no frame to sweep in, and two scans taken on
+different days would have angle columns that mean different things.
 
 Scanning runs RM at **20% of jog speed**. At full speed an ultrasonic read that times out
 blocks for 30 ms, which is 3° of travel — wider than the features you are looking for.
@@ -132,15 +147,17 @@ turntable cannot sweep through; a gap there is the machine's shape, not a sensor
 
 | Reply | |
 | :--- | :--- |
-| `[SCAN_BEGIN] sensor=… layers=… zStep=… degStep=… sweep=… fromRot=… fromZ=…` | accepted |
-| `[SCAN_LAYER] <n>/<N> z=<mm> mm` | a layer started |
+| `[SCAN_BEGIN] sensor=… layers=… zStep=… degStep=… sweep=… fromZ=…` | accepted |
+| `[SCAN_SEEK] …` | turning to find the RM switch; nothing measured yet |
+| `[SCAN_REF] RM on its switch at <deg>` | referenced — every layer is measured from here |
+| `[SCAN_LAYER] <n>/<N> z=<mm> mm dir=<+\|-> from=<deg>` | a layer started, and which way it turns |
 | `[SCAN_PT] <layer>,<deg>,<mm>` | one sample; negative mm is a miss |
 | `[SCAN_DONE] <N> layers, <n> points` | finished |
 | `[SCAN_ABORT] <why>` | stopped early, and why |
 
 `SCAN_START` is refused outright if the machine is already moving, if a scan is already
-running, if any parameter is out of range, or if the last layer would need more lift
-than the stroke has.
+running, if any parameter is out of range, if the last layer would need more lift than
+the stroke has, if there is no PLC device data, or if RM's switch is disabled.
 
 ---
 

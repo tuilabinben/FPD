@@ -426,8 +426,16 @@ const int    SCAN_LAYERS_MAX     = 500;
 const double SCAN_ANGLE_EPS_DEG  = 0.05;
 const double SCAN_Z_EPS_MM       = 0.02;
 
-enum ScanPhase { SCAN_OFF, SCAN_SWEEP, SCAN_REWIND, SCAN_LIFT };
+// SEEK finds the RM travel switch, which is the scan's reference. Every
+// layer starts from it, and every other layer ends back on it.
+enum ScanPhase { SCAN_OFF, SCAN_SEEK, SCAN_SWEEP, SCAN_LIFT };
 ScanPhase scanPhase = SCAN_OFF;
+
+// Far more than a turn: the switch should be found inside 360 deg, and
+// anything past that means it is not going to be. Without this a miswired
+// switch turns into an axis grinding against its soft limit until somebody
+// notices.
+const double SCAN_SEEK_MAX_DEG = 400.0;
 
 int    scanLayer = 0;             // 1-based once running
 int    scanLayers = 0;
@@ -439,6 +447,8 @@ double scanStartZ = 0.0;
 double scanNextDeg = 0.0;         // absolute RM angle the next sample is due at
 double scanLayerTargetZ = 0.0;
 long   scanPointsSent = 0;
+int    scanSweepDir = -1;         // +1 or -1; alternates layer to layer
+double scanSweepFrom = 0.0;       // the angle THIS layer started at
 
 // -1 = axis minimum, +1 = axis maximum
 // ZM sits at the BOTTOM of the stroke, so it stops Z_DOWN and Z_UP comes
@@ -2389,6 +2399,14 @@ const char *scanSensorName() {
   return scanSensorKind == SCAN_SENSOR_ANALOG ? "ANALOG" : "ULTRASONIC";
 }
 
+// Is RM sitting on its travel switch right now? The scan's whole frame
+// hangs off this one bit: it is the only position on the turntable the
+// board can identify without a reference, so it is where every layer
+// starts and where every other layer ends.
+bool scanRotSwitchOn() {
+  return plcStatusValid && plcLimitSensorEnabled[1] && plcBit(PLC_M_LIMIT_ROT);
+}
+
 void cancelScan(const String &why) {
   if (scanPhase == SCAN_OFF) return;
   scanPhase = SCAN_OFF;
@@ -2404,9 +2422,9 @@ void cancelScan(const String &why) {
 void scanEmitPoint() {
   double deg = currentRot();
   // INVERT_ROT makes currentRot() hand back NEGATIVE zero at the reference,
-  // so the first sample of every layer would be stamped "-0.00". Harmless
-  // arithmetically, ugly in a CSV, and it makes the first column look
-  // signed when it is not. -0.0 == 0.0 is true, so this replaces it.
+  // so a sample there would be stamped "-0.00". Harmless arithmetically,
+  // ugly in a CSV, and it makes the first column look signed when it is
+  // not. -0.0 == 0.0 is true, so this replaces it.
   if (deg == 0.0) deg = 0.0;
   double mm  = scanReadDistanceMm();
   scanPointsSent++;
@@ -2414,25 +2432,86 @@ void scanEmitPoint() {
              + "," + String(mm, 2));
 }
 
-void scanBeginLayer() {
+// Layers ALTERNATE direction: the first sweeps away from the switch, the
+// next comes back to it, and so on.
+//
+// The earlier version rewound between layers so that every layer was
+// sampled travelling the same way, which keeps the drivetrain backlash on
+// one side. This is the operator's call and it buys two things that are
+// worth more here: the return leg collects a layer instead of being dead
+// travel, so a scan takes half as long, and every layer that ends on the
+// switch RE-REFERENCES the turntable, so angle error cannot accumulate
+// over a tall scan. What it costs is a fixed backlash offset between odd
+// and even layers -- a constant, and one that can be measured and removed
+// afterwards, unlike drift.
+void scanBeginLayer(int dir) {
+  scanSweepDir = dir;
+  scanSweepFrom = currentRot();
+  scanNextDeg = scanSweepFrom;
   scanPhase = SCAN_SWEEP;
-  scanNextDeg = scanStartRot;
   sendFeedback("[SCAN_LAYER] " + String(scanLayer) + "/" + String(scanLayers)
-             + " z=" + String(currentD1(), 2) + " mm");
-  rotDir = 1;
+             + " z=" + String(currentD1(), 2) + " mm"
+             + " dir=" + String(dir > 0 ? "+" : "-")
+             + " from=" + String(scanSweepFrom, 2));
+  rotDir = dir;
   jzDir = 0;
   applyJogVelocities();
+}
+
+// True once the axis has reached the next angle a sample is due at. The
+// test has to follow the sweep direction: going backwards, "arrived" means
+// the angle has fallen TO it, not risen to it.
+bool scanReachedNext() {
+  if (scanSweepDir > 0) return currentRot() >= scanNextDeg - SCAN_ANGLE_EPS_DEG;
+  return currentRot() <= scanNextDeg + SCAN_ANGLE_EPS_DEG;
+}
+
+double scanTravelled() {
+  double d = currentRot() - scanSweepFrom;
+  return d < 0 ? -d : d;
 }
 
 void serviceScan() {
   if (scanPhase == SCAN_OFF) return;
 
+  // ---- finding the reference --------------------------------------
+  if (scanPhase == SCAN_SEEK) {
+    if (scanRotSwitchOn()) {
+      // plcServiceLimitStops() has already stopped the axis -- driving
+      // into a covered switch is the one direction it refuses, which is
+      // exactly the behaviour being used here rather than worked around.
+      rotDir = 0;
+      applyJogVelocities();
+      scanStartRot = currentRot();
+      sendFeedback("[SCAN_REF] RM on its switch at " + String(scanStartRot, 2)
+                 + " deg - sweeping from here");
+      scanLayer = 1;
+      scanBeginLayer(-PLC_LIMIT_END_ROT);   // away from the switch
+      // Deliberately NO return: falling through into the sweep below takes
+      // the sample at the reference angle now, rather than a service tick
+      // later when the axis has already moved off it. That first point is
+      // the one every other layer is aligned against.
+    } else if (rotDir == 0) {
+      cancelScan("RM stopped before reaching its switch - a soft limit is in "
+                 "the way, or the switch is not wired");
+      return;
+    } else if (scanTravelled() > SCAN_SEEK_MAX_DEG) {
+      cancelScan("RM turned " + String(SCAN_SEEK_MAX_DEG, 0)
+               + " deg without finding its switch");
+      return;
+    } else {
+      return;                               // still turning, nothing to do
+    }
+  }
+
   // The jog soft-limit and PLC-switch services can zero rotDir/jzDir under
   // us -- that is the whole reason the scan drives through them rather than
-  // commanding the motors itself. If the axis it needs has been stopped by
-  // one of them the scan cannot finish, and saying so beats sweeping a
-  // layer that quietly stopped a third of the way round.
-  if (scanPhase == SCAN_SWEEP && rotDir == 0) {
+  // commanding the motors itself. Being stopped mid-sweep means the layer
+  // is short, and saying so beats reporting it as complete.
+  //
+  // A sweep heading BACK toward the switch is the exception: being stopped
+  // there is arrival, not a fault, and it is handled below.
+  if (scanPhase == SCAN_SWEEP && rotDir == 0 && !scanRotSwitchOn()) {
     cancelScan("RM was stopped mid-sweep by a soft limit or a PLC switch");
     return;
   }
@@ -2441,29 +2520,26 @@ void serviceScan() {
     return;
   }
 
+  // ---- sweeping ----------------------------------------------------
   if (scanPhase == SCAN_SWEEP) {
-    double end = scanStartRot + scanSweepDeg;
-    while (scanNextDeg <= currentRot() + SCAN_ANGLE_EPS_DEG
-           && scanNextDeg <= end + SCAN_ANGLE_EPS_DEG) {
+    while (scanReachedNext() && scanTravelled() <= scanSweepDeg + SCAN_ANGLE_EPS_DEG) {
       scanEmitPoint();
-      scanNextDeg += scanDegStep;
+      scanNextDeg += scanSweepDir * scanDegStep;
     }
-    if (currentRot() >= end - SCAN_ANGLE_EPS_DEG) {
-      // Rewind rather than sweeping back the other way. Alternating would
-      // halve the time and put every other layer on the far side of the
-      // drivetrain backlash -- which is the half a degree the scan exists
-      // to resolve.
-      scanPhase = SCAN_REWIND;
-      rotDir = -1;
-      applyJogVelocities();
-    }
-    return;
-  }
 
-  if (scanPhase == SCAN_REWIND) {
-    if (currentRot() > scanStartRot + SCAN_ANGLE_EPS_DEG) return;
+    bool backAtSwitch = (scanSweepDir == PLC_LIMIT_END_ROT) && scanRotSwitchOn();
+    if (!backAtSwitch && scanTravelled() < scanSweepDeg - SCAN_ANGLE_EPS_DEG) return;
+
     rotDir = 0;
     applyJogVelocities();
+    if (backAtSwitch) {
+      // Every arrival at the switch is a fresh reference. Without this the
+      // start angle drifts by whatever the last sweep overshot, layer after
+      // layer, and a tall scan ends up rotated against its own base.
+      scanStartRot = currentRot();
+      sendFeedback("[SCAN_REF] RM back on its switch at "
+                 + String(scanStartRot, 2) + " deg");
+    }
     if (scanLayer >= scanLayers) {
       scanPhase = SCAN_OFF;
       sendFeedback("[SCAN_DONE] " + String(scanLayers) + " layers, "
@@ -2477,12 +2553,13 @@ void serviceScan() {
     return;
   }
 
+  // ---- lifting between layers --------------------------------------
   if (scanPhase == SCAN_LIFT) {
     if (currentD1() < scanLayerTargetZ - SCAN_Z_EPS_MM) return;
     jzDir = 0;
     applyJogVelocities();
     scanLayer++;
-    scanBeginLayer();
+    scanBeginLayer(-scanSweepDir);       // back the way it came
   }
 }
 
@@ -2533,6 +2610,21 @@ void handleScanStart(const String &payload) {
                  "Lower the start height, the step, or the layer count.");
     return;
   }
+  // The scan is referenced to the RM switch, so without it there is no
+  // frame to sweep in. Refused rather than started from wherever the
+  // turntable happens to be sitting: two scans taken on different days
+  // would then have angle columns that mean different things.
+  if (!plcStatusValid) {
+    sendFeedback("[ERROR] SCAN refused - no PLC device data, so the RM switch "
+                 "cannot be seen. Check the link with PLC_TEST.");
+    return;
+  }
+  if (!plcLimitSensorEnabled[1]) {
+    sendFeedback("[ERROR] SCAN refused - RM's switch is disabled "
+                 "(SET_PLC_SENSOR_ENFORCE:ROT,1 to put it back). It is the "
+                 "reference every layer starts from.");
+    return;
+  }
   if (scanSensorKind == SCAN_SENSOR_ANALOG && scanAnalogMmPerCount == 0.0) {
     sendFeedback("[WARN] the analog sensor has no calibration, so every reading "
                  "will come back -1. Send SET_SCAN_CAL first.");
@@ -2542,27 +2634,38 @@ void handleScanStart(const String &payload) {
   scanDegStep = dStep;
   scanLayers  = layers;
   scanSweepDeg = sweep;
-  scanStartRot = currentRot();
   scanStartZ   = currentD1();
+  scanSweepFrom = currentRot();
   scanPointsSent = 0;
-  scanLayer = 1;
+  scanLayer = 0;
   sendFeedback("[SCAN_BEGIN] sensor=" + String(scanSensorName())
              + " layers=" + String(layers)
              + " zStep=" + String(zStep, 2)
              + " degStep=" + String(dStep, 2)
              + " sweep=" + String(sweep, 1)
-             + " fromRot=" + String(scanStartRot, 2)
              + " fromZ=" + String(scanStartZ, 2));
-  scanBeginLayer();
+
+  if (scanRotSwitchOn()) {
+    // Already there. Nothing to seek, and driving into a covered switch is
+    // refused anyway, so this would otherwise abort on the spot.
+    scanPhase = SCAN_SEEK;
+    serviceScan();
+    return;
+  }
+  sendFeedback("[SCAN_SEEK] turning RM to its switch to reference the sweep...");
+  scanPhase = SCAN_SEEK;
+  rotDir = PLC_LIMIT_END_ROT;
+  applyJogVelocities();
 }
 
 void sendScanStatus() {
   const char *phase = scanPhase == SCAN_OFF ? "IDLE"
-                    : scanPhase == SCAN_SWEEP ? "SWEEP"
-                    : scanPhase == SCAN_REWIND ? "REWIND" : "LIFT";
+                    : scanPhase == SCAN_SEEK ? "SEEK"
+                    : scanPhase == SCAN_SWEEP ? "SWEEP" : "LIFT";
   sendFeedback(String("[SCAN_STATUS] phase=") + phase
              + " sensor=" + String(scanSensorName())
              + " layer=" + String(scanLayer) + "/" + String(scanLayers)
+             + " dir=" + String(scanSweepDir > 0 ? "+" : "-")
              + " points=" + String(scanPointsSent)
              + " cal=" + String(scanAnalogMmPerCount, 5)
              + "," + String(scanAnalogOffsetMm, 2));

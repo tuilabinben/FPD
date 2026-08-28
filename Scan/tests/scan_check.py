@@ -176,6 +176,18 @@ app._repaint()
 check(app.store.layers() == [1, 2, 3], "all three layers arrived")
 check(app.store.layer_z == {1: 0.0, 2: 4.0, 3: 8.0},
       "  ...at the heights the Z step asks for")
+# The sweep starts at the RM switch and ALTERNATES: out, then back to the
+# switch, then out again. The return leg collects a layer instead of being
+# dead rewind travel, and ending on the switch re-references the turntable
+# so the start angle cannot drift over a tall scan.
+_l1 = [d for d, _r in app.store.layer_points(1)]
+_l2 = [d for d, _r in app.store.layer_points(2)]
+_l3 = [d for d, _r in app.store.layer_points(3)]
+check(_l1[0] > _l1[-1], "layer 1 sweeps AWAY from the switch, so its angle counts down")
+check(_l2[0] < _l2[-1], "layer 2 comes BACK to it, counting up")
+check(_l3[0] > _l3[-1], "  ...and layer 3 turns round again")
+check(abs(_l1[0] - _l3[0]) < 1e-6,
+      "every outward layer starts at the same angle - the switch, not a drifting count")
 check(app.store.total > 500, "a 2 deg step over 340 deg is about 171 points a layer")
 check(app.scanning is False and app.progress_var.get() == "Finished",
       "[SCAN_DONE] ends the scan and re-enables START")
@@ -196,6 +208,11 @@ check(app2.scanning is False and app2.progress_var.get() == "Refused",
       "a refusal from the board clears the GUI's idea that a scan is running")
 check(str(app2.start_btn.cget("state")) == "normal",
       "  ...otherwise START stays greyed out with nothing running")
+
+app6 = ScannerApp(tk.Tk())
+app6._on_line("[SCAN_SEEK] turning RM to its switch to reference the sweep...")
+check(app6.progress_var.get() == "Finding the RM switch…",
+      "seeking says so - the turntable IS moving, it is just not measuring yet")
 
 app3 = ScannerApp(tk.Tk())
 app3._start()
@@ -226,12 +243,21 @@ seen = []
 sim = SimulatedBoard(seen.append)
 sim.send("SCAN_START:5,10,2")
 check(any(l.startswith("[SCAN_BEGIN]") for l in seen), "it opens with [SCAN_BEGIN]")
-check(any(l.startswith("[SCAN_LAYER] 1/2") for l in seen), "  ...then the first layer")
+check(any(l.startswith("[SCAN_SEEK]") for l in seen),
+      "  ...then goes to find the RM switch, like the board does")
+check(any(l.startswith("[SCAN_REF]") for l in seen),
+      "  ...and announces the switch as the reference")
+check(any(l.startswith("[SCAN_LAYER] 1/2") and "dir=-" in l for l in seen),
+      "  ...before sweeping AWAY from it")
 for _ in range(200):
     sim.poll()
     if not sim.running:
         break
 check(any(l.startswith("[SCAN_PT]") for l in seen), "it emits points")
+check(any(l.startswith("[SCAN_LAYER] 2/2") and "dir=+" in l for l in seen),
+      "the next layer turns back the other way")
+check(sum(1 for l in seen if l.startswith("[SCAN_REF]")) == 2,
+      "  ...and re-references when it arrives back on the switch")
 check(any(l.startswith("[SCAN_DONE]") for l in seen), "and finishes with [SCAN_DONE]")
 seen.clear()
 sim.send("SCAN_STOP")
