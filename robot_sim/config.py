@@ -75,9 +75,11 @@ AXIS_RPM_SCALES = {
 MASTER_RPM = 150.0                     
 MASTER_ACC_RPM_S = 375.0               
 
-DEFAULT_ARM_PCT = 125.0
-DEFAULT_ROT_PCT = 75.0
-DEFAULT_Z_PCT = 50.0
+# SET ON THE MACHINE. This combination is the one that ran stably; it is a
+# bench result, not a calculation, so do not re-derive it from anything.
+DEFAULT_ARM_PCT = 62.5
+DEFAULT_ROT_PCT = 50.0
+DEFAULT_Z_PCT = 200.0
 
 AXIS_PCT_MIN = 1.0
 
@@ -95,13 +97,22 @@ SPEED_WIRE_KEYS = ("rot_pct", "arm_pct", "z_pct")
 #
 # Until now the firmware silently reused rotPct/armPct/zPct (the SPEED
 # percentages) to scale acceleration too. These are a separate family so
-# the ramp can be tuned without also changing cruise speed. Defaults equal
-# the speed defaults — that reproduces today's real-machine acceleration
-# exactly, rather than jumping to a flat 100% nobody has validated.
+# the ramp can be tuned without also changing cruise speed.
+#
+# THESE ARE NOT EQUAL TO THE SPEED PERCENTAGES, and the difference is the
+# point. Acceleration is what decides how far an axis carries on after the
+# key is released — coast = v² / 2a — so an axis tuned for speed alone
+# overshoots. The arm showed it worst: sharing a 125% speed figure it ramped
+# for 0.40 s and coasted 225 MOTOR degrees, most of its taught band, on
+# every release.
+#
+# SET ON THE MACHINE, alongside the speed percentages above, as the
+# combination that ran stably. A bench result — do not re-derive it, and do
+# not "tidy" these back to equal the speed percentages.
 # ------------------------------------------------------------------
-DEFAULT_ROT_ACC_PCT = DEFAULT_ROT_PCT
-DEFAULT_ARM_ACC_PCT = DEFAULT_ARM_PCT
-DEFAULT_Z_ACC_PCT = DEFAULT_Z_PCT
+DEFAULT_ROT_ACC_PCT = 100.0
+DEFAULT_ARM_ACC_PCT = 70.0
+DEFAULT_Z_ACC_PCT = 200.0
 
 ACCEL_FIELDS = {
     "rot_acc_pct": ("RM — rotation accel", "%", DEFAULT_ROT_ACC_PCT, AXIS_PCT_MIN, None),

@@ -13,6 +13,29 @@ from ..widgets import set_led
 
 NO_PORT_LABEL = "No COM ports"
 
+# TELEMETRY IS PARSED, NEVER LOGGED.
+#
+# The board reports the pose every 50 ms while an axis is held, and again
+# throughout a P2P run. Writing those into the event log cost more than the
+# jog itself: 20 inserts a second, each with a see("end") that forces Tk to
+# scroll and repaint, and — once the 800-line cap is reached, which takes
+# about 40 seconds of jogging — an index scan and a delete on every one of
+# them. The arm kept moving, because the board drives it; what lagged was
+# the readout, and it got worse the longer the key was held.
+#
+# They are still parsed, so the readout is as live as it ever was. The same
+# rule the TX side already follows: JOG_HB goes out with log_tx=False for
+# exactly this reason, and the RX side simply never got the same treatment.
+# The scanner learned it too — see the [SCAN_PT] note in its _on_line().
+#
+# Anything the operator would want to READ still logs. This list is only for
+# lines that repeat many times a second and say the same thing each time.
+TELEMETRY_PREFIXES = ("[JOG POS]", "[CLEARCORE POS]")
+
+
+def is_telemetry(line):
+    return line.startswith(TELEMETRY_PREFIXES)
+
 
 class SerialLinkMixin:
     def refresh_com_ports(self):
@@ -174,12 +197,13 @@ class SerialLinkMixin:
                     if not raw:
                         continue
                     lines_read += 1
-                    tag = "rx"
-                    if raw.startswith("[ERROR]"):
-                        tag = "error"
-                    elif raw.startswith("[WARN]"):
-                        tag = "warn"
-                    self.log(f"<< {raw}", tag=tag)
+                    if not is_telemetry(raw):
+                        tag = "rx"
+                        if raw.startswith("[ERROR]"):
+                            tag = "error"
+                        elif raw.startswith("[WARN]"):
+                            tag = "warn"
+                        self.log(f"<< {raw}", tag=tag)
                     self._parse_hardware_response(raw)
             except Exception:
                 pass

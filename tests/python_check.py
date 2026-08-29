@@ -1,6 +1,7 @@
 """Behaviour checks for the GUI logic. Run with tests/run_tests.sh."""
 import json
 import os
+import re
 import sys
 import types
 
@@ -295,10 +296,36 @@ app = App(); app.open_settings_dialog()
 check(len(app._speed_vars) == len(C.SPEED_FIELDS), "the Speed tab built every field")
 check(len(app._accel_vars) == len(C.ACCEL_FIELDS),
       "  ...and every accel field too, independent of speed")
-check(C.DEFAULT_ROT_ACC_PCT == C.DEFAULT_ROT_PCT
-      and C.DEFAULT_ARM_ACC_PCT == C.DEFAULT_ARM_PCT
-      and C.DEFAULT_Z_ACC_PCT == C.DEFAULT_Z_PCT,
-      "accel defaults preserve today's real-machine behaviour, not a flat 100%")
+# The accel defaults USED to be copies of the speed ones. They are set from
+# the machine now, and the difference is the point: acceleration is what
+# decides how far an axis carries on after the key is released, so an axis
+# tuned for speed alone overshoots.
+check((C.DEFAULT_ROT_PCT, C.DEFAULT_ARM_PCT, C.DEFAULT_Z_PCT) == (50.0, 62.5, 200.0),
+      "the speed defaults are the combination that ran stably on the machine")
+check((C.DEFAULT_ROT_ACC_PCT, C.DEFAULT_ARM_ACC_PCT, C.DEFAULT_Z_ACC_PCT)
+      == (100.0, 70.0, 200.0),
+      "  ...and the accel defaults are their own numbers, from the same bench run")
+check(C.DEFAULT_ARM_ACC_PCT != C.DEFAULT_ARM_PCT
+      and C.DEFAULT_ROT_ACC_PCT != C.DEFAULT_ROT_PCT,
+      "  ...NOT copies of the speed percentages - that was the arm's 225 deg coast")
+
+# Both sides have to agree, or the panel advertises a ramp the board will
+# not use until the GUI happens to send SET_SPEED.
+_ino_src = open(os.path.join(os.path.dirname(HERE),
+                             "RobotMotionController_v9_ClearCore",
+                             "RobotMotionController_v9_ClearCore.ino"),
+                encoding="utf-8").read()
+for _name, _want in (("ROT_PCT_DEF", C.DEFAULT_ROT_PCT),
+                     ("ARM_PCT_DEF", C.DEFAULT_ARM_PCT),
+                     ("Z_PCT_DEF", C.DEFAULT_Z_PCT),
+                     ("ROT_ACC_PCT_DEF", C.DEFAULT_ROT_ACC_PCT),
+                     ("ARM_ACC_PCT_DEF", C.DEFAULT_ARM_ACC_PCT),
+                     ("Z_ACC_PCT_DEF", C.DEFAULT_Z_ACC_PCT)):
+    _m = re.search(rf"const float {_name}\s*=\s*([\d.]+)f", _ino_src)
+    check(_m is not None and abs(float(_m.group(1)) - _want) < 0.01,
+          f"  ...and the firmware's {_name} is the same number the GUI defaults to")
+check("float armAccPct     = ARM_ACC_PCT_DEF;" in _ino_src,
+      "  ...with the board seeding accel from the ACCEL default, not the speed one")
 
 # _send_speed() must APPEND the 3 accel percentages, never reorder/interleave
 # the original 5 -- an old board parsing this positionally must keep reading
@@ -2328,6 +2355,38 @@ check("_gamepad_quit" not in _inspect.getsource(_SF),
 check(set(C.JOG_STOP_COMMAND) >= {"A1_FWD", "A1_BACK", "A2_FWD", "A2_BACK",
                                   "ROT_CW", "ROT_CCW", "Z_UP", "Z_DOWN"},
       "all eight jog commands survive -- only the input path went")
+
+
+print("\n=== 30. telemetry is parsed, never logged ===")
+# The board reports the pose every 50 ms while an axis is held. Writing
+# those into the event log cost 87 ms of every second on real Tk -- an
+# insert, a see("end") that forces a scroll and repaint, and once the
+# 800-line cap is reached an index scan and a delete, twenty times a
+# second. It also buried every line the operator actually needed.
+import robot_sim.core.serial_link as _SL
+
+check(_SL.is_telemetry("[JOG POS] ROT: 1.00 deg | A1M: 2.00 deg"),
+      "the 20 Hz jog pose is telemetry")
+check(_SL.is_telemetry("[CLEARCORE POS] D1: 0.00 | ROT: 0.00"),
+      "  ...so is the run pose")
+for _line in ("[ERROR] SCAN refused", "[WARN] no calibration", "[LIMIT] Z_UP",
+              "[PLC_STATE] link=UP", "[HOME] ROT reached its switch",
+              "[RUN] TARGET REACHED", "PONG"):
+    check(not _SL.is_telemetry(_line),
+          f"  ...but {_line.split(']')[0] + ']' if ']' in _line else _line} still reaches the log")
+
+_sl_src = _inspect.getsource(_SL.SerialLinkMixin._listen_hardware_response)
+check("if not is_telemetry(raw):" in _sl_src,
+      "the RX pump skips the log for telemetry, and only for the log")
+check("self._parse_hardware_response(raw)" in _sl_src
+      and _sl_src.index("self._parse_hardware_response(raw)")
+          > _sl_src.index("if not is_telemetry(raw):"),
+      "  ...every line is still PARSED, so the readout is as live as it was")
+# The TX side already worked this way; this is the same rule, applied to
+# the half that never got it.
+import robot_sim.core.jog_control as _JC
+check('self.send("JOG_HB", log_tx=False)' in _inspect.getsource(_JC),
+      "the keep-alive was already kept out of the log for the same reason")
 
 
 print("\n" + ("ALL PYTHON CHECKS PASSED" if not FAIL else "FAILURES: %s" % FAIL))
