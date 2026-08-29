@@ -21,3 +21,15 @@ dist/
 # Local test suite — restored for local dev use only. Deliberately kept out
 # of the repo per commit 6b0ed95 ("product only"); do not track or push it.
 tests/
+
+# Generated knowledge graph — 12 MB, and `graphify update .` rebuilds it
+# from the source that is already here. Nothing reads it that cannot
+# regenerate it.
+graphify-out/
+
+# Local agent/skill tooling. Machine-specific configuration, not project
+# source: it says how THIS checkout is driven, not how the robot works.
+.claude/
+.agents/
+agent/
+skills-lock.json
