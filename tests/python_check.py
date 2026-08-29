@@ -1663,14 +1663,18 @@ check("PULSES_PER_MM_Z" not in _body,
       "the fixed PULSES_PER_MM_Z is gone from every calculation")
 check(_body.count("pulsesPerMmZ()") >= 4,
       "  ...and position, move, velocity and accel all use the live figure")
-# The board now carries the SPEC lead (20 mm/rev) and its own microstep
-# constant for ZM; the GUI side is still the one asking for a bench check.
+# The board carries the lead (20 mm/rev) and its own microstep constant.
 check("Z_MICROSTEPS_PER_STEP" in fw and "PULSES_PER_MOTOR_REV_Z" in fw,
-      "ZM has its own pulses-per-rev, so the spec lead can be entered as-is")
-check("MEASURE THIS" in open(
-        os.path.join(os.path.dirname(HERE), "robot_sim", "config.py"),
-        encoding="utf-8").read(),
-      "  ...and the GUI still asks for the bench figure")
+      "ZM has its own pulses-per-rev, so the lead can be entered as-is")
+# 20 mm/rev is CONFIRMED on the machine now, and the comment must not still
+# be asking for a bench check -- a doc that demands a measurement already
+# taken sends the next person to repeat it.
+_cfg_src = open(os.path.join(os.path.dirname(HERE), "robot_sim", "config.py"),
+                encoding="utf-8").read()
+check(C.Z_MM_PER_MOTOR_REV == 20.0 and "MEASURE THIS" not in _cfg_src,
+      "the ZM lead is 20 mm/rev, confirmed on the machine, not still a to-do")
+check("SET_Z_LEAD" in _cfg_src and "SET_Z_LEAD:" in fw,
+      "  ...and stays settable at runtime, for a changed lead screw or pulley")
 # The proportionality the operator can act on: 3x too far means 3x the lead.
 check(abs(C.Z_MM_PER_MOTOR_REV - 20.0) < 1e-9,
       "the assumed lead is still 20 mm/rev until somebody measures it")

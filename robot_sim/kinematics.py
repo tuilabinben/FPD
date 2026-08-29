@@ -137,9 +137,9 @@ def reach_to_fold_angle(r_mm):
 # exactly. Every frog-leg angle here derived from it via these two fns
 # only, so ARM_GEAR_RATIO recalibration can't be half-applied.
 #
-# Model-derived ratio is 2 (elbow motor drives KNEE, reach curve written in
-# terms of driven LINK angle — knee turns through twice link angle). Live
-# ARM_GEAR_RATIO is bench-measured, currently 7.80 — see config.py.
+# ARM_GEAR_RATIO is MEASURED, 7.80 — see config.py for the reach figures it
+# came from. The Simscape model's 2 describes the linkage, not the gearbox
+# in front of it, and does not match the machine.
 def fold_angle_from_motor_deg(motor_deg):
     """Motor rotation from home (deg) -> frog-leg rotation from home."""
     return motor_deg / ARM_GEAR_RATIO
@@ -230,11 +230,11 @@ def _check_reach(r, label="Point"):
 
     NO STRUCTURAL REACH ENVELOPE HERE ANY MORE — same decision already
     taken for elbow boundaries (ARM_LIMITS_UNBOUNDED in config.py). Old
-    133.2mm floor was R(fold=0°) — assumed elbow zero really is folded
-    home pose, and fold angle is motor degrees over an ARM_GEAR_RATIO
-    never measured. Both assumptions, so floor was a guess — one that
-    rejects a radius the arm is physically standing at, stopping operator
-    using machine at all.
+    133.2mm floor was R(fold=0°) — it assumed the elbow's zero really is
+    the folded home pose. ARM_GEAR_RATIO is measured now, but that one is
+    still an assumption, so the floor was still a guess — one that rejects
+    a radius the arm is physically standing at, stopping the operator
+    using the machine at all.
 
     Working envelope is operator's, from taught elbow boundaries in
     Settings -> Boundaries, enforced where those live: _limit_violation()
@@ -341,9 +341,8 @@ def solve_ik(x, y, z, arm_choice="A1M", reference_deg=0.0, clamp_like_matlab=Fal
     # Idle arm's angle passed through UNCLAMPED. Measured position, not
     # request: clamping to 0..120 would hand back target different from
     # where arm stands — command move on arm operator didn't select,
-    # exact failure idle_deg exists to prevent. Reported angle rides on
-    # unmeasured ARM_GEAR_RATIO, reading outside 0..120 expected, not
-    # fault.
+    # exact failure idle_deg exists to prevent. A reading outside 0..120
+    # is expected in any case, not a fault.
     idle = FOLD_ANGLE_HOME_DEG if idle_deg is None else idle_deg
 
     theta_a1m = theta_active if arm_choice == "A1M" else idle

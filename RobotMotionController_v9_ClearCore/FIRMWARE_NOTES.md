@@ -333,9 +333,10 @@ so no consumer has to care which SET HERE the operator pressed first.
 ## 11. A TAUGHT elbow boundary has NO envelope, and the pair is UNORDERED.
 
 No envelope: the angle this board reports for an elbow is scaled by
-armGearRatio, which is derived from the model rather than measured, so a
-position captured off the real machine legitimately reads far outside
-the CAD envelope. Any ceiling written here would be a guess, and a guess
+armGearRatio, which is measured (7.80) -- but the elbow's ZERO is not:
+the counter reads 0 wherever this board powered up, so a position
+captured off the real machine legitimately reads far outside the CAD
+envelope. Any ceiling written here would be a guess, and a guess
 that rejects a position the arm is physically standing at defeats the
 whole point of teaching. The boundaries are MOTOR degrees, which is why
 re-calibrating the ratio does not disturb them.
@@ -417,10 +418,12 @@ TWO MOTOR DEGREES:
     fold_deg  = motor_deg / armGearRatio
     motor_deg = fold_deg  * armGearRatio
 
->>> CONFIRM THIS ON THE BENCH. <<<
-It is derived from the model, not measured off the machine. Mark the
-elbow, command a known number of motor revolutions, and divide by the
-frog-leg angle actually swept. If it is not 2, send
+>>> MEASURED: 7.80. <<<
+Taken off the machine from reach, not angle: the arm reaches 575 mm at
+full extension, where the earlier 10.0 put the same motor position at
+498 mm, so 10.0 * fold(498)/fold(575) = 7.80. The model's 2 describes
+the LINKAGE and not the gearbox in front of it, and does not match the
+machine -- do not restore it. If the drive train is ever changed, send
 SET_ARM_RATIO:<value> — no re-flash, and every reported angle, reach
 figure and IK target follows immediately.
 
@@ -488,8 +491,8 @@ gear ratio CANCELS on the way to the step generator.
 So the pulse rate the motor actually receives depends only on the RPM
 asked for, whatever G is. ARM_GEAR_RATIO no longer has any influence on
 how fast the arm moves — it only affects the ANGLES this board reports
-and the absolute positions it drives to. Those are still wrong until it
-is measured. See the ARM_GEAR_RATIO note above.
+and the absolute positions it drives to, and those are right now that it
+is measured at 7.80. See the ARM_GEAR_RATIO note above.
 
 ## 16. Defaults
 
@@ -799,9 +802,9 @@ opinion about the envelope and is not switchable.
 
 There is no structural floor of 133.2 mm any more: that was
 R(fold = 0) and it assumed the elbow's zero really is the folded home
-pose, measured through an armGearRatio nobody has verified. Rejecting
-a radius the arm is physically standing at is worse than having no
-floor — see the same decision for the elbow boundaries themselves.
+pose -- an assumption the measured armGearRatio does nothing to settle.
+Rejecting a radius the arm is physically standing at is worse than
+having no floor — see the same decision for the elbow boundaries themselves.
 
 ## 33. The arm is bounded in MOTOR RPM, before any conversion, because motor
 

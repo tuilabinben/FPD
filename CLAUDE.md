@@ -90,7 +90,7 @@ a streamed segment list or on-board interpolation.
 
 ## The five decisions most likely to be "fixed" by mistake
 
-### 1. `ARM_GEAR_RATIO = 2.0` is derived from the model, not measured
+### 1. `ARM_GEAR_RATIO = 7.80` is MEASURED. The model's 2 was wrong.
 
 It does **not** affect arm speed — that is bounded in motor RPM and motor
 °/s, both ratio-free. It **does** scale every reported frog-leg angle,
@@ -98,10 +98,22 @@ every reach figure, and every absolute arm move (`MOVE_A1`, `MOVE_A2`, IK
 targets). Jog and the taught limits are unaffected, because both work in
 motor degrees.
 
-To confirm: mark the elbow, command a known number of motor revolutions,
-divide by the frog-leg angle actually swept. Then `SET_ARM_RATIO:<r>` — no
-re-flash, and nothing taught has to be re-taught. See 1b for the
-derivation.
+**Where 7.80 came from:** the arm reaches **575 mm** at full extension. The
+earlier 10.0 put that same motor position at 498 mm, so
+`10.0 × fold(498) / fold(575)` = `10.0 × 114.45 / 146.68` = **7.80**. It is
+a *reach* measurement rather than an angle one, because reach is what a tape
+measure can actually read on this machine.
+
+**Do not restore 2 from `mophong_init.m`.** The Simscape diagram drives each
+arm's two revolutes from one AM signal — shoulder `×1`, knee `×−2` — and the
+closed-form FK agrees, links at `th2 ± th3_math`. That describes the
+**linkage**, and it is right about the linkage. It says nothing about the
+gearbox in front of it, which is what the other 3.9 is. The model being
+self-consistent is not evidence about the drive train.
+
+`SET_ARM_RATIO:<r>` still changes it live — no re-flash, and nothing taught
+has to be re-taught, because taught elbow limits are stored in motor
+degrees. See 1b.
 
 ### 1a. RM zero is the CCW stop, and it IS home
 
@@ -140,16 +152,13 @@ pulses and nothing else, so that is the only elbow figure it knows exactly.
 The frog-leg angle and the reach are derived:
 
 ```
-fold_deg = motor_deg / ARM_GEAR_RATIO       ARM_GEAR_RATIO = 2.0
+fold_deg = motor_deg / ARM_GEAR_RATIO       ARM_GEAR_RATIO = 7.80
 R        = 293.2 - 320 * cos(fold_deg + 60)
 ```
 
-**The ratio of 2 comes from the model, not the bench.** `mophongv2.slx`
-drives each arm's two revolutes from one AM signal — the shoulder at `×1`,
-the knee at `×−2` — and `mophong_init.m`'s FK says the same thing by
-putting the links at `th2 ± th3_math`, symmetric about the radial line. The
-elbow motor is on the knee, so one fold degree costs two motor degrees.
-**Confirm on the bench**; `SET_ARM_RATIO:<r>` changes it with no re-flash.
+**7.80 is measured — see section 1 for the arithmetic and for why the
+model's 2 does not apply.** `SET_ARM_RATIO:<r>` changes it with no re-flash
+if the drive train is ever altered.
 
 Consequences that are easy to get wrong:
 
@@ -317,11 +326,11 @@ other than `kinematics.py` and `config.py`.** That check is deliberate.
 ### 3. The elbow boundaries have no envelope and are unordered
 
 * **No envelope** (`floor = ceil = None`, `ARM_LIMITS_UNBOUNDED`). Any
-  number is accepted, four figures included. Because the reported angle
-  rides on the unmeasured ratio, the arm genuinely reads `1000°` at a pose
-  CAD calls `140°`; any ceiling would be a guess, and a guess that rejects
-  a pose the arm is physically standing at stops the operator teaching the
-  machine at all.
+  number is accepted, four figures included. The ratio is measured now, so
+  the numbers mean something — but the elbow's ZERO still does not: the
+  counter reads 0 wherever the board powered up, so any ceiling is a
+  ceiling on an offset nobody knows. A guess that rejects a pose the arm is
+  physically standing at stops the operator teaching the machine at all.
 * **Unordered.** Teach either end first. Both numbers are stored **raw**
   and sorted where they are *read* — `armBand()` on the board,
   `_limit_pair()` in `jog_control.py`. **Do not sort on write:** that
@@ -340,10 +349,10 @@ only. A typed `90°` would be typed against a scale that is wrong.
 
 `133.2–613.2 mm` used to be enforced inside `solve_ik()`. It is gone. The
 floor was `R(fold = 0°)` — it assumed the elbow's zero really *is* the
-folded home pose, and that fold degrees are motor degrees over an
-`ARM_GEAR_RATIO` nobody has measured. Two assumptions stacked, so the
-floor was a guess, and it refused `X 0, Y 0` and every short radius on a
-machine that may well reach them.
+folded home pose. `ARM_GEAR_RATIO` is measured now, but that assumption is
+untouched by the measurement, so the floor was still a guess, and it
+refused `X 0, Y 0` and every short radius on a machine that may well reach
+them.
 
 What is enforced now:
 
@@ -353,8 +362,8 @@ What is enforced now:
 | `R` within the **taught elbow band** | `_limit_violation()`, `solveIkFrogleg()` | Yes, per axis |
 
 So a radius below 133.2 mm now **solves**, to a negative fold angle. That
-is not an error: the reported angle rides on the unmeasured ratio, so
-angles outside `0…120` are expected.
+is not an error: the angle is measured from wherever the board's counter
+was zeroed, so angles outside `0…120` are expected.
 
 Consequences that were easy to miss and are now tested:
 
@@ -697,20 +706,25 @@ It reads the entry boxes on every keystroke, so it must never raise on
 half-typed input (`-`, `1e`, empty). `_xy_points()` returns None instead,
 and the tests feed it exactly those strings.
 
-### ZM lead and the arm ratio are BOTH unmeasured
+### ZM lead and the arm ratio are BOTH settled now
 
-`zMmPerRev` (20 assumed) and `armGearRatio` (2 derived) are the two numbers
-that turn counts into real units, and neither has been measured on the
-bench. Both are runtime-settable — `SET_Z_LEAD:<mm>`, `SET_ARM_RATIO:<r>` —
-so calibration needs no re-flash.
+`zMmPerRev` and `armGearRatio` are the two numbers that turn counts into
+real units, and **both have been confirmed on the machine**:
 
-If Z travels **3x** the commanded distance the true lead is 3 x 20 = 60
+| | Value | How |
+| :--- | ---: | :--- |
+| `zMmPerRev` | **20** | commanded millimetres are real millimetres |
+| `armGearRatio` | **7.80** | 575 mm reach at full extension — see section 1 |
+
+They stay runtime-settable — `SET_Z_LEAD:<mm>`, `SET_ARM_RATIO:<r>` — so a
+changed lead screw, pulley or gearbox needs no re-flash. Nothing taught has
+to be re-taught either way, because every taught elbow boundary is stored in
+motor degrees and every ZM boundary in millimetres.
+
+If Z ever travels **3x** the commanded distance the true lead is 3 x 20 = 60
 mm/rev. A non-power-of-2 error points at the mechanics; the driver's
 microstep switches can only ever err by powers of two. Measure over 100 mm,
-not 10.
-
-A wrong ZM lead also moves where every ZM soft limit physically is, because
-those are stored in millimetres.
+not 10 — a wrong ZM lead moves where every ZM soft limit physically is.
 
 ### Jog and P2P share ONE live pose
 
@@ -907,7 +921,7 @@ and re-sends them on every handshake.
 `machine_settings.json` carries `_schema` (currently **2**). If you change
 what a stored value *means* — as the arm-angle re-zero did — bump it and
 drop the affected keys with a warning. Do not convert values that were
-produced by the unmeasured gear ratio; they were never real angles to
+produced by a *superseded* gear ratio; they were never real angles to
 convert. Reading a stale value silently is how someone ends up hunting a
 mechanical fault that does not exist.
 

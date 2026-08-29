@@ -91,6 +91,15 @@ const double FOLD_ANGLE_MIN_DEG      = FOLD_ANGLE_HOME_DEG;
 const double FOLD_ANGLE_MAX_DEG      = 180.0;
 const double FOLD_SINGULARITY_WARN_DEG = 170.0;
 
+// MOTOR degrees per FROG-LEG degree. MEASURED on the machine: at full
+// extension the arm reaches 575 mm, where the earlier 10.0 put the same
+// motor position at 498 mm, so 10.0 * fold(498)/fold(575) = 7.80. A reach
+// measurement rather than an angle one, because reach is what a tape
+// measure can read on this machine.
+//
+// The Simscape model says 2 -- shoulder x-1, knee x-2 -- and the model is
+// wrong here: it describes the LINKAGE, not the gearbox in front of it.
+// Do not restore 2 from the .m.
 const double ARM_GEAR_RATIO_DEF = 7.80;
 const double ARM_GEAR_RATIO_MIN = 0.01, ARM_GEAR_RATIO_MAX = 1000.0;
 double armGearRatio = ARM_GEAR_RATIO_DEF;
@@ -184,7 +193,10 @@ const double ROT_GEAR_RATIO_MIN = 0.01, ROT_GEAR_RATIO_MAX = 1000.0;
 double rotGearRatio = ROT_GEAR_RATIO_DEF;
 double pulsesPerDegRot() { return (PULSES_PER_MOTOR_REV * rotGearRatio) / 360.0; }
 
-// AM1/AM2 elbow gearing — *** STILL A PLACEHOLDER. MEASURE IT. ***  [notes §13]
+// AM1/AM2 elbow gearing. This is PULSES PER MOTOR DEGREE and is exact --
+// the driver's own step count, nothing derived. The gear train between
+// the motor and the frog-leg link is armGearRatio, measured at 7.80.
+//   [notes §13]
 const double PULSES_PER_DEG_ARM_MOTOR = PULSES_PER_MOTOR_REV / 360.0;
 
 const double Z_MICROSTEPS_PER_STEP  = 4.0;
@@ -3244,14 +3256,14 @@ void handleCommand(String cmd) {
   if (upper == "Z_LEAD") {
     sendFeedback("[Z_LEAD] " + String(zMmPerRev, 4) + " mm per motor revolution ("
                + String(pulsesPerMmZ(), 2) + " pulses/mm, default "
-               + String(Z_MM_PER_REV_DEF, 1) + " — MEASURE IT)");
+               + String(Z_MM_PER_REV_DEF, 1) + " — confirmed on the machine)");
     return;
   }
 
   if (upper == "ARM_RATIO") {
     sendFeedback("[ARM_RATIO] " + String(armGearRatio, 4)
                + " motor deg per fold deg (default " + String(ARM_GEAR_RATIO_DEF, 2)
-               + ", derived from the Simscape -2 knee gain — confirm on the bench)");
+               + ", MEASURED on the machine from the 575 mm full-extension reach)");
     return;
   }
 

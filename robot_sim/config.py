@@ -183,39 +183,34 @@ I_RM_TOTAL = 1 * 6.5
 # ELBOW: MOTOR DEGREES vs FROG-LEG DEGREES — two different numbers. Board MEASURES motor shaft
 # rotation only (counts step pulses). Frog-leg link angle DERIVED from it via this ratio.
 #
-# SOURCE (MATLAB_v4_final: mophongv2.slx + mophong_init.m): Simscape root diagram drives each
-# arm's two revolute joints from one AM1/AM2 signal:
-#   AM1 --x(-1)--> Revolute3 [banxoay:canhtay1]  SHOULDER
-#       --x(-2)--> Revolute  [canhtay1:canhtay2] KNEE
-# mophong_init.m FK agrees in closed form: upper link at (th2+th3_math), lower at
-# (th2-th3_math) — symmetric about radial line, so knee turns TWICE angle of driven link.
-#
-# Elbow motor coupled to knee: one frog-leg degree costs two motor degrees.
 #   fold_deg  = motor_deg / ARM_GEAR_RATIO
 #   motor_deg = fold_deg  * ARM_GEAR_RATIO
 #
-# CONFIRM ON BENCH — derived from model, not measured. Mark elbow, command known motor
-# revolutions, divide by frog-leg angle actually swept. If not 2, change here AND firmware (or
-# SET_ARM_RATIO to running board, no re-flash needed).
+# MEASURED ON THE MACHINE, 7.80. Arm at full extension reaches 575 mm; the previous 10.0
+# put that same motor position at 498 mm, so 10.0 * fold(498) / fold(575) = 10.0 * 114.45 /
+# 146.68 = 7.80. A reach measurement, not an angle one — reach is what a tape measure can
+# actually read on this machine.
 #
-# RM shows this shape is right: its ratio always in model, as 1/4.375 then 1/6.5.
+# THE MODEL SAID 2, AND THE MODEL WAS WRONG. mophongv2.slx drives each arm's two revolutes
+# from one AM signal (shoulder x-1, knee x-2), and mophong_init.m's FK agrees in closed form
+# — links at th2 ± th3_math, symmetric about the radial line — so on paper one fold degree
+# costs two motor degrees. The Simscape diagram models the LINKAGE and not the gearbox in
+# front of it; the bench says the real train is 7.80. Do not "restore" 2 from the .m: the
+# geometry there is right, the drive ratio is not in it.
 ARM_GEAR_RATIO = 7.80
-# MEASURED: arm reaches 575mm (straight out) at motor position old 10.0 ratio mapped to 498mm.
-# new = old * fold_angle(498mm) / fold_angle(575mm) = 10.0 * 114.45 / 146.68 = 7.80
 
 
 I_ARM_TOTAL = ARM_GEAR_RATIO
 
-# ZM LEAD — MEASURE THIS. Carriage travel per motor rev. 20 assumed, never measured — decides
-# whether commanded mm is real mm.
+# ZM LEAD — carriage travel per motor rev. CONFIRMED ON THE MACHINE: commanded mm are real
+# mm, so 20 stands. It was carried as an assumption for a long time and is not one any more.
 #
-# If carriage travels FURTHER than commanded, true lead LARGER in exact proportion: 10mm
-# command moving 30mm means 3*20=60mm/rev. Non-power-of-2 factor (e.g. 3) points at mechanics
-# (lead screw pitch, pulley ratio), not driver microstep switches (only err by powers of 2).
-#
-# Measure w/ rule on carriage over long move (100mm not 10, smaller reading error), set here
-# AND send SET_Z_LEAD to board (no re-flash). Wrong lead also moves where every ZM soft limit
-# physically is (stored in mm).
+# Kept settable anyway (SET_Z_LEAD, no re-flash), because a changed lead screw or pulley
+# would move where every ZM soft limit physically is — those are stored in millimetres. If
+# the carriage ever travels FURTHER than commanded, the true lead is larger in exact
+# proportion: a 10 mm command moving 30 mm means 3*20 = 60 mm/rev. A non-power-of-2 factor
+# points at the mechanics; the driver's microstep switches can only ever err by powers of 2.
+# Measure over 100 mm, not 10.
 Z_MM_PER_MOTOR_REV = 20.0
 
 
