@@ -163,6 +163,16 @@ class SimulatedBoard:
             phase = "SWEEP" if self.running else "IDLE"
             self._on_line(f"[SCAN_STATUS] phase={phase} sensor={self.sensor} "
                           f"layer={self.layer}/{self.layers} points=0 cal=0.00000,0.00")
+        elif upper == "PLC_STATUS":
+            # A simulated PLC would be a lie of the same kind the SIM switch
+            # exists to prevent: the lamp would read CONNECTED with no
+            # Mitsubishi in the building. The simulator says it has no
+            # device data, which is the truth and is also the reply an
+            # un-cabled board sends, so the unknown-state path gets
+            # exercised rather than skipped.
+            self._on_line("[PLC_STATE] link=DOWN socket=CLOSED data=NONE conn=0/0 "
+                          "word=---- timeouts=0 | NO DEVICE DATA | "
+                          "limit Z/R/A2=??? end Z/R/A2=???")
         elif upper == "PING":
             self._on_line("PONG")
         return True
@@ -176,6 +186,13 @@ class SimulatedBoard:
         self.deg_step = float(parts[1])
         self.layers = int(parts[2])
         self.sweep = float(parts[3]) if len(parts) > 3 else 340.0
+        # Mirrors the board's own refusal. The simulator exists to exercise
+        # the paths the firmware has, and a demo that accepts a 500 degree
+        # sweep teaches the operator something the machine will not do.
+        if not (1.0 <= self.sweep <= 340.0):
+            self._on_line("[ERROR] sweep must be between 1 and 340 deg - the "
+                          f"turntable's whole travel - got {self.sweep:.2f}")
+            return
         self.layer = 1
         self.z = 0.0
         self.running = True

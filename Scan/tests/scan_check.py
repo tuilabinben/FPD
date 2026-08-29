@@ -61,8 +61,12 @@ ino = open(os.path.join(ROOT, "RobotMotionController_v9_ClearCore",
                         "RobotMotionController_v9_ClearCore.ino"),
            encoding="utf-8").read()
 for token in ("SCAN_START:", "SCAN_STOP", "SCAN_READ", "SCAN_STATUS",
-              "SET_SCAN_SENSOR:", "SET_SCAN_CAL:"):
+              "SET_SCAN_SENSOR:", "SET_SCAN_CAL:", "PLC_STATUS"):
     check(token in ino, f"the firmware answers {token}")
+check('"[PLC_STATE] link=" ' in ino or "[PLC_STATE] link=" in ino,
+      "  ...and reports the PLC link in the shape the lamps parse")
+check("limit Z/R/A2=" in ino and "enforce Z/R/A2=" in ino,
+      "  ...with RM's switch as the MIDDLE bit of each Z/R/A2 field")
 check("[SCAN_PT] " in ino and "[SCAN_LAYER] " in ino and "[SCAN_DONE] " in ino,
       "  ...and sends the three lines this app parses")
 check("scanReadDistanceMm" in ino and "serviceScan" in ino,
@@ -132,7 +136,7 @@ app = ScannerApp(tk.Tk())
 app.z_step_var.set("4")
 app.layers_var.set("3")
 app.deg_step_var.set("2")
-check(app._validate() == (4.0, 2.0, 3), "sane numbers validate")
+check(app._validate() == (4.0, 2.0, 3, 340.0), "sane numbers validate")
 
 app.z_step_var.set("0")
 check(app._validate() is None, "a zero step up is refused before anything is sent")
@@ -149,6 +153,32 @@ app.layers_var.set("3")
 app.z_step_var.set("abc")
 check(app._validate() is None, "a field that is not a number is refused")
 app.z_step_var.set("4")
+
+# The sweep may be SHORTER than the travel -- one wall is a real job -- but
+# never longer, because the turntable cannot turn further than its own stop.
+app.sweep_var.set("120")
+check(app._validate() == (4.0, 2.0, 3, 120.0), "a shorter sweep is accepted")
+app.sweep_var.set("400")
+check(app._validate() is None, "a sweep past the 340 deg of travel is refused")
+app.sweep_var.set("0")
+check(app._validate() is None, "a zero sweep is refused")
+app.sweep_var.set("1")
+check(app._validate() is None,
+      "a sweep shorter than one step is refused - a layer would hold one point")
+app.sweep_var.set("340")
+
+app.deg_step_var.set("2")
+app.sweep_var.set("340")
+app._refresh_sweep_hint()
+check("171 points per layer" in app.sweep_hint.cget("text"),
+      "the hint counts the points a layer will hold: the first is taken AT the start angle")
+app.sweep_var.set("400")
+app._refresh_sweep_hint()
+check("past the" in app.sweep_hint.cget("text"),
+      "  ...and says so when the turntable cannot turn that far")
+app.sweep_var.set("340")
+app.deg_step_var.set("2")
+app._refresh_sweep_hint()
 
 # The live hint answers the same question before the operator presses START.
 # Called directly: the real app hangs it off a StringVar trace, which the
@@ -197,6 +227,280 @@ frozen = app.store.range_mm
 app._repaint()
 check(app.store.range_mm == frozen,
       "the radial scale is frozen once chosen, so layers can be compared by eye")
+
+
+print("\n=== 5b. simulation is a SWITCH, not a silent fallback ===")
+sw = ScannerApp(tk.Tk())
+check(sw.sim_enabled is True, "it starts simulated, so the tool demonstrates out of the box")
+check(sw.sim_btn.cget("text") == "SIM: ON", "  ...and the button says so")
+sw._start()
+check(sw.scanning is True and sw.store.simulated is True,
+      "with SIM ON and no board, a scan runs and is MARKED simulated")
+sw._on_line("[SCAN_ABORT] stopped")
+
+sw._toggle_sim()
+check(sw.sim_enabled is False and sw.sim_btn.cget("text") == "SIM: OFF",
+      "the switch turns it off")
+check(sw.link_lamp.cget("text") == "\u25cf NO BOARD",
+      "  ...and the lamp stops claiming SIMULATED - there is no source at all now")
+sw._start()
+check(sw.scanning is False,
+      "START is REFUSED with no board and no simulation, rather than inventing points")
+check(sw.store.total == 0, "  ...and nothing lands in the store")
+check(sw._send("SCAN_STATUS") is False,
+      "  ...nothing is sent anywhere either")
+
+# Toggling mid-scan would change what the numbers mean half way through the
+# file, so it is refused while one is running.
+sw._toggle_sim()
+sw._start()
+check(sw.scanning is True, "back on, a scan runs again")
+sw._toggle_sim()
+check(sw.sim_enabled is True, "the switch is refused mid-scan")
+sw._on_line("[SCAN_ABORT] stopped")
+
+
+print("\n=== 5c. the sweep the operator typed is the sweep that is sent ===")
+sv = ScannerApp(tk.Tk())
+sent = []
+sv._send = lambda text: (sent.append(text), True)[1]
+sv.sweep_var.set("120")
+sv.deg_step_var.set("10")
+sv.layers_var.set("2")
+sv._start()
+check(any(l == "SCAN_START:5.000,10.000,2,120.00" for l in sent),
+      "a 120 deg sweep reaches the wire, rather than the 340 deg default")
+
+sw2 = ScannerApp(tk.Tk())
+sw2.sweep_var.set("90")
+sw2.deg_step_var.set("30")
+sw2.layers_var.set("2")
+sw2._start()
+for _ in range(400):
+    sw2.sim.poll()
+    if not sw2.sim.running:
+        break
+_angles = [d for d, _r in sw2.store.layer_points(1)]
+check(abs((max(_angles) - min(_angles)) - 90.0) < 30.1,
+      "  ...and the simulated layer really only covers 90 deg, not 340")
+
+
+print("\n=== 5d. the sensor indicator ===")
+si = ScannerApp(tk.Tk())
+check(si.last_mm is None and si.sensor_lamp.cget("text") == "● no reading yet",
+      "it starts saying nothing has been read - NOT a healthy-looking 0 mm")
+
+si._on_line("[SCAN_READ] 412.25 mm (ULTRASONIC)")
+check(abs(si.last_mm - 412.25) < 1e-9, "a TEST READ reply is picked up")
+check(si.sensor_lamp.cget("text") == "● 412.2 mm"
+      and si.sensor_lamp.cget("fg") == C.OK,
+      "  ...and shown on the lamp straight away, without waiting for a repaint")
+
+si._on_line("[SCAN_READ] -1.00 mm (ULTRASONIC)")
+check(si.sensor_lamp.cget("text") == "● NO ECHO"
+      and si.sensor_lamp.cget("fg") == C.BAD,
+      "a miss reads as NO ECHO, not as -1.0 mm, and not as a distance")
+
+# A sensor that answers nothing at all is the failure worth naming: the scan
+# runs, the machine sweeps, and every point is empty.
+si2 = ScannerApp(tk.Tk())
+for i in range(60):
+    si2._on_line(f"[SCAN_PT] 1,{i}.00,-1.00")
+si2._refresh_sensor_lamp()
+check("nothing came back" in si2.sensor_hint.cget("text")
+      and si2.sensor_hint.cget("fg") == C.BAD,
+      "every reading missing is called out, wiring and calibration named")
+
+# ...and the odd lost echo is NOT. A lamp that cries wolf gets ignored.
+si3 = ScannerApp(tk.Tk())
+for i in range(60):
+    si3._on_line(f"[SCAN_PT] 1,{i}.00,{-1.0 if i % 20 == 0 else 300.0:.2f}")
+si3._refresh_sensor_lamp()
+check(si3.sensor_hint.cget("fg") == C.MUTED,
+      "  ...but one lost echo in twenty is a working sensor, and stays quiet")
+check(si3.sensor_lamp.cget("fg") == C.OK, "  ...with the last good reading shown")
+
+check(len(si3.recent) <= 50,
+      "the indicator judges RECENT readings, so it recovers when the sensor does")
+si3._start()
+check(len(si3.recent) == 0,
+      "a new scan starts the count again - last scan's health is not this scan's")
+
+si4 = ScannerApp(tk.Tk())
+si4._toggle_sim()
+check(si4._send(C.CMD_SCAN_READ) is False,
+      "TEST READ has nowhere to go with no board and no simulation")
+
+
+print("\n=== 5e. the PLC link and RM's switch ===")
+# The scan is REFUSED by the board without PLC device data, and refused with
+# RM's switch switched off. Both were errors you only saw after pressing
+# START; they are on the panel now.
+pl = ScannerApp(tk.Tk())
+check(pl.plc_state == "unknown" and pl.rm_state == "unknown",
+      "both lamps start UNKNOWN - never a reassuring default")
+check(pl.plc_lamp.cget("text") == "● PLC: NO LINK"
+      and pl.rm_lamp.cget("text") == "● RM SWITCH: ?",
+      "  ...and say so on the panel")
+
+OK_LINE = ("[PLC_STATE] link=UP socket=OPEN data=OK conn=2/3 word=0080 timeouts=1"
+           " | limit Z/R/A2=010 end Z/R/A2=-+- enforce Z/R/A2=111")
+pl._on_line(OK_LINE)
+check(pl.plc_state == "connected" and pl.plc_lamp.cget("fg") == C.OK,
+      "data=OK is what lights the link lamp")
+check(pl.rm_state == "covered",
+      "RM is the MIDDLE bit of Z/R/A2 - reading it positionally as M30 would "
+      "put ZM's switch on RM's lamp")
+
+pl._on_line(OK_LINE.replace("limit Z/R/A2=010", "limit Z/R/A2=101"))
+check(pl.rm_state == "clear", "  ...and a 0 there is CLEAR, with the others set")
+
+# A dead link showing CLEAR is the field bug this whole convention exists to
+# stop: on a safety display the failure read as good news.
+pl._on_line("[PLC_STATE] link=DOWN socket=CLOSED data=NONE conn=0/0 word=---- "
+            "timeouts=0 | NO DEVICE DATA | limit Z/R/A2=??? end Z/R/A2=???")
+check(pl.plc_state == "unreachable", "conn=0 with the socket shut is UNREACHABLE")
+check(pl.rm_state == "unknown", "  ...and '?' is UNKNOWN, NOT clear")
+
+# The socket cycles on every reply timeout, so a socket-driven lamp flapped.
+# A socket that has opened even once proves cable and address are fine.
+pl._on_line("[PLC_STATE] link=DOWN socket=CLOSED data=NONE conn=4/9 word=---- "
+            "timeouts=9 | NO DEVICE DATA | limit Z/R/A2=??? end Z/R/A2=???")
+check(pl.plc_state == "no_reply",
+      "a socket that HAS opened is NO REPLY, not UNREACHABLE - different faults")
+pl._on_line(OK_LINE.replace("data=OK", "data=STALE"))
+check(pl.plc_state == "no_reply", "data=STALE is the same fault: reads stopped landing")
+check(pl.rm_state == "unknown",
+      "  ...and the switch reading is not trusted while the data is stale")
+
+pl._on_line("[PLC_STATE] link=DISABLED socket=CLOSED data=NONE conn=0/0 word=---- "
+            "timeouts=0 | LINK DISABLED | limit Z/R/A2=???")
+check(pl.plc_state == "disabled",
+      "SET_PLC_LINK:0 reads as DISABLED, never as a fault")
+
+pl._on_line(OK_LINE.replace("enforce Z/R/A2=111", "enforce Z/R/A2=101"))
+check(pl.rm_state == "disabled" and pl.rm_lamp.cget("fg") == C.BAD,
+      "RM's switch switched off is flagged RED - it stops a scan outright")
+
+logged = []
+pl.log = lambda text, tag=None: logged.append(text)
+pl._on_line(OK_LINE.replace("enforce Z/R/A2=111", "enforce Z/R/A2=101"))
+check(logged == [],
+      "an unchanged state logs NOTHING - a line per 5 s poll would bury the log")
+
+# Losing the serial link must not leave a CONNECTED lamp standing.
+pl2 = ScannerApp(tk.Tk())
+pl2._on_line(OK_LINE)
+pl2._plc_link_lost()
+check(pl2.plc_state == "unknown" and pl2.rm_state == "unknown",
+      "losing the board marks both UNKNOWN - a stale CONNECTED is worse than none")
+
+# The board refuses these anyway; saying so here names the fix instead.
+pl3 = ScannerApp(tk.Tk())
+pl3._on_line(OK_LINE.replace("enforce Z/R/A2=111", "enforce Z/R/A2=101"))
+check(pl3._plc_ready_for_scan() is False, "START is refused with RM's switch off")
+pl3._on_line("[PLC_STATE] link=DOWN socket=CLOSED data=NONE conn=0/0 word=---- "
+             "timeouts=0 | limit Z/R/A2=???")
+check(pl3._plc_ready_for_scan() is False, "  ...and with no PLC device data")
+pl3._on_line(OK_LINE)
+check(pl3._plc_ready_for_scan() is True, "a healthy link lets it through")
+pl3.plc_state, pl3.rm_state = "unknown", "unknown"
+check(pl3._plc_ready_for_scan() is True,
+      "UNKNOWN does NOT block: it means this app has no news, not that the "
+      "board has no data")
+
+# The simulator has no PLC and says so, rather than inventing a green lamp.
+pl4 = ScannerApp(tk.Tk())
+pl4._send(C.CMD_PLC_STATUS)
+check(pl4.plc_state == "unreachable" and pl4.rm_state == "unknown",
+      "the simulator reports NO DEVICE DATA - it will not fake a PLC")
+
+
+print("\n=== 5f. HOME, and the scrolling viewport ===")
+hm = ScannerApp(tk.Tk())
+check(hm.homing is False and str(hm.home_btn.cget("state")) != "disabled",
+      "HOME starts available")
+
+# Board only. A simulated home would report a reference the machine has not
+# got, which is the one lie this app is built not to tell.
+sent = []
+hm.link.send = lambda text, *_a, **_k: (sent.append(text), True)[1]
+hm._home()
+check(sent == [] and hm.homing is False,
+      "HOME is REFUSED with no board - the simulator has no PLC to ask")
+
+# With a board: confirmed, then the cycle owns the panel until it ends.
+import scanner.app as _app
+_real_ask, _real_open = _app.messagebox.askokcancel, type(hm.link).is_open
+_app.messagebox.askokcancel = lambda *a, **k: True
+type(hm.link).is_open = property(lambda self: True)
+hm._home()
+check(sent == ["HOME"], "with a board it sends HOME, and nothing else")
+check(hm.homing is True and str(hm.home_btn.cget("state")) == "disabled",
+      "  ...and the button cannot be pressed twice")
+check(str(hm.start_btn.cget("state")) == "disabled",
+      "  ...nor a scan started while the axes are moving")
+hm._start()
+check(hm.scanning is False, "  ...START says so rather than silently doing nothing")
+
+# Every step reports under [HOME]; only two of them mean it is over.
+hm._on_line("[HOME] ZM reached its switch.")
+check(hm.homing is True, "a progress line does NOT end the cycle")
+hm._on_line("[HOME] Homing complete. Coordinates reset to standard home.")
+check(hm.homing is False and hm.progress_var.get() == "Homed",
+      "'Homing complete' ends it and gives the buttons back")
+check(str(hm.start_btn.cget("state")) == "normal", "  ...START really is back")
+
+hm._home()
+hm._on_line("[HOME] FAILED — never reached: RM within 30s")
+check(hm.homing is False and hm.progress_var.get() == "Home failed",
+      "a failure ends it too, reported as a failure")
+check(str(hm.home_btn.cget("state")) != "disabled",
+      "  ...otherwise HOME stays greyed out with nothing running")
+
+# E-STOP has to clear it, or START stays refused against nothing.
+hm._home()
+hm._estop()
+check(hm.homing is False and str(hm.start_btn.cget("state")) == "normal",
+      "E-STOP clears the homing state, it does not strand the panel")
+_app.messagebox.askokcancel = _real_ask
+type(hm.link).is_open = _real_open
+
+hm2 = ScannerApp(tk.Tk())
+hm2._start()
+check(str(hm2.home_btn.cget("state")) == "disabled",
+      "HOME is disabled during a scan - it would drive RM out from under the sweep")
+hm2._on_line("[SCAN_ABORT] stopped")
+check(str(hm2.home_btn.cget("state")) == "normal", "  ...and comes back when it ends")
+
+# The window scrolls, but the EMERGENCY STOP does not scroll away with it.
+sc = ScannerApp(tk.Tk())
+def _walk(w, out):
+    out.append(w)
+    for kid in w.winfo_children():
+        _walk(kid, out)
+tree = []
+_walk(sc.root, tree)
+check(any(isinstance(w, tk.Canvas) and "<Configure>" in w.bindings for w in tree),
+      "there is a scrolling viewport, sized from its content")
+check(any(isinstance(w, tk.Scrollbar) for w in tree), "  ...with a scrollbar on it")
+estop = [w for w in tree
+         if isinstance(w, tk.Button) and w.cget("text") == "EMERGENCY STOP"]
+check(len(estop) == 1, "there is exactly one EMERGENCY STOP")
+# Walk its ancestry: nothing between it and the root may be the scroller's
+# inner frame. A stop control that can be scrolled off screen is its own
+# hazard.
+def _inside_canvas(widget):
+    node = widget
+    while node is not None and node is not sc.root:
+        if isinstance(getattr(node, "master", None), tk.Canvas):
+            return True
+        node = getattr(node, "master", None)
+    return False
+check(not _inside_canvas(estop[0]),
+      "  ...and it is PINNED outside the scroller, never scrollable off screen")
+check(_inside_canvas(sc.start_btn) and _inside_canvas(sc.log_box),
+      "  ...while the controls and the log do scroll")
 
 
 print("\n=== 6. what happens when it goes wrong ===")

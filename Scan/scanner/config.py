@@ -32,6 +32,11 @@ DEG_STEP_MAX = 90.0
 LAYERS_MIN = 1
 LAYERS_MAX = 500
 Z_STROKE_MM = 285.0
+# The sweep may be SHORTER than the travel -- scanning one wall is a real
+# job. It may not be longer: the turntable cannot reach past its own stop,
+# so the extra degrees would be spent driving into the RM soft limit.
+SWEEP_MIN_DEG = 1.0
+SWEEP_MAX_DEG = 340.0
 
 SENSOR_KINDS = ("ULTRASONIC", "ANALOG")
 DEFAULT_SENSOR = "ULTRASONIC"
@@ -50,6 +55,16 @@ CMD_ESTOP = "ESTOP"
 CMD_SCAN_STOP = "SCAN_STOP"
 CMD_SCAN_STATUS = "SCAN_STATUS"
 CMD_SCAN_READ = "SCAN_READ"
+CMD_PLC_STATUS = "PLC_STATUS"
+CMD_HOME = "HOME"
+
+# The board PUSHES [PLC_STATE] whenever the status word changes, so this is
+# a backstop, not the mechanism: it covers the first reply after connecting
+# and the case where nothing has changed for a long time and the operator
+# wants to know the link is still alive. Slow on purpose -- the board's own
+# idle poll of the PLC is 5 s, so asking faster than that cannot learn
+# anything new.
+PLC_POLL_MS = 5000
 
 
 def cmd_scan_start(z_step_mm, deg_step, layers, sweep_deg=DEFAULT_SWEEP_DEG):
@@ -76,6 +91,17 @@ TAG_ABORT = "[SCAN_ABORT]"
 TAG_SEEK = "[SCAN_SEEK]"
 TAG_REF = "[SCAN_REF]"
 TAG_READ = "[SCAN_READ]"
+TAG_SENSOR = "[SCAN_SENSOR]"
+TAG_PLC_STATE = "[PLC_STATE]"
+TAG_HOME = "[HOME]"
+TAG_PLC_HOME = "[PLC_HOME]"
+TAG_COORD_RESET = "[COORD_RESET]"
+
+# What the board says when a home cycle ends. Matched on these rather than
+# on "[HOME]" alone, because every step of the cycle reports under the same
+# tag and only these two mean it is over.
+HOME_DONE_TEXT = "HOMING COMPLETE"
+HOME_FAILED_TEXT = "FAILED"
 TAG_STATUS = "[SCAN_STATUS]"
 TAG_ERROR = "[ERROR]"
 TAG_WARN = "[WARN]"
@@ -103,6 +129,42 @@ OK = "#5dd39e"
 WARN = "#f2b134"
 BAD = "#ef5b5b"
 GRID = "#2b3038"
+
+# ---------------------------------------------------------------------
+# The PLC link, and RM's switch
+# ---------------------------------------------------------------------
+# The scan is REFUSED without both of these, so they belong on the panel
+# rather than in an [ERROR] after START: no device data means RM's switch
+# cannot be seen, and that switch is the frame every layer is referenced
+# to. Below the colours because they name them.
+#
+# THE LAMP REPORTS DEVICE DATA, NOT THE SOCKET. A lamp that followed the
+# socket flapped every few seconds on the machine -- the board drops and
+# reopens the socket on every reply timeout, which is a resynchronisation,
+# not a fault. `data=` is what the scan actually depends on. Mirrors the
+# main console's PLC_LED_STATES, deliberately: two panels disagreeing about
+# whether the PLC is up is worse than either being wrong on its own.
+PLC_STATE_LABELS = {
+    "unknown":     ("PLC: NO LINK", MUTED),
+    "connected":   ("PLC: CONNECTED", OK),
+    "no_reply":    ("PLC: NO REPLY", WARN),
+    "unreachable": ("PLC: UNREACHABLE", BAD),
+    "disabled":    ("PLC: DISABLED", MUTED),
+}
+
+# RM's switch. FOUR states, and `?` is not CLEAR: a dead link showing a
+# clear lamp reads as good news on a safety display while the switch may be
+# physically covered. That was a real field bug on the main console.
+#
+# DISABLED is red rather than grey because it is the one state that stops a
+# scan outright -- SET_PLC_SENSOR_ENFORCE:ROT,0 leaves the bit readable and
+# cosmetic, and the board then refuses START.
+RM_STATE_LABELS = {
+    "unknown":  ("RM SWITCH: ?", MUTED),
+    "covered":  ("RM SWITCH: ON", OK),
+    "clear":    ("RM SWITCH: CLEAR", INK),
+    "disabled": ("RM SWITCH: OFF", BAD),
+}
 
 FONT = ("Segoe UI", 10)
 FONT_BOLD = ("Segoe UI", 10, "bold")

@@ -20,6 +20,11 @@ class ScanStore:
         self.points = []          # (layer, deg, mm) -- mm < 0 means a miss
         self.layer_z = {}         # layer -> height in mm, from [SCAN_LAYER]
         self.range_mm = None      # frozen plot scale, see note in config
+        # Whether these points came out of the simulator. Carried so the
+        # saved file can say so: a simulated scan and a real one are the
+        # same numbers in the same columns, and a week later nobody can
+        # tell them apart from the file alone.
+        self.simulated = False
 
     # -- filling ------------------------------------------------------
     def add(self, layer, deg, mm):
