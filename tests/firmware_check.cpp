@@ -159,16 +159,25 @@ int main() {
   printf("\n=== A. speed model: 150 RPM master, per-axis %% ===\n");
   run("PROFILE");
   check(fabs(masterRpm - 150.0) < 0.01, "master 150 RPM");
-  check(fabs(armPct - 125.0) < 0.01, "AM 125%");
-  check(fabs(rotPct - 75.0)  < 0.01, "RM 75%");
-  check(fabs(zPct   - 50.0)  < 0.01, "ZM 50%");
-  check(fabs(armMotorRpmActual - 187.5) < 0.05, "AM -> 187.5 motor RPM");
+  check(fabs(armPct - 62.5) < 0.01, "AM 62.5%");
+  check(fabs(rotPct - 50.0) < 0.01, "RM 50%");
+  check(fabs(zPct   - 200.0) < 0.01, "ZM 200%");
+  // ACCELERATION SEEDS FROM ITS OWN DEFAULTS, not from the speed ones. They
+  // used to be the same three numbers; sharing them is what gave the arm a
+  // 0.40 s ramp and a 225 MOTOR degree coast after every key release --
+  // most of its taught band, on the axis with no gear reduction to damp it.
+  check(fabs(rotAccPct - 100.0) < 0.01, "RM accel 100%");
+  check(fabs(armAccPct - 70.0)  < 0.01, "AM accel 70%, NOT the 62.5% speed figure");
+  check(fabs(zAccPct   - 200.0) < 0.01, "ZM accel 200%");
+  check(armAccPct != armPct && rotAccPct != rotPct,
+        "  ...the accel family is set independently of the speed one");
+  check(fabs(armMotorRpmActual - 93.75) < 0.05, "AM -> 93.75 motor RPM");
   // Derived from the live ratio, not hard-coded: i_RM is a bench figure the
   // operator recalibrates, and pinning it here made every recalibration
-  // look like a regression. 112.5 motor RPM is 150 * 75%, ratio-free.
-  check(fabs(rotVelDegS - (112.5 * 6.0 / rotGearRatio)) < 0.02,
+  // look like a regression. 75 motor RPM is 150 * 50%, ratio-free.
+  check(fabs(rotVelDegS - (75.0 * 6.0 / rotGearRatio)) < 0.02,
         "RM deg/s follows the configured i_RM");
-  check(fabs(zVelMmS - 18.75) < 0.05, "ZM -> 18.75 mm/s (20 mm/rev, spec)");
+  check(fabs(zVelMmS - 75.0) < 0.05, "ZM -> 75 mm/s (20 mm/rev, spec)");
   run("SET_SPEED:150,375,75,125,50,75,125,50");
   check(saw("[MOTION_OK]"), "the GUI's exact wire message is accepted (8 fields)");
   run("SET_SPEED:150,375,900,900,900,900,900,900");
@@ -827,7 +836,6 @@ int main() {
     plcPoll3(0, BIT(14) | BIT(15), BIT(0));   // all three covered
     plcServiceLimitLatch();
     check(plcLimitEndFor(2) == +1, "covered while driving forward = the FORWARD end");
-    for (auto &l : OUT) printf("DEBUG [%s]\n", l.c_str());
     check(saw("FORWARD"), "  ...and the board names the end it caught");
     check(!plcHomeStateActive(),
           "  ...a FAR-end trip is not the reference, so it cannot zero the counters");
@@ -859,6 +867,47 @@ int main() {
           "  ...and THAT one is the reference, so the home state stands");
     plcServiceLimitStops();
     check(a2Dir == 0, "  ...with backward now the refused direction");
+
+    printf("\n  -- the direction survives whatever stopped the axis --\n");
+    // THE BUG THIS FIXES: the arm is driven FORWARD into its far switch, and
+    // the taught SOFT limit for a fully extended arm sits at essentially the
+    // same place. serviceJogSoftLimits() runs every loop pass, the PLC bit
+    // only arrives on a poll, so the soft limit zeroed a2Dir first EVERY
+    // time and the latch saw a rising edge with nothing moving. It then
+    // assumed the home end and reported a far-end trip as COVERED MIN.
+    a2Dir = 0;
+    plcPoll3(0, 0, 0);
+    plcServiceLimitLatch();
+    check(plcLimitEndFor(2) == PLC_LIMIT_END_A2, "start clear of the switch");
+
+    a2Dir = +1;
+    plcRememberTravelDir();          // the loop passes while it is moving
+    a2Dir = 0;                       // ...then a soft limit / release stops it
+    OUT.clear();
+    plcPoll3(0, BIT(14) | BIT(15), BIT(0));
+    plcServiceLimitLatch();
+    check(plcLimitEndFor(2) == +1,
+          "a forward trip is still the FORWARD end when the stop beat the poll");
+    check(saw("travelling just before it stopped"),
+          "  ...and the board says the end came from the remembered direction");
+    check(!plcHomeStateActive(),
+          "  ...so a fully EXTENDED arm still cannot pass as the home reference");
+
+    printf("\n  -- but the memory is bounded, not a permanent opinion --\n");
+    a2Dir = 0;
+    plcPoll3(0, 0, 0);
+    plcServiceLimitLatch();
+    advance(PLC_TRAVEL_DIR_MEMORY_MS + 10);
+    OUT.clear();
+    plcPoll3(0, BIT(14) | BIT(15), BIT(0));
+    plcServiceLimitLatch();
+    check(plcLimitEndFor(2) == PLC_LIMIT_END_A2,
+          "a direction from a second ago is not evidence; it assumes the home end again");
+    check(saw("nothing was moving, assumed"), "  ...and says so rather than implying it knew");
+
+    a2Dir = 0;
+    plcPoll3(0, 0, 0);
+    plcServiceLimitLatch();
 
     OUT.clear();
     run("PLC_STATUS");
@@ -1308,6 +1357,69 @@ int main() {
     serviceScan();
     check(saw("[SCAN_ABORT]") && saw("RM was stopped"),
           "a sweep stopped by a limit aborts loudly, it does not finish short");
+
+    // ---- the sweep is settable, within the travel --------------------
+    scanPhase = SCAN_OFF; rotDir = jzDir = 0;
+    setRot(340.0); setZ(0.0);
+    plcPoll3(0, BIT(15), 0);
+    OUT.clear();
+    run("SCAN_START:5,10,2,120");
+    check(scanPhase != SCAN_OFF && saw("sweep=120.0"),
+          "a SHORTER sweep is accepted - scanning one wall is a real job");
+    run("SCAN_STOP");
+
+    OUT.clear();
+    run("SCAN_START:5,10,2,400");
+    check(scanPhase == SCAN_OFF && saw("[ERROR]") && saw("sweep must be between"),
+          "a sweep past the turntable's own travel is refused, not ground into a limit");
+
+    OUT.clear();
+    run("SCAN_START:5,10,2,0");
+    check(scanPhase == SCAN_OFF && saw("[ERROR]"), "a zero sweep is refused");
+
+    OUT.clear();
+    run("SCAN_START:5,90,2,10");
+    check(scanPhase == SCAN_OFF && saw("[ERROR]") && saw("would hold one point"),
+          "a sweep shorter than one step is refused rather than yielding one point");
+
+    OUT.clear();
+    run("SCAN_START:5,10,2");
+    check(scanPhase != SCAN_OFF && saw("sweep=340.0"),
+          "omitting the sweep still means the whole 340 deg of travel");
+    run("SCAN_STOP");
+
+    // ---- the jog watchdog must not eat the scan ----------------------
+    // A scan drives rotDir exactly as a jog does, but no host is holding a
+    // key, so no JOG_HB arrives. Un-exempted, the watchdog cancelled every
+    // sweep 700 ms in and the abort blamed a PLC switch.
+    OUT.clear();
+    setRot(340.0); setZ(0.0);
+    plcPoll3(0, BIT(15), 0);
+    run("SCAN_START:10,90,2");
+    check(scanPhase == SCAN_SWEEP && rotDir != 0, "a scan is sweeping");
+    OUT.clear();
+    MOCK_MILLIS += JOG_WATCHDOG_MS * 4;
+    serviceJogWatchdog();
+    check(!saw("[WATCHDOG]") && rotDir != 0 && scanPhase == SCAN_SWEEP,
+          "  ...and the jog watchdog leaves it alone, keep-alive or not");
+
+    // The LIFT is the half that bit hardest: at scan speed a 5 mm step takes
+    // about a second, so every lift died at 700 ms and the abort blamed a
+    // soft limit on ZM.
+    scanPhase = SCAN_LIFT; rotDir = 0; jzDir = 1;
+    OUT.clear();
+    MOCK_MILLIS += JOG_WATCHDOG_MS * 4;
+    serviceJogWatchdog();
+    check(!saw("[WATCHDOG]") && jzDir == 1,
+          "  ...and the lift between layers survives it too");
+
+    scanPhase = SCAN_OFF; rotDir = jzDir = 0;
+    startJog(rotDir, +1);
+    OUT.clear();
+    MOCK_MILLIS += JOG_WATCHDOG_MS * 4;
+    serviceJogWatchdog();
+    check(saw("[WATCHDOG]") && rotDir == 0,
+          "  ...but a real jog with no keep-alive is still stopped");
 
     OUT.clear();
     run("SCAN_STATUS");

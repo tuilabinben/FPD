@@ -225,9 +225,26 @@ const float ARM_RPM_SCALE = 1.0f;
 
 const float MASTER_RPM_DEF     = 150.0f;
 const float MASTER_ACC_DEF     = 375.0f;
-const float ARM_PCT_DEF        = 125.0f;
-const float ROT_PCT_DEF        = 75.0f;
-const float Z_PCT_DEF          = 50.0f;
+// SET ON THE MACHINE. This combination is the one that ran stably; a bench
+// result, not a calculation, so do not re-derive it from anything.
+const float ARM_PCT_DEF        = 62.5f;
+const float ROT_PCT_DEF        = 50.0f;
+const float Z_PCT_DEF          = 200.0f;
+
+// ACCELERATION HAS ITS OWN DEFAULTS, and they are NOT the speed ones.
+//
+// Acceleration decides how far an axis carries on after the operator lets
+// go -- coast = v^2 / 2a -- so an axis tuned for speed alone overshoots.
+// The arm proved it: sharing a 125% speed figure it ramped for 0.40 s and
+// coasted 225 MOTOR degrees, most of its taught band, on every release.
+//
+// Off the machine, with the speeds above. Keep them in step with
+// DEFAULT_*_ACC_PCT in robot_sim/config.py -- python_check.py reads this
+// file and fails if they drift -- and do not collapse them back onto the
+// speed percentages.
+const float ROT_ACC_PCT_DEF    = 100.0f;
+const float ARM_ACC_PCT_DEF    = 70.0f;
+const float Z_ACC_PCT_DEF      = 200.0f;
 
 float masterRpm     = MASTER_RPM_DEF;
 float masterAccRpmS = MASTER_ACC_DEF;
@@ -235,9 +252,9 @@ float rotPct        = ROT_PCT_DEF;
 float armPct        = ARM_PCT_DEF;
 float zPct          = Z_PCT_DEF;
 
-float rotAccPct     = ROT_PCT_DEF;
-float armAccPct     = ARM_PCT_DEF;
-float zAccPct       = Z_PCT_DEF;
+float rotAccPct     = ROT_ACC_PCT_DEF;
+float armAccPct     = ARM_ACC_PCT_DEF;
+float zAccPct       = Z_ACC_PCT_DEF;
 
 const float MASTER_RPM_MIN = 1.0f,   MASTER_RPM_MAX = 400.0f;
 const float MASTER_ACC_MIN = 1.0f,   MASTER_ACC_MAX = 2000.0f;
@@ -414,6 +431,12 @@ double scanAnalogOffsetMm   = 0.0;
 const float SCAN_SPEED_SCALE = 0.20f;
 
 const double SCAN_SWEEP_DEG_DEF  = 340.0;   // the turntable's whole travel
+// A SHORTER sweep is allowed -- scanning one wall is a real job, and 340 is
+// the travel, not a requirement. Longer is not: the turntable cannot reach
+// past its own stop, so the extra degrees would be spent grinding into the
+// RM soft limit and the layer would abort mid-sweep. Refused up front
+// instead, where the number can still be corrected.
+const double SCAN_SWEEP_DEG_MIN  = 1.0;
 const double SCAN_DEG_STEP_MIN   = 0.10;
 const double SCAN_DEG_STEP_MAX   = 90.0;   // a quarter turn, the coarsest that still means anything
 const double SCAN_Z_STEP_MIN_MM  = 0.10;
@@ -1412,6 +1435,11 @@ void serviceJogWatchdog() {
   // did nothing at all. HOME has its own timeout and its own stop
   // condition (each axis's switch), so leave it alone.
   if (isHoming) return;
+  // SCAN drives rotDir the same way, but no host jog client is holding a
+  // key -- it stops itself, on the switch or the sweep count or SCAN_STOP.
+  // Un-exempted, every scan died here at 700 ms and looked like a PLC
+  // switch fault.
+  if (scanPhase != SCAN_OFF) return;
   if (millis() - lastJogKeepAlive < JOG_WATCHDOG_MS) return;
   cancelJog();
   sendFeedback("[WATCHDOG] Jog stopped — no keep-alive from host for "
@@ -1963,11 +1991,35 @@ int plcLimitEndFor(int i) {
   return plcLimitLatchedEnd[i] ? plcLimitLatchedEnd[i] : plcLimitHomeEndFor(i);
 }
 
-// Which way this axis is going right now: the jog direction if it is being
-// jogged, otherwise the sign of the remaining distance on the run leg.
-// 0 when it is not moving at all, which is the case the latch has to guess
-// its way out of.
-int plcAxisTravelDir(int i) {
+// WHICH WAY THE AXIS WAS GOING, REMEMBERED.
+//
+// The latch needs the travel direction at the instant the switch closed,
+// but it only finds out the switch closed when a poll lands — up to one
+// poll interval later. Anything that stops the axis in between erases the
+// only evidence of which end was hit, and the latch then falls back to the
+// home end and reports the WRONG one.
+//
+// That is not a rare race. The taught SOFT limit for a fully extended arm
+// sits at essentially the same place as the physical far switch, and
+// serviceJogSoftLimits() runs every loop pass while the PLC bit arrives
+// every 20 ms — so the soft limit zeroes a2Dir first, every single time,
+// and a far-end trip was reported as COVERED MIN. A far end mislabelled as
+// the home end is not cosmetic: plcLimitSensorSatisfied() then accepts a
+// fully EXTENDED arm as the home reference and zeroes the counters at the
+// wrong end of the travel.
+//
+// So the direction is sampled every loop pass and kept for a short while
+// after the axis stops. Bounded, because a direction from minutes ago is
+// not evidence about anything: past PLC_TRAVEL_DIR_MEMORY_MS the latch goes
+// back to assuming the home end, which is the old behaviour.
+const unsigned long PLC_TRAVEL_DIR_MEMORY_MS = 1000;
+int           plcLastTravelDir[3] = {0, 0, 0};
+unsigned long plcLastTravelAt[3]  = {0, 0, 0};
+
+// The LIVE direction: the jog direction if it is being jogged, otherwise
+// the sign of the remaining distance on the run leg. 0 when it is not
+// moving at all.
+int plcAxisTravelDirNow(int i) {
   const int jog[3] = {jzDir, rotDir, a2Dir};
   if (jog[i] > 0) return +1;
   if (jog[i] < 0) return -1;
@@ -1976,6 +2028,27 @@ int plcAxisTravelDir(int i) {
     const float want[3] = {runTargetD1, runTargetRot, runTargetA2};
     float delta = want[i] - now[i];
     if (fabs(delta) > 1e-3) return (delta > 0) ? +1 : -1;
+  }
+  return 0;
+}
+
+// Called every loop pass, BEFORE anything that can zero a direction.
+void plcRememberTravelDir() {
+  for (int i = 0; i < 3; i++) {
+    int dir = plcAxisTravelDirNow(i);
+    if (dir) { plcLastTravelDir[i] = dir; plcLastTravelAt[i] = millis(); }
+  }
+}
+
+// What the latch asks. Live direction first; failing that, the one this
+// axis was travelling in a moment ago. 0 only when the axis has genuinely
+// been still, which is the case the latch has to guess its way out of.
+int plcAxisTravelDir(int i) {
+  int dir = plcAxisTravelDirNow(i);
+  if (dir) return dir;
+  if (plcLastTravelDir[i]
+      && millis() - plcLastTravelAt[i] <= PLC_TRAVEL_DIR_MEMORY_MS) {
+    return plcLastTravelDir[i];
   }
   return 0;
 }
@@ -2023,12 +2096,15 @@ void plcServiceLimitLatch() {
     if (plcLimitBothEndsFor(i)) {
       if (on && !plcLimitPrevBit[i]) {
         int dir = plcAxisTravelDir(i);
+        bool live = plcAxisTravelDirNow(i) != 0;
         plcLimitLatchedEnd[i] = dir ? dir : plcLimitHomeEndFor(i);
         sendFeedback("[PLC_LIMIT] " + String(names[i]) + " tripped "
                    + String(devs[i]) + " at its "
                    + String(plcLimitLatchedEnd[i] > 0 ? "FORWARD" : "BACK")
                    + " end"
-                   + String(dir ? "" : " (nothing was moving, assumed)") + ".");
+                   + String(dir ? (live ? "" : " (from the direction it was"
+                                             " travelling just before it stopped)")
+                                : " (nothing was moving, assumed)") + ".");
       } else if (!on) {
         plcLimitLatchedEnd[i] = 0;
       }
@@ -2598,6 +2674,20 @@ void handleScanStart(const String &payload) {
   if (layers < 1 || layers > SCAN_LAYERS_MAX) {
     sendFeedback("[ERROR] layers must be between 1 and " + String(SCAN_LAYERS_MAX)
                + ", got " + String(layers));
+    return;
+  }
+  if (sweep < SCAN_SWEEP_DEG_MIN || sweep > SCAN_SWEEP_DEG_DEF) {
+    sendFeedback("[ERROR] sweep must be between " + String(SCAN_SWEEP_DEG_MIN, 0)
+               + " and " + String(SCAN_SWEEP_DEG_DEF, 0)
+               + " deg - the turntable's whole travel - got " + String(sweep, 2));
+    return;
+  }
+  // A sweep shorter than one step collects a single point per layer and
+  // still costs the full seek and lift. Almost certainly a typo, and
+  // silently producing a one-point "scan" is the unhelpful answer.
+  if (sweep < dStep) {
+    sendFeedback("[ERROR] a " + String(sweep, 2) + " deg sweep is shorter than the "
+               + String(dStep, 2) + " deg step, so a layer would hold one point.");
     return;
   }
   // The LAST layer is the one that has to fit. The lift only moves between
@@ -3536,6 +3626,10 @@ void loop() {
   }
 
   serviceLed();
+  // FIRST, before anything that can zero a direction -- the soft limits and
+  // the watchdog both do, and the PLC latch needs to know which way the
+  // axis was going when its switch closed. See plcRememberTravelDir().
+  plcRememberTravelDir();
 #if ENABLE_ROT_Z_LIMIT_SENSORS
   serviceLimitSensors();
 #endif
