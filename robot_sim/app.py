@@ -23,6 +23,7 @@ from .config import (
     DEFAULT_LIMIT_ENFORCED,
     PLC_SENSOR_PANEL,
     PID_LOCK_KEYS,
+    SCAN_SETTING_FIELDS,
     SPEED_FIELDS,
     ACCEL_FIELDS,
     WINDOW_GEOMETRY,
@@ -37,13 +38,14 @@ from .core import (
     P2PControlMixin,
     ProtocolMixin,
     SafetyMixin,
+    ScanControlMixin,
     SerialLinkMixin,
     TimerMixin,
 )
 from .theme import BG
 from .ui import (CoordResetRowMixin, SensorPanelMixin, XYBoardMixin,
                  JogPanelMixin, LayoutMixin, P2PPanelMixin,
-                 SettingsDialogMixin)
+                 ScanPanelMixin, SettingsDialogMixin)
 
 
 class RobotControlApp(
@@ -54,6 +56,7 @@ class RobotControlApp(
     ProtocolMixin,
     JogControlMixin,
     P2PControlMixin,
+    ScanControlMixin,
     SafetyMixin,
     KeyboardMixin,
     LayoutMixin,
@@ -62,6 +65,7 @@ class RobotControlApp(
     XYBoardMixin,
     P2PPanelMixin,
     JogPanelMixin,
+    ScanPanelMixin,
     SettingsDialogMixin,
 ):
     def __init__(self, root: tk.Tk):
@@ -201,11 +205,13 @@ class RobotControlApp(
         self.refresh_com_ports()
         self._restore_connection_indicators()
 
-        if snap["mode"] == "JOG":
+        if snap["mode"] != "P2P":
             # set_mode() early-returns when mode unchanged, and freshly
             # built UI shows P2P — nudge the field first.
-            self.mode = "P2P"
-            self.set_mode("JOG")
+            wanted, self.mode = snap["mode"], "P2P"
+            self.set_mode(wanted)
+        # Fresh canvas, but the points survived in the store.
+        self._scan_repaint()
 
         from .theme import PALETTE_LABEL
         self.log(f"Colour scheme changed to “{PALETTE_LABEL}”.")
@@ -285,6 +291,10 @@ class RobotControlApp(
         # Operator-defined travel limits — see LIMIT_FIELDS.
         for key, spec in LIMIT_FIELDS.items():
             self.settings[key] = spec[6]
+        # Ceiling on ZM travel per scan. A setting, not a panel field, so
+        # it persists.
+        for key, spec in SCAN_SETTING_FIELDS.items():
+            self.settings[key] = spec[2]
         self._settings_dlg = None
         # Settings saved from previous run win over defaults above.
         self._load_settings_file()
@@ -338,6 +348,10 @@ class RobotControlApp(
         self.plc_home_state_lamps = []
 
         self.mode = "P2P"
+
+        # Scan store, flags, sensor history. Here, not in the panel, so a
+        # theme rebuild cannot lose points already collected.
+        self._init_scan_state()
 
     # ── backwards-compatible aliases for the pre-refactor names ──────
     @property

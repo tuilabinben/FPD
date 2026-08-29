@@ -229,28 +229,52 @@ class LayoutMixin:
                                           bg_color=SURFACE, fg_color=TEXT_LIGHT,
                                           width=250, height=42,
                                           command=lambda: self.set_mode("JOG"))
-        self.btn_mode_jog.pack(side="left")
+        self.btn_mode_jog.pack(side="left", padx=(0, 12))
+        # SCAN is a third MODE, not a second app: same board, same link,
+        # same soft limits. Scan/ still exists and still runs simulated
+        # away from the machine — but switching program to sweep meant
+        # losing the pose, the PLC lamps and the log at the wrong moment.
+        self.btn_mode_scan = RoundedButton(row, text="SCAN", icon="◎",
+                                           bg_color=SURFACE, fg_color=TEXT_LIGHT,
+                                           width=250, height=42,
+                                           command=lambda: self.set_mode("SCAN"))
+        self.btn_mode_scan.pack(side="left")
         tk.Label(row, text="  Switching mode auto-stops all motion first.",
                  bg=PANEL_BG, fg=TEXT_MUTED,
                  font=FONT_HINT).pack(side="left", padx=12)
 
-    def _style_mode_buttons(self, p2p_active):
-        if p2p_active:
-            self.btn_mode_p2p.set_config("POINT TO POINT", ACCENT_MINT, icon="🎯", fg_color=INK_DARK)
-            self.btn_mode_jog.set_config("JOYSTICK", SURFACE, icon="🕹", fg_color=TEXT_LIGHT)
-        else:
-            self.btn_mode_p2p.set_config("POINT TO POINT", SURFACE, icon="🎯", fg_color=TEXT_LIGHT)
-            self.btn_mode_jog.set_config("JOYSTICK", ACCENT_MINT, icon="🕹", fg_color=INK_DARK)
+    #: One row per mode. A table, not if/else: with three modes a missed
+    #: branch leaves two buttons lit at once.
+    MODE_BUTTONS = (
+        ("P2P", "btn_mode_p2p", "POINT TO POINT", "🎯"),
+        ("JOG", "btn_mode_jog", "JOYSTICK", "🕹"),
+        ("SCAN", "btn_mode_scan", "SCAN", "◎"),
+    )
+
+    def _style_mode_buttons(self, mode="P2P"):
+        # Accepts the old boolean too: True meant P2P, False meant JOG.
+        if mode is True:
+            mode = "P2P"
+        elif mode is False:
+            mode = "JOG"
+        for key, attr, caption, icon in self.MODE_BUTTONS:
+            active = key == mode
+            getattr(self, attr).set_config(
+                caption, ACCENT_MINT if active else SURFACE, icon=icon,
+                fg_color=INK_DARK if active else TEXT_LIGHT)
 
     def _build_motion_section(self, main):
         s_motion, self.motion_title_label = make_section(
             main, "3. MOTION CONTROL — POINT TO POINT", 2)
         self.p2p_frame = tk.Frame(s_motion, bg=PANEL_BG)
         self.jog_frame = tk.Frame(s_motion, bg=PANEL_BG)
+        self.scan_frame = tk.Frame(s_motion, bg=PANEL_BG)
         self._build_p2p_panel(self.p2p_frame)
         self._build_jog_panel(self.jog_frame)
+        self._build_scan_panel(self.scan_frame)
         self.p2p_frame.pack(fill="both", expand=True)
-        self.motion_lock_widgets += [self.btn_mode_p2p, self.btn_mode_jog]
+        self.motion_lock_widgets += [self.btn_mode_p2p, self.btn_mode_jog,
+                                     self.btn_mode_scan]
 
     def _build_log_section(self, main):
         section, _ = make_section(main, "4. EVENT LOG", 3, expand_vertically=True)

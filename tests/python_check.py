@@ -2393,5 +2393,238 @@ check('self.send("JOG_HB", log_tx=False)' in _inspect.getsource(_JC),
       "the keep-alive was already kept out of the log for the same reason")
 
 
+print("\n=== 31. SCAN is a control mode, and its speed is DERIVED ===")
+from robot_sim import scan_plan as SP
+import robot_sim.core.scan_control as SC
+import robot_sim.core.safety as _SFY
+
+# The worked example the feature came from: 50 Hz, 50 points per slice,
+# 330 deg sweep -> 330 deg in one second. 100 points -> two seconds.
+_p = SP.plan(50, 50, 10, 5, 330, settings={})
+check(abs(_p["slice_seconds"] - 1.0) < 1e-9, "50 points at 50 Hz is 1 s a slice")
+check(abs(_p["rot_deg_s"] - 330.0) < 1e-9, "  ...so a 330 deg sweep runs at 330 deg/s")
+check(abs(_p["deg_step"] - 6.6) < 1e-9, "  ...sampling every 6.6 deg")
+_p2 = SP.plan(50, 100, 10, 5, 330, settings={})
+check(abs(_p2["slice_seconds"] - 2.0) < 1e-9, "100 points at 50 Hz is 2 s")
+check(abs(_p2["rot_deg_s"] - 165.0) < 1e-9, "  ...and half the speed")
+check(_p["points_in_slice"] == 51,
+      "a slice holds P+1 points: the first is taken before the turntable moves")
+
+# The lift only moves BETWEEN slices, so N slices is N-1 steps. Getting
+# this wrong warns about scans that fit.
+check(SP.z_travel_mm(10, 5) == 45.0, "10 slices 5 mm apart is 45 mm of lift, not 50")
+check(SP.z_travel_mm(1, 5) == 0.0, "  ...and one slice needs no lift at all")
+
+check(C.DEFAULT_SCAN_MAX_Z_MM == 180.0,
+      "the ZM travel ceiling defaults to 180 mm")
+check(C.SCAN_MAX_Z_KEY in C.SCAN_SETTING_FIELDS,
+      "  ...and is a stored setting, not a constant in the panel")
+_over = SP.plan(50, 50, 40, 5, 330, settings={})       # 195 mm of lift
+check(_over["z_travel_over"] and any("ceiling" in w for w in _over["warnings"]),
+      "past the ceiling the plan WARNS")
+check(SP.plan(50, 50, 40, 5, 330, settings={C.SCAN_MAX_Z_KEY: 400.0})["warnings"] == []
+      or not SP.plan(50, 50, 40, 5, 330,
+                     settings={C.SCAN_MAX_Z_KEY: 400.0})["z_travel_over"],
+      "  ...and a raised ceiling silences it, so the setting is what is read")
+# A warning, NOT a refusal: it is the operator's own working limit.
+check("z_travel_over" in _over and _over["z_travel_mm"] == 195.0,
+      "the ceiling is advisory — the number is still reported")
+
+# A speed past what RM can do is warned about, because the board clamps it.
+_fast = SP.plan(200, 20, 2, 5, 340, settings={})
+check(any("clamp" in w for w in _fast["warnings"]),
+      "a sweep speed past RM's own is flagged before START")
+
+for _bad, _why in ((dict(sample_hz=0), "a zero sample rate"),
+                   (dict(points_per_slice=1), "a single point per slice"),
+                   (dict(slices=0), "zero slices"),
+                   (dict(gap_mm=0), "a zero slice spacing"),
+                   (dict(sweep_deg=400), "a sweep past the turntable's travel")):
+    _args = dict(sample_hz=50, points_per_slice=50, slices=10, gap_mm=5,
+                 sweep_deg=330)
+    _args.update(_bad)
+    try:
+        SP.plan(**_args, settings={})
+        _raised = False
+    except SP.ScanPlanError:
+        _raised = True
+    check(_raised, "%s is refused with a reason" % _why)
+
+# Half-typed input is an ordinary answer, not a traceback: the hint follows
+# every keystroke.
+for _txt in ("", "-", "1e", "abc"):
+    try:
+        SP.plan(_txt, 50, 10, 5, 330, settings={})
+        _raised = False
+    except SP.ScanPlanError:
+        _raised = True
+    check(_raised, "half-typed %r is an error message, never an exception" % _txt)
+
+print("\n  -- the wire line, and what the board is told --")
+_line = C.cmd_scan_start(5.0, 6.6, 10, 330.0, 330.0)
+check(_line.startswith("SCAN_START:"), "START sends SCAN_START")
+check(_line.count(",") == 4, "  ...with the speed as a FIFTH field")
+check(C.cmd_scan_start(5.0, 6.6, 10, 330.0).count(",") == 3,
+      "  ...which is omitted when there is none, so an older board still works")
+_ino = open(os.path.join(os.path.dirname(HERE),
+                         "RobotMotionController_v9_ClearCore",
+                         "RobotMotionController_v9_ClearCore.ino"),
+            encoding="utf-8").read()
+check("zStepMm,degStep,layers[,sweepDeg[,rotDegS]]" in _ino,
+      "the board documents the same field order")
+check("scanRotScale()" in _ino and "scanRotDegS" in _ino,
+      "  ...and scales RM by it")
+check("float rotScale" in _ino,
+      "  ...RM only: the lift keeps the fixed scan scale, whose small coast "
+      "is what makes it safe")
+
+print("\n  -- the mode wiring --")
+_layout = open(os.path.join(_uidir, "layout.py"), encoding="utf-8").read()
+check('set_mode("SCAN")' in _layout, "there is a third mode button")
+check('("SCAN", "btn_mode_scan"' in _layout,
+      "  ...and the three buttons are styled from one table, so only one lights")
+check("self._build_scan_panel(self.scan_frame)" in _layout,
+      "  ...building a scan panel beside the other two")
+_safety = open(os.path.join(os.path.dirname(HERE), "robot_sim", "core",
+                            "safety.py"), encoding="utf-8").read()
+check('"SCAN": self.scan_frame' in _safety, "set_mode packs the scan panel")
+check("cancel_scan_locally" in _safety,
+      "  ...and both the mode switch and E-STOP end a running scan")
+check(_safety.index("self.cancel_scan_locally") > 0
+      and 'self.send("SCAN_STOP")' in _safety,
+      "  ...the mode switch tells the board too")
+check("[SCAN_PT]" in _inspect.getsource(_SL),
+      "[SCAN_PT] is telemetry: hundreds a layer, parsed but never logged")
+check(_SL.is_telemetry("[SCAN_PT] 1,10.00,412.20"), "  ...and is_telemetry says so")
+check(not _SL.is_telemetry("[SCAN_DONE] 2 layers, 100 points"),
+      "  ...while the summaries still reach the log")
+
+
+class ScanApp(SC.ScanControlMixin):
+    """Just enough app to start, stop and feed a scan."""
+    def __init__(self):
+        self.root = tk.Tk()
+        self.settings = {"rot_pct": C.DEFAULT_ROT_PCT}
+        for k, spec in C.SCAN_SETTING_FIELDS.items():
+            self.settings[k] = spec[2]
+        for ek in C.PLC_SENSOR_ENFORCE_KEYS:
+            self.settings[ek] = True
+        self.motion_locked = self.is_running = self.is_homing = False
+        self.jog_active = set()
+        self.sim_z = 0.0
+        self._plc_led_state = "connected"
+        self.sent, self.logged = [], []
+        self.status_var = tk.StringVar(value="")
+        self.scan_progress_v = tk.StringVar(value="")
+        self.scan_counts_v = tk.StringVar(value="")
+        self.scan_scale_v = tk.StringVar(value="")
+        self.scan_sensor_v = tk.StringVar(value=C.DEFAULT_SCAN_SENSOR)
+        self.scan_hz_v = tk.StringVar(value="50")
+        self.scan_points_v = tk.StringVar(value="50")
+        self.scan_slices_v = tk.StringVar(value="10")
+        self.scan_gap_v = tk.StringVar(value="5")
+        self.scan_sweep_v = tk.StringVar(value="330")
+        self.scan_plot = types.SimpleNamespace(
+            set_range=lambda *a: None, redraw=lambda *a, **k: None,
+            range_mm=200.0)
+        self.locks = []
+        self._init_scan_state()
+    def send(self, m, log_tx=True): self.sent.append(m)
+    def log(self, m, tag="default"): self.logged.append((m, tag))
+    def _hardware_live(self): return True
+    def _set_motion_locked(self, v):
+        self.motion_locked = bool(v); self.locks.append(bool(v))
+    def _cancel_job(self, name): setattr(self, name, None)
+    def _schedule(self, name, ms, fn, *a): setattr(self, name, fn)
+    def _refresh_scan_buttons(self): pass
+    def _refresh_scan_sensor_lamp(self): pass
+
+sa = ScanApp()
+sa.start_scan()
+check(sa.scan_running, "START starts a scan")
+check(any(m.startswith("SET_SCAN_SENSOR:") for m in sa.sent),
+      "  ...picking the sensor first")
+_start = [m for m in sa.sent if m.startswith("SCAN_START:")][0]
+check(_start == "SCAN_START:5.000,6.600,10,330.00,330.000",
+      "  ...and sends the derived step AND speed: " + _start)
+check(sa.motion_locked, "  ...with the machine locked while it sweeps")
+
+sa._on_scan_line("[SCAN_LAYER] 1/10 z=0.00 mm dir=- from=340.00")
+sa._on_scan_line("[SCAN_PT] 1,340.00,412.20")
+sa._on_scan_line("[SCAN_PT] 1,333.40,-1.00")
+check(sa.scan_store.total == 2 and sa.scan_store.misses == 1,
+      "points land in the store, misses counted separately")
+check(sa.scan_store.layer_points(1) == [(340.0, 412.2)],
+      "  ...and a miss is NOT drawn at radius 0, which would be a false wall")
+check(sa.logged and not any("[SCAN_PT]" in m for m, _t in sa.logged),
+      "  ...and no point was logged: the RX pump owns the log")
+_state, _head, _detail = sa.scan_sensor_health()
+check(_head == "NO ECHO", "the lamp reports the LAST reading, miss included")
+check("1 of the last 2" in _detail, "  ...beside how many recent ones missed")
+
+sa._on_scan_line("[SCAN_DONE] 10 layers, 500 points")
+check(not sa.scan_running and not sa.motion_locked,
+      "[SCAN_DONE] ends the run and unlocks the machine")
+
+# A board that refuses the scan must not leave START greyed out.
+sa2 = ScanApp(); sa2.start_scan()
+check(sa2.scan_running, "a second scan starts")
+sa2.scan_refused_by_board()
+check(not sa2.scan_running, "an [ERROR] from the board ends the GUI's run too")
+
+# The ZM ceiling asks rather than refuses -- and the answer is obeyed.
+sa3 = ScanApp()
+sa3.scan_slices_v.set("40")                  # 195 mm, past the 180 default
+with _mock.patch.object(messagebox, "askokcancel", return_value=False):
+    sa3.start_scan()
+check(not sa3.scan_running and not sa3.sent,
+      "declining the ZM-travel warning starts nothing")
+with _mock.patch.object(messagebox, "askokcancel", return_value=True):
+    sa3.start_scan()
+check(sa3.scan_running, "  ...accepting it runs the scan anyway — it is a warning")
+check(any("ceiling" in m for m, _t in sa3.logged),
+      "  ...and the reason is in the log, not only in a dialog nobody kept")
+
+# RM's switch off means the board WILL refuse: say so at the panel.
+sa4 = ScanApp()
+sa4.settings[C.PLC_SENSOR_ENFORCE_BY_AXIS["ROT"]] = False
+with _mock.patch.object(messagebox, "showerror", return_value=None):
+    sa4.start_scan()
+check(not sa4.scan_running,
+      "with RM's switch switched off the scan is refused at the panel")
+
+
+print("\n=== 31. the settings tab strip fits the settings window ===")
+# Six tabs at a flat 128 px came to 836 px of strip inside a 780 px dialog,
+# so the last and widest of them -- Appearance -- was clipped off the right
+# edge. Sized from the labels now, and the window widened if they need it,
+# so a seventh tab or a longer name cannot quietly do it again.
+import robot_sim.ui.settings_dialog as SD
+from robot_sim.theme import FONT_BUTTON as _FB
+import tkinter.font as _tkf
+
+_labels = ["Speed", "Boundaries", "Scan", "Controls", "PID", "Appearance"]
+_f = _tkf.Font(font=_FB)
+_widths = [max(SD.TAB_MIN_W, _f.measure(l) + 2 * SD.TAB_TEXT_PAD) for l in _labels]
+_strip = sum(_widths) + len(_labels) * SD.TAB_GAP + 2 * SD.TAB_STRIP_PAD
+_win = max(int(C.SETTINGS_GEOMETRY.lower().split("x")[0]), _strip)
+check(_strip <= _win,
+      "the tab strip fits the window it is drawn in -- Appearance is not clipped")
+check(_strip < 6 * 128 + 6 * SD.TAB_GAP + 2 * SD.TAB_STRIP_PAD,
+      "  ...and sizing to the labels is NARROWER than the flat 128 it replaced")
+check(max(_widths) == _widths[_labels.index("Appearance")],
+      "  ...with the widest tab being the longest label, not an arbitrary one")
+check(_widths[_labels.index("PID")] == SD.TAB_MIN_W,
+      "  ...and a short label stops at TAB_MIN_W rather than becoming a stub")
+
+_dlg_src = open(os.path.join(os.path.dirname(HERE), "robot_sim", "ui",
+                             "settings_dialog.py"), encoding="utf-8").read()
+check("width=128" not in _dlg_src,
+      "no tab carries the old hard-coded 128 any more")
+check("sw = max(sw, strip_w)" in _dlg_src,
+      "the window is sized from the strip, so a seventh tab widens the window "
+      "instead of being cut off")
+
+
 print("\n" + ("ALL PYTHON CHECKS PASSED" if not FAIL else "FAILURES: %s" % FAIL))
 sys.exit(1 if FAIL else 0)

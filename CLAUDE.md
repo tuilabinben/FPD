@@ -8,21 +8,25 @@ you know why they were made.
 
 ## What this is
 
-An FPD wafer-handling robot (frog-leg twin arm, STCR4000S-class). Three
+An FPD wafer-handling robot (frog-leg twin arm, STCR4000S-class). Four
 pieces, which must agree with each other:
 
 | Piece | Path | Role |
 | :--- | :--- | :--- |
-| **Firmware** | `RobotMotionController_v9_ClearCore/*.ino` (~2300 lines) | ClearCore board. Owns motion, soft limits, IK. |
-| **GUI** | `robot_sim/` (~6700 lines, Python + Tkinter) | Operator console. Serial link, jog, point-to-point, settings. |
-| **Simulation** | `../MATLAB_v4_final` | Simscape model + `mophong_init.m`, the source of the geometry. |
+| **Firmware** | `RobotMotionController_v9_ClearCore/*.ino` (~3700 lines) | ClearCore board. Owns motion, soft limits, IK, the PLC read link, HOME and the scan sweep. |
+| **GUI** | `robot_sim/` (~10 000 lines, Python + Tkinter) | Operator console. Serial link, three control modes, settings. |
+| **Scanner** | `Scan/` | Stand-alone scanner for the same board. The only one that runs **simulated**, away from the machine. |
+| **Simulation** | `../MATLAB_v4_final` | Simscape model + `mophong_init.m`. **Historical reference only** — see the geometry note below. |
 
 `v8` and `clearcore/` are older firmware, kept for reference. **v9 is the
-live one.** MATLAB is treated as read-only reference — the user asked
-explicitly that it not be edited.
+live one.** MATLAB is read-only by request, and is no longer the source of
+the geometry — the arm was measured on the bench and the .m disagrees.
 
 Four axes: **RM** turntable, **A1M** / **A2M** the two elbows (separate
 motors), **ZM** lift.
+
+**Three control modes**, section 2 of the window: **POINT TO POINT**,
+**JOYSTICK**, **SCAN**. Section 3 shows one panel at a time.
 
 ---
 
@@ -32,7 +36,8 @@ motors), **ZM** lift.
 tests/run_tests.sh
 ```
 
-Two suites, ~300 assertions, both must be green:
+Two suites — ~300 firmware assertions and ~650 Python ones — both must
+be green:
 
 * `tests/firmware_check.cpp` — compiles the `.ino` against
   `tests/stub/ClearCore.h` and asserts on the text the board sends back.
@@ -56,35 +61,74 @@ Two stub details are load-bearing, both paid for by real bugs:
 
 ---
 
-## P2P vs the MATLAB model — already identical, and now enforced
+## The geometry is MEASURED. `mophong_init.m` is no longer the reference
 
-`solve_ik()` and the firmware's `solveIkFrogleg()` reproduce
-`solve_ik_frogleg` from `mophong_init.m` to **machine precision** (0.00e+00
-over a 4080-pose sweep). Both suites now assert this against a transcribed
-copy of the MATLAB helper, so a drift fails the build instead of being
-noticed on the machine. Do not "fix" the maths; check the tests first.
+This is the single biggest change to know about, because most of the older
+notes in this file were written while the .m *was* the reference.
 
-Three departures are deliberate and tested as such:
+`mophong_init.m` models the arm as `a3..a6 = 45 / 160 / 160 / 248.2`, which
+gives a reach of 133.2..613.2 mm and puts HOME at `th3_cad` 60 deg.
+**Neither survived contact with the machine.** Two bench measurements
+decide it now:
+
+```
+HOME, arm retracted   240 mm   from the turntable axis
+arm straight          605 mm
+```
+
+Only the two SUMS are measured, and only the sums are used:
+
+```
+R = (a3 + a6) - (a4 + a5) * cos(fold_deg)      a3+a6 = 422.5,  a4+a5 = 182.5
+```
+
+so `config.py` carries `45 / 91.25 / 91.25 / 377.5`. If the links are ever
+measured individually, preserve the sums.
+
+Consequences, all of them tested:
+
+* **HOME is frog-leg 0 deg, not 60.** `ARM_ZERO_CAD_DEG = 0.0`. The
+  constant is kept — it is the one place a CAD frame could be
+  reintroduced — but it is zero, and nothing displays a 60.
+* **`FOLD_ANGLE_SPEC_MAX_DEG = 146.68`** is the fold angle that puts the
+  wafer centre at the rated 575 mm. Travel is 0..180 deg, 180 is the
+  singularity, so the rated reach deliberately sits inside it.
+* **The base link is a LINEAR MAP onto the rated travel**, not `fold / 2`:
+  `base = fold * 90 / 146.68`. The `/2` identity came from the model's
+  derived 2:1 knee gearing, which is exactly what the bench disagreed with.
+* **THE MATLAB PARITY SWEEP IS GONE, ON PURPOSE.** Checking against a
+  model that does not describe this machine proves nothing, and a red build
+  nobody can fix teaches people to ignore the suite. What replaced it in
+  `python_check.py` section 7 is a **round trip**: every pose IK solves
+  must come back out of FK in the same place, to machine precision, over a
+  few thousand poses. That catches the drift the sweep existed to catch,
+  with no external reference to disagree with.
+* **The .m is still the reference for the FRAME** — the Z chain
+  (`Z_offset(arm 1) = 514.3 mm`) and the `d1` 0..285 stroke, which never
+  depended on link length and are still asserted.
+* Do **not** reinstate the elbow comparison without first correcting the
+  .m, which is not ours to edit.
+
+**RM's gearing is `I_RM_TOTAL = 6.5`.** It used to be written `4.375 × 6.5`
+= 28.4375, with a long note about the .m saying `4.375 × 6.4`. The extra
+4.375 is gone: at 6.5 the defaults work out as the speeds the machine
+actually ran at (RM 50% = 75 RPM = **69.2 °/s**, the figure in section 5).
+Changing it rescales every RM speed, so it is a decision to take with the
+machine in front of you.
+
+Two departures from the .m are still deliberate and still tested:
 
 * MATLAB **clamps** an unreachable target silently; here it raises, because
   the operator would otherwise press RUN believing the point was accepted.
-  `clamp_like_matlab=True` reproduces the .m exactly for comparison.
-* MATLAB uses **arm 1's `Z_offset` for both arms**; here each deck has its
-  own, 9 mm apart.
+  `clamp_like_matlab=True` reproduces the .m for comparison.
 * MATLAB **pins AM2 at `th3_home_cad`** for the whole trajectory. The idle
-  arm holds where it is instead — parking it home is a move of up to 120°
-  the operator never commanded, on an arm that may be carrying a substrate.
-  `ikToJoints()` used to snap it home, which also meant `LOAD` and
-  `LOAD_XYZ` produced different poses from the same coordinates.
-
-**`i_RM_total` still differs on purpose**: the .m writes `4.375 * 6.4` = 28,
-the controller uses `4.375 * 6.5` = 28.4375. The Simscape diagram and the
-machine agree on 6.5. Changing it moves every RM angle by 1.5% — that is a
-decision to take with the machine in front of you, not a tidy-up.
+  arm holds where it is instead — parking it home is a move of up to 120
+  deg the operator never commanded, on an arm that may be carrying a
+  substrate.
 
 The **path shape** is joint-space, not MATLAB's 40-sample Cartesian
-straight line. That was chosen explicitly; a straight-line tool path needs
-a streamed segment list or on-board interpolation.
+straight line. Chosen explicitly; a straight-line tool path needs a
+streamed segment list or on-board interpolation.
 
 ---
 
@@ -102,13 +146,17 @@ motor degrees.
 earlier 10.0 put that same motor position at 498 mm, so
 `10.0 × fold(498) / fold(575)` = `10.0 × 114.45 / 146.68` = **7.80**. It is
 a *reach* measurement rather than an angle one, because reach is what a tape
-measure can actually read on this machine.
+measure can actually read on this machine. `fold()` here is
+`reach_to_fold_angle()` on the **measured** curve — see the geometry
+section above; run it on the .m's 133.2..613.2 curve and you get a
+different number.
 
 **Do not restore 2 from `mophong_init.m`.** The Simscape diagram drives each
 arm's two revolutes from one AM signal — shoulder `×1`, knee `×−2` — and the
 closed-form FK agrees, links at `th2 ± th3_math`. That describes the
-**linkage**, and it is right about the linkage. It says nothing about the
-gearbox in front of it, which is what the other 3.9 is. The model being
+**linkage**, and the bench says the linkage is not what the .m thinks
+either. Whatever it describes, it says nothing about the gearbox in front
+of it, which is where the rest of the 7.80 lives. A model being
 self-consistent is not evidence about the drive train.
 
 `SET_ARM_RATIO:<r>` still changes it live — no re-flash, and nothing taught
@@ -153,7 +201,7 @@ The frog-leg angle and the reach are derived:
 
 ```
 fold_deg = motor_deg / ARM_GEAR_RATIO       ARM_GEAR_RATIO = 7.80
-R        = 293.2 - 320 * cos(fold_deg + 60)
+R        = 422.5 - 182.5 * cos(fold_deg)    240 mm at home, 605 straight
 ```
 
 **7.80 is measured — see section 1 for the arithmetic and for why the
@@ -163,7 +211,8 @@ if the drive train is ever altered.
 Consequences that are easy to get wrong:
 
 * **Taught elbow limits are stored in MOTOR degrees**, factory band
-  `0..240`. That is the raw count, so re-calibrating the ratio never
+  `0..1404` (fold 0..180 × 7.80), defaults `0..1394`. That is the raw
+  count, so re-calibrating the ratio never
   invalidates a boundary somebody taught. Storing fold degrees would
   rescale every taught number the moment the ratio moved.
 * `reachBandFor()`, `forward_kinematics()` and `is_near_singularity()` all
@@ -173,13 +222,17 @@ Consequences that are easy to get wrong:
   at twice the elbow angle it had.
 * Arm speed is quoted in **motor** °/s (exact) with the fold °/s beside it.
 * `machine_settings.json` went to `_schema` **3** for this; v2 files' elbow
-  limits were fold degrees and are dropped.
+  limits were fold degrees and are dropped. It is on **4** now — see
+  Persistence.
 
-**HOME is 0, in both frames.** The `60` is `th3_cad` and is geometry, not a
-label — `cos` needs it to make R at home 133.2 mm — so `ARM_ZERO_CAD_DEG`
-stays. Nothing displays it. The jog panel used to *initialise* its readout
-to `60.00 deg` and the boot banner announced the th3_cad convention; both
-looked like the machine jumping to 60°, and both are gone.
+**HOME is 0, in both frames, and `ARM_ZERO_CAD_DEG` is now 0 too.** It used
+to be 60, the .m's `th3_cad`, and the cosine needed it to make R = 133.2 mm
+at home. The bench measured 240 mm at home with the arm fully folded, so
+the offset is zero and the constant only survives as the single place a CAD
+frame could be put back. Nothing displays it. The jog panel used to
+*initialise* its readout to `60.00 deg` and the boot banner announced the
+th3_cad convention; both looked like the machine jumping to 60°, and both
+are gone.
 
 ### 1c. Per-axis enforcement, the master enable, and inset defaults
 
@@ -271,7 +324,8 @@ are now guarded by APPLY alone, like every other tab. Consequences:
   `ARM_FRAME_V2_RESET_KEYS` and cost the operator their taught elbow
   boundaries for nothing.
 
-Defaults are inset (ZM `5..280`, RM `±165`, elbows `10..230` motor°). They
+Defaults are inset at the FAR END ONLY (ZM `0..280`, RM `0..335`, elbows
+`0..1394` motor°) — see 1a for why the lower end is left on the stop. They
 used to *be* the factory envelope, which meant the soft limit and the
 mechanical stop were the same position and the soft limit protected
 nothing.
@@ -309,16 +363,21 @@ someone reports a phantom 60, check the board's firmware first.
 
 ### 2. The arm angle is rotation from home, not `th3_cad`
 
-`A1M_POS` reads **0° at home** and counts up; straight out is **120°**.
-The CAD frame (`th3_cad`: 60° retracted, 180° straight) survives *only*
-inside `fold_angle_to_reach()` / `reach_to_fold_angle()` in
-`kinematics.py` and `reachFromFoldAngle()` / `foldAngleFromReach()` in the
-firmware, which add and remove `ARM_ZERO_CAD_DEG = 60`.
+`A1M_POS` reads **0° at home** and counts up, in MOTOR degrees: straight
+out is fold **180°**, which is `180 × 7.80` = **1404 motor°**. The rated
+575 mm working reach is fold 146.68° = 1144 motor°.
+
+The CAD frame (`th3_cad`: retracted 60°, straight 180°) survives *only* as
+`ARM_ZERO_CAD_DEG` inside `fold_angle_to_reach()` / `reach_to_fold_angle()`
+in `kinematics.py` and `reachFromFoldAngle()` / `foldAngleFromReach()` in
+the firmware — **and it is now 0.0**, because the bench put HOME at fold 0
+(see the geometry section). It is kept as the one place the offset would go
+if a CAD frame ever came back, not because anything adds 60 today.
 
 Why: the board cannot produce a real `th3_cad`. It counts steps from its
-last reference and scales them by the placeholder ratio, so the `60°` it
-used to print at home was zero rotation wearing a CAD label. Rotation from
-home is the same number with an honest name.
+last reference, so the `60°` it used to print at home was zero rotation
+wearing a CAD label. Rotation from home is the same number, honestly
+named.
 
 `python_check.py` **fails the build if `th3_cad` leaks into any module
 other than `kinematics.py` and `config.py`.** That check is deliberate.
@@ -347,23 +406,24 @@ only. A typed `90°` would be typed against a scale that is wrong.
 
 ### 3a. There is no structural REACH envelope either, for the same reason
 
-`133.2–613.2 mm` used to be enforced inside `solve_ik()`. It is gone. The
-floor was `R(fold = 0°)` — it assumed the elbow's zero really *is* the
-folded home pose. `ARM_GEAR_RATIO` is measured now, but that assumption is
-untouched by the measurement, so the floor was still a guess, and it
-refused `X 0, Y 0` and every short radius on a machine that may well reach
-them.
+`133.2–613.2 mm` used to be enforced inside `solve_ik()`, on the .m's link
+lengths. It is gone twice over: those lengths were wrong (the measured
+envelope is **240–605 mm**), and the floor also assumed the elbow's zero
+really *is* the folded home pose — an assumption the ratio measurement does
+not touch. It refused `X 0, Y 0` and every short radius on a machine that
+may well reach them.
 
 What is enforced now:
 
 | Check | Where | Switchable? |
 | :--- | :--- | :--- |
-| `R` within `a3+a6 ± (a4+a5)` = 293.2 ± 320 | `_check_reach()`, `solveIkFrogleg()` | **No** — arithmetic. `acos` would clamp and return a pose nobody asked for |
+| `R` within `a3+a6 ± (a4+a5)` = 422.5 ± 182.5, i.e. **240..605 mm** | `_check_reach()`, `solveIkFrogleg()` | **No** — arithmetic. `acos` would clamp and return a pose nobody asked for |
 | `R` within the **taught elbow band** | `_limit_violation()`, `solveIkFrogleg()` | Yes, per axis |
 
-So a radius below 133.2 mm now **solves**, to a negative fold angle. That
-is not an error: the angle is measured from wherever the board's counter
-was zeroed, so angles outside `0…120` are expected.
+A radius the arithmetic cannot reach still raises; what is gone is the
+extra structural floor on top of it. Angles outside `0…180` fold are
+expected and are not an error — the counter is zeroed wherever the operator
+declared the reference, so a taught band may sit anywhere.
 
 Consequences that were easy to miss and are now tested:
 
@@ -437,12 +497,14 @@ millimetres, and carriage millimetres are exactly what the typed Z is now.
 
 ### 4. `reachBandFor()` does not take min/max of the endpoints
 
-Reach is a cosine of `θ + 60`, monotonic only across half a period. Once a
-taught band crosses an extreme, the extreme radius is **inside** the
-interval. With a band of −260°…480° both endpoints land on the same part
-of the curve, and the endpoint-only version reported a reachable radius of
-593.9–613.2 mm and refused every ordinary target. The function checks the
-angles where `θ + 60` is a multiple of 180 (θ = 120, 300, −60, …).
+Reach is a cosine of `θ + ARM_ZERO_CAD_DEG`, monotonic only across half a
+period. Once a taught band crosses an extreme, the extreme radius is
+**inside** the interval, and an endpoint-only answer reports a narrower
+band than the arm can actually sweep — which refused ordinary targets. The
+function checks every angle in the band where `θ + ARM_ZERO_CAD_DEG` is a
+multiple of 180. With the offset now 0 those are fold `0, 180, 360, −180…`;
+the code still writes the offset, so a CAD frame coming back needs no
+change here.
 
 ### 5. Speed is one fixed master RPM × per-axis percentage
 
@@ -472,7 +534,7 @@ coast = v² / 2a
 ```
 
 At 125% speed and 125% accel the arm ramped for 0.40 s and coasted **225
-MOTOR degrees** — most of its 0..240 taught band — every time the operator
+MOTOR degrees** — every time the operator
 let go. RM and ZM never showed it because their gearing divides it out; the
 arm has **no gear reduction in the velocity calculation**, so at equal
 percentages it runs two orders of magnitude faster in output terms while
@@ -506,78 +568,103 @@ APPLY on the Speed tab to actually adopt them.
 
 ---
 
-### 6. The PLC link is MC Protocol, and it is READ-ONLY
+### 6. The PLC link is MC Protocol, it is READ-ONLY, and HOME no longer uses it
 
 The PLC is a Mitsubishi at **192.168.3.101:1025**, and ClearCore is an MC
-Protocol **3E ASCII** client. It batch-reads the single word `M0..M15`
-every 50 ms — one round trip covers the whole handshake, because every
-device it needs lives in that word. **It writes nothing.**
+Protocol **3E BINARY** client (`#define PLC_MC_ASCII 0`). It batch-reads
+**three words, `M0..M47`**, so the three bits it needs land in one round
+trip. **It writes nothing, ever.**
+
+> **BINARY, not ASCII.** The code must match the PLC's own *Communication
+> Data Code* on the Ethernet Configuration screen. A mismatch is not a
+> partial failure: the PLC silently drops every frame in the wrong format,
+> which is exactly what the machine did before this was corrected.
 
 | Device | Meaning | Direction |
 | :--- | :--- | :--- |
-| `X0` | HOME request | **a wire** from ClearCore `IO-0`, held until DONE |
-| `M1` | DONE | read |
-| `M5`–`M8` | MinZ / OutR / OutR1 / OutR2 → ZM, RM, A1M, A2M **home sensors** | read |
-| `M10`–`M13` | Run ZM / RM / A1M / A2M | read |
+| `M32` | ZM travel limit switch — bottom of the stroke | read |
+| `M31` | RM travel limit switch — the CW end | read |
+| `M30` | A2M travel limit switch — **wired at both ends** | read |
 
-**The HOME request is a wire, not a packet**, and that is a fix rather
-than a preference. `X0` is an INPUT device: the PLC refreshes X from the
-physical terminals at the top of every scan, so an MC-protocol write to
-`X0` was overwritten within one scan (< 10 ms) the moment `X0` had a wire
-on it. It worked *only while X0 was unwired*, and the failure — HOME never
-starting, `M10..M13` never coming on — looked like a ClearCore fault. A
-physical output into that same physical input is what the scan expects.
+**Those three are the only devices read.** `M1` (DONE), `M5`–`M8` (the old
+home sensors) and `M10`–`M13` (run) are gone from **both** sides — deleted,
+not muted, and both suites assert their absence. They lit a lamp and
+decided nothing, while `M30` was the bit actually refusing a jog and had no
+lamp anywhere: an operator watched "M5 ZM lift = CLEAR" while ZM would not
+move down.
 
-Consequences worth keeping:
+**HOME IS DRIVEN BY THIS BOARD, and the PLC is not asked.** `beginHoming()`
+drives each axis in `HOME_DIR_*` at `HOME_SPEED_SCALE` (25%) through the
+ordinary jog velocity path, and stops each one the instant **its own**
+switch bit reads covered; completion is `M30 && M31 && M32` through the
+per-axis enforce flags. There is no request line, no DONE bit and no
+PLC-side sequence to wait on.
 
-* **No ladder change.** `X0` is the same HOME input it always was, in
-  parallel with the panel pushbutton. No SOCOPEN/RECV rungs.
-* **Clearing the request cannot fail.** The old Ethernet clear could be
-  refused by a dead socket, leaving the PLC latched and re-homing the
-  machine when the link came back. `digitalWrite` always lands.
-* **There is no `plcFrameWriteBit()`, and no `PLC_MC_CMD_WRITE`.** They
-  were deleted rather than left unused, and both suites assert their
-  absence. If a future feature must set a PLC device, use an **internal
-  relay (M, decimal numbering)** — never an X — and write down why.
-* `PLC_HOME_REQ_PIN` is defined **outside** the `#if PLC_LINK_MODE` block.
-  The two modes had drifted on to different terminals (`IO5` against a
-  comment saying IO-0) and only one of them was on the machine.
-* `tests/stub/ClearCore.h` **records** `digitalWrite` into `PIN_LEVEL`.
-  A swallowing stub would let every HOME test pass while the terminal
-  never moved — the same trap `Serial.println` was in.
+Why it changed: HOME used to assert a wire (ClearCore `IO-0` → PLC `X0`)
+and wait for the PLC's own home sequence. **Nothing on the PLC side ever
+ran that sequence**, so HOME simply sat there and timed out. The board
+already owns the motors and already reads the switches.
+
+Consequences, all asserted:
+
+* **`plcAssertHomeRequest`, `plcClearHomeRequest`, `plcHomeDoneAsserted`
+  and `PLC_HOME_REQ_PIN` are gone.** So are `plcFrameWriteBit()`,
+  `PLC_MC_CMD_WRITE` and `PLC_MC_SUB_BIT` — there is no write path at all,
+  not even an unused one. If a future feature must set a PLC device, use an
+  **internal relay (M, decimal numbering)** — never an X, which the PLC
+  refreshes from its physical terminals every scan — and write down why.
+* **`HOME_DIR_*` is NOT `PLC_LIMIT_END_*`.** Which way a covered switch
+  refuses, and which way HOME goes looking for it, are separate facts that
+  happen to agree per axis: ZM and A2M back off **negative**, RM backs off
+  **positive**, because RM is mounted inverted. Sharing one constant meant
+  a wrong end sent HOME the wrong way with nowhere separate to correct it.
+* **The jog watchdog must ignore a home.** HOME is not a jog, so no
+  `JOG_HB` arrives and the 700 ms watchdog cancelled the move — which made
+  HOME look like it did nothing at all. `serviceJogWatchdog()` returns
+  early while `isHoming`, and the same exemption covers a scan.
+* **HOME is REFUSED without device data.** The switches are how it knows
+  when to stop, so `beginHoming()` fails immediately and says so rather
+  than driving four axes blind. Timeout is 30 s.
+* **A1M has no switch fitted** and is not moved by HOME. An axis already
+  sitting on its switch, or one whose switch is switched off, is not driven
+  either — driving further into a covered switch is the one direction that
+  must never be commanded.
+* `tests/stub/ClearCore.h` **records** `digitalWrite` into `PIN_LEVEL`. A
+  swallowing stub would let a pin test pass while the terminal never moved
+  — the same trap `Serial.println` was in.
+
+**Vestige, deliberately left:** `config.py` still carries
+`PLC_HOME_REQUEST_DEVICE = "X0"`, `PLC_HOME_REQUEST_SOURCE` and the `X0`
+row in `PLC_DEVICE_MAP`, and `python_check.py` still asserts them. They
+document the wire that *was* there and are read by nothing else; the
+firmware is the authority and it homes itself. Do not build anything new on
+them.
 
 Do not go back to v9.0's `"M2\n"` → `"DONE"` line protocol. It needed a
 SOCOPEN/RECV ladder written on the PLC to parse it; MC protocol answers
-device reads with no ladder code at all, and the handshake is then visible
-in GX Works while it runs.
+device reads with no ladder code at all, and the handshake is visible in
+GX Works while it runs.
 
-Three things here are load-bearing:
+Timing, and why each number is what it is:
 
-* **DONE alone does not end a home.** `M1` stays latched after a cycle, so
-  a second HOME would be answered by the previous one's bit before the
-  machine moved. The gate is: `M10..M13` seen ON at least once this cycle,
-  now all OFF, *and* `M1` set.
 * **The poll has TWO rates, and the fast one is load-bearing.**
   `PLC_POLL_IDLE_DEF_MS = 20`, `PLC_POLL_HOMING_MS = 10`, chosen on
-  `isHoming`. During a home it must be fast **because of the gate above**:
-  a home sequence shorter than one poll interval would finish entirely
-  between two polls, `plcSawRunDuringHome` would never be set, and a home
-  that physically succeeded would fail on the 30 s timeout —
-  intermittently, depending on where the poll landed. Do not "simplify"
-  this back to one rate.
-  (These were 5000/200 at one point and this file said so long after the
-  machine had been moved to 20/10. `SET_PLC_POLL:<ms>` changes the idle
-  rate at runtime and is not persisted.)
-* **The socket timeout (800 ms) must stay longer than the CPU monitoring
-  timer (500 ms).** Otherwise the board abandons a reply the PLC is still
-  going to send, the late reply arrives against the *next* request, and a
-  boundary pattern is applied one cycle late. On a timeout the socket is
-  dropped deliberately — that is the only certain resynchronisation.
-* **If HOME never starts, check the wire first.** `PLC_STATUS` showing
-  `M10..M13` never coming on used to mean the X0 write had been
-  overwritten. It now means the IO-0 → X0 wire, its 24 V return, or the
-  PLC's own home sequence. The network cannot start a home and no longer
-  pretends it can.
+  `isHoming`. During a home the switch state IS the stop signal, so the
+  poll interval is how long an axis keeps moving after it arrives. Do not
+  "simplify" this back to one rate. `SET_PLC_POLL:<ms>` changes the idle
+  rate at runtime and is not persisted.
+* **The socket timeout (`PLC_TXN_TIMEOUT_MS` 800 ms) must stay longer than
+  the PLC's CPU monitoring timer (500 ms).** Otherwise the board abandons a
+  reply the PLC is still going to send, the late reply arrives against the
+  *next* request, and a boundary pattern is applied one cycle late. On a
+  timeout the socket is dropped deliberately — that is the only certain
+  resynchronisation. `PLC_RECONNECT_MS` is 3000.
+* **If HOME never starts, check the link first.** `PLC_TEST` does one
+  blocking read and reports the PHY link, the TCP connect, the exact frame
+  sent and what came back — which separates "no cable", "socket open but
+  not speaking MC protocol", "wrong data code" and "PLC refused the
+  device". `PLC_DEBUG:1` echoes every frame; `PLC_STATUS` adds
+  `[PLC_COUNTS]`.
 
 ### A2M's switch is wired at BOTH ends, and the BOARD decides which
 
@@ -689,6 +776,59 @@ Four legs, on the board (`PHASE_TO_HOME_FIRST` .. `PHASE_TO_HOME_LAST`, all
 started through `beginRunLeg()`) and in the offline simulation. Starting and
 ending at the reference is what makes the cycle repeatable, and it matches
 `mophong_init.m`'s `P_home -> A -> B -> P_home`.
+
+### SCAN is a third MODE, and its speed is DERIVED
+
+`robot_sim/ui/scan_panel.py` + `robot_sim/core/scan_control.py`, beside P2P
+and JOYSTICK. It sends `SCAN_START` to the **same** firmware over the
+**same** link — the board sweeps through its jog primitives, so soft
+limits, PLC switches and E-STOP apply to a scan exactly as to a held key.
+`Scan/` still exists and still runs *simulated*; this mode does not
+simulate, because the console has no fake sensor and a made-up point is
+worse than none.
+
+**The panel asks for four numbers and derives the rest** (`scan_plan.py`):
+
+```
+t    = points / sample_hz     seconds a slice
+w    = sweep / t              deg/s RM must turn at
+step = sweep / points         degrees between samples
+lift = spacing * (slices - 1) total ZM travel
+```
+
+50 Hz and 50 points over 330° is 330° in **one second**; 100 points is two.
+That is why the point count is the input and the speed is the output —
+the operator knows what the sensor can deliver and how finely they want a
+slice, not what deg/s that implies.
+
+Consequences that will bite:
+
+* **`SCAN_START` gained a fifth field, `rotDegS`, optional and LAST.** A
+  board flashed before it reads four fields and ignores the fifth, falling
+  back to `SCAN_SPEED_SCALE`. Do not reorder the fields.
+* **The clamp is on RM only.** `scanRotScale()` scales the turntable; ZM
+  keeps `SCAN_SPEED_SCALE`, whose small coast is what makes the lift safe.
+  The scan's speed suits the *sensor* and says nothing about the lift.
+* **Asking for more than RM can do is a WARNING, not a refusal.** The board
+  samples by POSITION, not by clock, so a clamp costs time and not data —
+  the points land at the same angles. Both sides say so.
+* **A slice holds `points + 1`**, because the first sample is taken at the
+  reference angle before the turntable moves. `deg_step = sweep / points`,
+  NOT `/ (points - 1)`: that makes the count exact and the speed wrong.
+* **`scan_max_z_mm` (Settings → Scan, default 180 mm) WARNS and asks.** It
+  is the operator's own working ceiling; `D1_MAX_MM` on the board is the
+  hard refusal. Total lift is `spacing * (slices - 1)` — using `slices`
+  would refuse scans that fit.
+* **`[SCAN_PT]` is telemetry** (`TELEMETRY_PREFIXES`), so it is parsed and
+  never logged, and the plot repaints on a timer. At a 1° step a layer is
+  341 points; a line and a canvas redraw each would spend the scan drawing.
+* **Nothing in `_on_scan_line()` logs.** The RX pump has already written
+  every non-telemetry line; a `self.log()` there prints each reply twice.
+* Mode switch and E-STOP both end a scan — the mode switch sends
+  `SCAN_STOP` first, E-STOP does not, because the board's own `ESTOP`
+  handler already calls `cancelScan()`.
+
+---
 
 ### The Oxy board draws a CHORD, not the tool path
 

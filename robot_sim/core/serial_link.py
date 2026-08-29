@@ -30,7 +30,9 @@ NO_PORT_LABEL = "No COM ports"
 #
 # Anything the operator would want to READ still logs. This list is only for
 # lines that repeat many times a second and say the same thing each time.
-TELEMETRY_PREFIXES = ("[JOG POS]", "[CLEARCORE POS]")
+# [SCAN_PT] too: 341 points a layer. Store takes them, plot draws on a
+# timer, the log would add a line per point nobody reads.
+TELEMETRY_PREFIXES = ("[JOG POS]", "[CLEARCORE POS]", "[SCAN_PT]")
 
 
 def is_telemetry(line):

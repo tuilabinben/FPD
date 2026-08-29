@@ -632,3 +632,111 @@ WINDOW_MIN_SIZE = (900, 500)
 
 SETTINGS_GEOMETRY = "780x650"
 SETTINGS_MIN_SIZE = (700, 560)
+
+# ══════════════════════════════════════════════════════════════════════
+# SCAN — the third control mode
+#
+# RM sweeps, a distance sensor reads, ZM steps up, RM sweeps back. Same
+# board, same firmware, same link as P2P and JOG: the sweep runs through
+# the jog primitives, so soft limits, PLC switches and E-STOP apply to a
+# scan exactly as to a held key.
+#
+# Wire strings mirror the .ino and the stand-alone Scan/ app. Three copies
+# because the board must work from a bare terminal and Scan/ must keep
+# running; what matters is they cannot DISAGREE — python_check.py reads
+# the .ino and asserts it.
+# ══════════════════════════════════════════════════════════════════════
+
+# THE OPERATOR'S FOUR NUMBERS. No angular step, no speed asked for:
+#   t = P / f          seconds a slice        (P points at f Hz)
+#   w = sweep / t      deg/s RM must turn at
+#   step = sweep / P   degrees between samples
+# 50 Hz, 50 points, 330 deg sweep = 330 deg in 1 s. 100 points = 2 s.
+DEFAULT_SCAN_SAMPLE_HZ = 50.0
+# 250, not the 50 of the worked example: at 50 Hz over 340 deg, 50 points
+# would demand 340 deg/s and RM does 69. A default that always warns is
+# noise. 250 asks for 68 deg/s, just inside it.
+DEFAULT_SCAN_POINTS_PER_SLICE = 250
+DEFAULT_SCAN_SLICES = 10
+DEFAULT_SCAN_SLICE_GAP_MM = 5.0
+DEFAULT_SCAN_SWEEP_DEG = 340.0
+DEFAULT_SCAN_SENSOR = "ULTRASONIC"
+
+SCAN_SENSOR_KINDS = ("ULTRASONIC", "ANALOG")
+
+# Mirrors the board's own limits: a bad number is caught at the panel, not
+# returned as an [ERROR] with the machine standing still.
+SCAN_SAMPLE_HZ_MIN = 0.10
+SCAN_SAMPLE_HZ_MAX = 1000.0
+SCAN_POINTS_MIN = 2
+SCAN_POINTS_MAX = 3400
+SCAN_SLICES_MIN = 1
+SCAN_SLICES_MAX = 500
+SCAN_SLICE_GAP_MIN_MM = 0.10
+SCAN_DEG_STEP_MIN = 0.10
+SCAN_DEG_STEP_MAX = 90.0
+SCAN_SWEEP_MIN_DEG = 1.0
+SCAN_SWEEP_MAX_DEG = 340.0
+
+# THE ZM TRAVEL CEILING — a setting, not a constant. Lift used is
+# gap * (slices - 1). Past it the panel WARNS and asks, never refuses:
+# D1_MAX_MM on the board is the hard stop, this is the operator's own
+# working ceiling, normally well inside it.
+SCAN_MAX_Z_KEY = "scan_max_z_mm"
+DEFAULT_SCAN_MAX_Z_MM = 180.0
+SCAN_MAX_Z_MIN_MM = 1.0
+
+SCAN_SETTING_FIELDS = {
+    SCAN_MAX_Z_KEY: ("Maximum ZM travel per scan", "mm", DEFAULT_SCAN_MAX_Z_MM,
+                     SCAN_MAX_Z_MIN_MM, D1_MAX_MM),
+}
+
+# A failed reading comes back NEGATIVE, never 0 — 0 mm is a real distance
+# and "no echo" is not. Gap on the plot, marked in the CSV.
+SCAN_MISS_MM = -1.0
+
+# Sensor lamp judges health over this many recent readings: one lost echo
+# is not a fault, a wall of them is.
+SCAN_RECENT_WINDOW = 50
+SCAN_MISS_WARN_FRACTION = 0.25
+
+# Radial scale is taken from layer 1 and FROZEN: a plot that rescales
+# cannot be compared with the layer above it by eye.
+SCAN_PLOT_MIN_RANGE_MM = 200.0
+SCAN_PLOT_RINGS = 4
+SCAN_PLOT_SIZE = 360
+# Repaint on a timer, not per point: 341 points a layer.
+SCAN_REDRAW_MS = 250
+
+
+def cmd_scan_start(z_step_mm, deg_step, layers, sweep_deg=DEFAULT_SCAN_SWEEP_DEG,
+                   rot_deg_s=None):
+    """SCAN_START:zStep,degStep,layers[,sweep[,rotDegS]]
+
+    Speed is LAST and optional, so a board flashed before it reads four
+    fields and ignores the fifth — falling back to its own scan scale.
+    """
+    line = (f"SCAN_START:{z_step_mm:.3f},{deg_step:.3f},"
+            f"{int(layers)},{sweep_deg:.2f}")
+    if rot_deg_s is not None:
+        line += f",{rot_deg_s:.3f}"
+    return line
+
+
+def cmd_scan_sensor(kind):
+    return f"SET_SCAN_SENSOR:{kind}"
+
+
+def cmd_scan_cal(mm_per_count, offset_mm):
+    return f"SET_SCAN_CAL:{mm_per_count:.6f},{offset_mm:.3f}"
+
+
+SCAN_TAG_POINT = "[SCAN_PT]"
+SCAN_TAG_BEGIN = "[SCAN_BEGIN]"
+SCAN_TAG_LAYER = "[SCAN_LAYER]"
+SCAN_TAG_DONE = "[SCAN_DONE]"
+SCAN_TAG_ABORT = "[SCAN_ABORT]"
+SCAN_TAG_SEEK = "[SCAN_SEEK]"
+SCAN_TAG_REF = "[SCAN_REF]"
+SCAN_TAG_READ = "[SCAN_READ]"
+SCAN_TAG_STATUS = "[SCAN_STATUS]"

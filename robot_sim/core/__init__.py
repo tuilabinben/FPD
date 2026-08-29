@@ -11,6 +11,7 @@ from .keyboard import KeyboardMixin
 from .p2p_control import P2PControlMixin
 from .protocol import ProtocolMixin
 from .safety import SafetyMixin
+from .scan_control import ScanControlMixin
 from .serial_link import SerialLinkMixin
 from .timers import TimerMixin
 
@@ -23,5 +24,6 @@ __all__ = [
     "P2PControlMixin",
     "ProtocolMixin",
     "SafetyMixin",
+    "ScanControlMixin",
     "SerialLinkMixin",
 ]

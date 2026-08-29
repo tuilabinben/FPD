@@ -241,6 +241,9 @@ class SafetyMixin:
             self.send("ESTOP")
 
         self._release_all_jog_axes(send_stop=False)   # ESTOP already covers it
+        # Board already cancels the scan on ESTOP; this catches the GUI up
+        # without logging a second abort.
+        self.cancel_scan_locally("EMERGENCY STOP")
         self.is_running = False
         self.is_homing = False
         self._cancel_jobs("anim_job", "_home_sim_job", "_reset_position_sim_job")
@@ -260,20 +263,28 @@ class SafetyMixin:
 
         self._stop_all_motion_for_mode_switch()
         self.mode = mode
-        if mode == "P2P":
-            self.jog_frame.pack_forget()
-            self.p2p_frame.pack(fill="both", expand=True)
-            self.motion_title_label.config(text="3. MOTION CONTROL — POINT TO POINT")
-            self._style_mode_buttons(p2p_active=True)
-        else:
-            self.p2p_frame.pack_forget()
-            self.jog_frame.pack(fill="both", expand=True)
-            self.motion_title_label.config(text="3. MOTION CONTROL — JOYSTICK")
-            self._style_mode_buttons(p2p_active=False)
+        # One packed panel at a time. With three modes, an else branch
+        # naming the OTHER one leaves the third packed underneath.
+        frames = {"P2P": self.p2p_frame, "JOG": self.jog_frame,
+                  "SCAN": self.scan_frame}
+        titles = {"P2P": "POINT TO POINT", "JOG": "JOYSTICK",
+                  "SCAN": "SCAN — 340° SWEEP"}
+        for key, frame in frames.items():
+            if key != mode:
+                frame.pack_forget()
+        frames[mode].pack(fill="both", expand=True)
+        self.motion_title_label.config(
+            text="3. MOTION CONTROL — " + titles[mode])
+        self._style_mode_buttons(mode)
         self.root.focus_set()
         self.log(f"Mode switched to {mode}.")
 
     def _stop_all_motion_for_mode_switch(self):
+        # Unpacking the scan panel mid-sweep would leave a moving machine
+        # with no STOP in front of the operator.
+        if self.scan_running:
+            self.send("SCAN_STOP")
+            self.cancel_scan_locally("Stopped — mode changed")
         if self.is_running:
             self.is_running = False
             self._cancel_job("anim_job")

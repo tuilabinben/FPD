@@ -95,12 +95,48 @@ The two decks sit 9 mm apart, applied per arm inside the conversion, so both arm
 
 ## Control modes
 
-| | P2P | Joystick |
-| :--- | :--- | :--- |
-| **Target** | X/Y/Z or joint angles | direction, per axis |
-| **Runs** | `HOME → A → B → HOME` | while the key is held |
-| **PLC limit switch** | **refuses** a leg driving further in | **warns**, does not block |
-| **Path** | joint-space (bows off the straight line) | — |
+| | P2P | Joystick | Scan |
+| :--- | :--- | :--- | :--- |
+| **Target** | X/Y/Z or joint angles | direction, per axis | a sweep per slice, stacked |
+| **Runs** | `HOME → A → B → HOME` | while the key is held | until the last slice, or STOP |
+| **PLC limit switch** | **refuses** a leg driving further in | **warns**, does not block | RM's switch is the *reference* — refused without it |
+| **Path** | joint-space (bows off the straight line) | — | RM sweeps, ZM steps up, RM sweeps back |
+
+### Scan
+
+The turntable sweeps, a distance sensor reads, the lift steps up, and it sweeps back —
+stack the slices and you have the shape of whatever surrounds the machine. It is a **mode
+in this console**, driving the same board over the same link; the stand-alone `Scan/` tool
+still exists and is the one that runs *simulated*, away from the machine.
+
+**You give four numbers, not a speed:**
+
+| Field | |
+| :--- | :--- |
+| **Sensor sample rate** | what the sensor can deliver, Hz |
+| **Points per slice** | how finely one slice is read |
+| **Slices** | how many heights |
+| **Slice spacing** | how far ZM rises between them |
+
+```
+seconds a slice  = points / rate
+RM sweep speed   = sweep / seconds a slice
+angular step     = sweep / points
+ZM travel        = spacing × (slices − 1)
+```
+
+So at 50 Hz, 50 points over a 330° sweep is **330° in one second**; 100 points is two
+seconds. The board is sent the step *and* the speed (`SCAN_START`'s fifth field) and clamps
+a speed past what RM can do — the points still land at the same angles, the sweep just takes
+longer, and both the panel and the board say so.
+
+Two things **warn and ask** rather than refusing, because both are the operator's own
+limits: a total ZM travel past the ceiling in **Settings → Scan** (default **180 mm**), and a
+speed past RM's. The hard refusals stay on the board — the 285 mm stroke, and no PLC device
+data.
+
+`SAVE CSV…` writes `layer,z_mm,angle_deg,distance_mm,x_mm,y_mm,hit`; a miss is written
+marked, never dropped, and never drawn at radius 0.
 
 The **Oxy board** in P2P plots the reachable annulus, the unreachable RM wedge, the taught RM
 band, HOME, A, B and the live pose. The A→B line is drawn straight because that is the
@@ -266,7 +302,7 @@ request.
 
 ## Settings
 
-Five tabs — **Speed · Boundaries · Controls · PID · Appearance** — each with its own APPLY and
+Six tabs — **Speed · Boundaries · Scan · Controls · PID · Appearance** — each with its own APPLY and
 DEFAULTS acting **only on that tab**. A global reset that wiped taught boundaries because
 someone undid a speed change is the failure this avoids.
 
@@ -428,6 +464,7 @@ the package instead.
 | `robot_sim/core/` | one mixin per concern: protocol, jog, P2P, safety, serial, keyboard |
 | `robot_sim/ui/` | panels and the settings dialog |
 | `RobotMotionController_v9_ClearCore/` | the firmware — one `.ino`, plus `FIRMWARE_NOTES.md` |
+| `Scan/` | the stand-alone scanner — same firmware commands, and the only one that can run simulated |
 | `ClearCore_PLC_Test/` | standalone PLC link probe, for bringing the Mitsubishi up on its own |
 | `tests/` | both suites and their stubs |
 | `CLAUDE.md` | why the non-obvious decisions were made — read before changing behaviour |

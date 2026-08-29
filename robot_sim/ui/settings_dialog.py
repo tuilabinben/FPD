@@ -30,7 +30,16 @@ WHAT IT DELIBERATELY DOESN'T DO
 import json
 import os
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import font as tkfont, messagebox, ttk
+
+# Tab strip metrics. The widths are DERIVED from the labels at build time --
+# see open_settings_dialog() -- so these are only the padding around the
+# text, the gap between tabs, and the strip's own inset. TAB_MIN_W keeps a
+# short label like "PID" from becoming a stub.
+TAB_TEXT_PAD = 22
+TAB_MIN_W = 76
+TAB_GAP = 6
+TAB_STRIP_PAD = 16
 
 from ..config import (
     LIMIT_FIELDS,
@@ -57,6 +66,8 @@ from ..config import (
     PID_PRESET_NAME,
     ARM_FRAME_V2_RESET_KEYS,
     ROT_FRAME_V4_RESET_KEYS,
+    SCAN_MAX_Z_KEY,
+    SCAN_SETTING_FIELDS,
     SETTINGS_FILE,
     SETTINGS_SCHEMA,
     SETTINGS_SCHEMA_KEY,
@@ -157,6 +168,19 @@ APPEARANCE_HELP = (
     "Every scheme keeps the same meanings — RED is stop, AMBER is a warning —\n"
     "and the four motor colours are tones of the accent, separated by\n"
     "lightness so they stay readable with red-green colour blindness."
+)
+
+SCAN_HELP = (
+    "The scan panel asks for a sample rate, points per slice, slices and\n"
+    "slice spacing, and derives the angular step and the sweep SPEED from\n"
+    "them: 50 points at 50 Hz is one second a slice, so a 330° sweep runs\n"
+    "at 330°/s. The board clamps a speed past what RM can do, and says so.\n"
+    "\n"
+    "The ceiling below is on the TOTAL lift one scan uses — spacing ×\n"
+    "(slices − 1), because the lift only moves BETWEEN slices. Past it the\n"
+    "panel warns and asks; it does not refuse. The machine's own 285 mm\n"
+    "stroke is the hard limit and lives on the board — this is your own\n"
+    "working ceiling, normally well inside it."
 )
 
 PID_HELP = (
@@ -466,9 +490,33 @@ class SettingsDialogMixin:
         self._settings_dlg = dlg
         dlg.title("Settings")
         dlg.configure(bg=PANEL_BG)
+        # TABS ARE SIZED TO THEIR LABELS, AND THE WINDOW TO THE TABS.
+        #
+        # Six tabs at a flat 128 px came to 836 px of strip inside a 780 px
+        # dialog, so the last and widest of them -- Appearance -- was clipped
+        # off the right edge. A fixed width is wrong in both directions here:
+        # it wasted 100 px on "PID" while starving "Appearance", and nothing
+        # connected it to the window it had to fit inside, so a seventh tab
+        # or a larger UI font would quietly do it again.
+        #
+        # Measured, then the geometry is widened if the strip needs it. The
+        # dialog is never narrower than its own tab row by construction.
+        tabs = (("speed", "Speed", self._build_speed_tab),
+                ("limits", "Boundaries", self._build_limits_tab),
+                ("scan", "Scan", self._build_scan_tab),
+                ("controls", "Controls", self._build_controls_tab),
+                ("pid", "PID", self._build_pid_tab),
+                ("appearance", "Appearance", self._build_appearance_tab))
+        tab_font = tkfont.Font(root=dlg, font=FONT_BUTTON)
+        tab_w = {key: max(TAB_MIN_W, tab_font.measure(label) + 2 * TAB_TEXT_PAD)
+                 for key, label, _b in tabs}
+        strip_w = sum(tab_w.values()) + len(tabs) * TAB_GAP + 2 * TAB_STRIP_PAD
+
         sw, sh = (int(v) for v in SETTINGS_GEOMETRY.lower().split("x"))
+        sw = max(sw, strip_w)
         dlg.geometry(f"{px(sw)}x{px(sh)}")
-        dlg.minsize(px(SETTINGS_MIN_SIZE[0]), px(SETTINGS_MIN_SIZE[1]))
+        dlg.minsize(px(max(SETTINGS_MIN_SIZE[0], strip_w)),
+                    px(SETTINGS_MIN_SIZE[1]))
         dlg.resizable(True, True)
         dlg.transient(self.root)
         dlg.grab_set()
@@ -494,23 +542,19 @@ class SettingsDialogMixin:
         # image element per state. Strip built from RoundedButtons instead:
         # fully rounded, styled by same code as every other control.
         strip = tk.Frame(dlg, bg=PANEL_BG)
-        strip.pack(fill="x", padx=px(16), pady=(px(12), 0))
+        strip.pack(fill="x", padx=px(TAB_STRIP_PAD), pady=(px(12), 0))
 
         holder = tk.Frame(dlg, bg=PANEL_BG)
         holder.pack(fill="both", expand=True, padx=px(14), pady=(px(10), px(14)))
 
         self._tab_buttons_bar = {}
         self._tab_pages = {}
-        for key, label, builder in (("speed", "Speed", self._build_speed_tab),
-                                    ("limits", "Boundaries", self._build_limits_tab),
-                                    ("controls", "Controls", self._build_controls_tab),
-                                    ("pid", "PID", self._build_pid_tab),
-                                    ("appearance", "Appearance", self._build_appearance_tab)):
+        for key, label, builder in tabs:
             btn = RoundedButton(strip, text=label, bg_color=SURFACE,
-                                fg_color=TEXT_MUTED, width=128, height=34,
+                                fg_color=TEXT_MUTED, width=tab_w[key], height=34,
                                 radius=RADIUS_MD, font=FONT_BUTTON,
                                 command=lambda k=key: self._show_tab(k))
-            btn.pack(side="left", padx=(0, px(6)))
+            btn.pack(side="left", padx=(0, px(TAB_GAP)))
             self._tab_buttons_bar[key] = btn
 
             page = tk.Frame(holder, bg=PANEL_BG)
@@ -551,6 +595,8 @@ class SettingsDialogMixin:
         self._accel_vars = {k: tk.StringVar(value=f"{s[k]:g}") for k in ACCEL_FIELDS}
         self._limit_vars = {k: tk.StringVar(value=f"{_rot_limit_to_display(k, s[k]):g}")
                             for k in LIMIT_FIELDS}
+        self._scan_vars = {k: tk.StringVar(value=f"{float(s.get(k, spec[2])):g}")
+                           for k, spec in SCAN_SETTING_FIELDS.items()}
         self._speed_preview_vars = {}
         self._speed_entry_wraps = {}
         self._accel_preview_vars = {}
@@ -1378,6 +1424,53 @@ class SettingsDialogMixin:
         return values, None
 
     # TAB — CONTROLS (jog key bindings)
+    # TAB — SCAN
+    def _build_scan_tab(self, page, dlg):
+        self._tab_buttons(page, self._apply_scan, self._default_scan,
+                          "scan settings")
+        body = self._tab_body(page)
+
+        grid = tk.Frame(body, bg=PANEL_BG)
+        grid.pack(fill="x")
+        grid.grid_columnconfigure(0, weight=1)
+        for row, (key, spec) in enumerate(SCAN_SETTING_FIELDS.items()):
+            label, unit, _default, _lo, _hi = spec
+            self._field_row(grid, row, label, self._scan_vars[key], unit)
+
+        self._help_block(body, SCAN_HELP)
+
+    def _apply_scan(self):
+        out = {}
+        for key, (label, unit, _default, lo, hi) in SCAN_SETTING_FIELDS.items():
+            value, error = self._read_number(self._scan_vars[key], label)
+            if error:
+                messagebox.showerror("Error", error)
+                return
+            if not (lo <= value <= hi):
+                messagebox.showerror(
+                    "Error",
+                    f"“{label}” must be between {lo:g} and {hi:g} {unit}.\n\n"
+                    f"You entered {value:g} {unit}. The upper end is the "
+                    f"machine's own ZM stroke — a ceiling past it would never "
+                    f"warn about anything.")
+                return
+            out[key] = value
+        self.settings.update(**out)
+        self._save_settings_file()
+        # Nothing is sent to the board: this ceiling is the operator's own
+        # working limit and is enforced at the panel. The board keeps its
+        # own hard refusal at the end of the stroke, which is a different
+        # number and not this one's business.
+        self.log(f"Scan settings applied — maximum ZM travel per scan "
+                 f"{out[SCAN_MAX_Z_KEY]:g} mm.")
+        if hasattr(self, "_refresh_scan_hint"):
+            self._refresh_scan_hint()
+
+    def _default_scan(self):
+        for key, spec in SCAN_SETTING_FIELDS.items():
+            self._scan_vars[key].set(f"{spec[2]:g}")
+        self.log("Scan settings reset to defaults — press APPLY to keep them.")
+
     def _build_controls_tab(self, page, dlg):
         self._tab_buttons(page, self._apply_keybinds, self._default_keybinds,
                           "key bindings")

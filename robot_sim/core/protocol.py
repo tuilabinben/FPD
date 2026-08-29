@@ -147,6 +147,11 @@ class ProtocolMixin:
             self._on_limit_triggered(payload.split()[0].upper() if payload else "")
             return
 
+        # Every [SCAN_*] reply. RX pump already logged the line.
+        if upper.startswith("[SCAN"):
+            self._on_scan_line(text)
+            return
+
         if upper.startswith("[PLC_HOME]"):
             self._on_plc_home_line(text)
             return
@@ -182,6 +187,12 @@ class ProtocolMixin:
         if upper.startswith("[WARN]") and "NO ETHERNET LINK" in upper:
             self._set_plc_led("unreachable")
             self.log(text, tag="warn")
+            return
+
+        if upper.startswith("[ERROR]"):
+            # If it was the scan, drop the GUI's run too, or START stays
+            # greyed out with nothing running. RX pump logged it already.
+            self.scan_refused_by_board()
             return
 
         if upper.startswith("[HOME]"):

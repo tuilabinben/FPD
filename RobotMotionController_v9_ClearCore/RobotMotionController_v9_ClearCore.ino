@@ -440,7 +440,17 @@ double scanAnalogOffsetMm   = 0.0;
 // Scanning sweeps slowly. At full RM speed a 30 ms ultrasonic read happens
 // over 3 degrees of travel, which is the width of the feature you are
 // trying to find. A quarter of that is the point of this scale.
+//
+// THE FALLBACK, not the rule: SCAN_START may carry a sweep speed in deg/s,
+// derived by the host from sample rate and points per layer. A 0, or a
+// line without the field, falls back to this scale.
 const float SCAN_SPEED_SCALE = 0.20f;
+
+// Requested sweep speed, deg/s at the output, 0 = none given. Clamped to
+// what the RM percentage can do -- running slower than asked is the honest
+// failure: the points still land at the same ANGLES, just later.
+double scanRotDegS = 0.0;
+const double SCAN_ROT_DEG_S_MIN = 0.01;
 
 const double SCAN_SWEEP_DEG_DEF  = 340.0;   // the turntable's whole travel
 // A SHORTER sweep is allowed -- scanning one wall is a real job, and 340 is
@@ -1328,10 +1338,19 @@ int homeDirFor(int i) {
   return dirs[i];
 }
 
+// RM ONLY. The scan speed suits the SENSOR; that says nothing about the
+// lift between layers, so ZM keeps SCAN_SPEED_SCALE and its small coast.
+float scanRotScale() {
+  if (scanRotDegS < SCAN_ROT_DEG_S_MIN || rotVelDegS <= 0.0f) return SCAN_SPEED_SCALE;
+  float s = (float)(scanRotDegS / (double)rotVelDegS);
+  return s > 1.0f ? 1.0f : s;      // never faster than the axis is configured for
+}
+
 void applyJogVelocities() {
   float scale = isHoming ? HOME_SPEED_SCALE
               : (scanPhase != SCAN_OFF ? SCAN_SPEED_SCALE : 1.0f);
-  int32_t rotV = (int32_t)(rotVelPulses * boostMultiplier * scale);
+  float rotScale = (!isHoming && scanPhase != SCAN_OFF) ? scanRotScale() : scale;
+  int32_t rotV = (int32_t)(rotVelPulses * boostMultiplier * rotScale);
   int32_t armV = (int32_t)(armVelPulses * boostMultiplier * scale);
   int32_t zV   = (int32_t)(zVelPulses   * boostMultiplier * scale);
 
@@ -2498,6 +2517,8 @@ bool scanRotSwitchOn() {
 void cancelScan(const String &why) {
   if (scanPhase == SCAN_OFF) return;
   scanPhase = SCAN_OFF;
+  // Clear, or a SCAN_START that asks for no speed inherits this one.
+  scanRotDegS = 0.0;
   rotDir = jzDir = 0;
   applyJogVelocities();
   sendFeedback("[SCAN_ABORT] " + why);
@@ -2630,6 +2651,7 @@ void serviceScan() {
     }
     if (scanLayer >= scanLayers) {
       scanPhase = SCAN_OFF;
+      scanRotDegS = 0.0;          // same reason as cancelScan()
       sendFeedback("[SCAN_DONE] " + String(scanLayers) + " layers, "
                  + String(scanPointsSent) + " points");
       return;
@@ -2663,15 +2685,25 @@ void handleScanStart(const String &payload) {
   int c1 = payload.indexOf(',');
   int c2 = payload.indexOf(',', c1 + 1);
   int c3 = payload.indexOf(',', c2 + 1);
+  int c4 = (c3 < 0) ? -1 : payload.indexOf(',', c3 + 1);
   if (c1 < 0 || c2 < 0) {
-    sendFeedback("[ERROR] SCAN_START needs zStepMm,degStep,layers[,sweepDeg]");
+    sendFeedback("[ERROR] SCAN_START needs zStepMm,degStep,layers[,sweepDeg[,rotDegS]]");
     return;
   }
   double zStep = payload.substring(0, c1).toFloat();
   double dStep = payload.substring(c1 + 1, c2).toFloat();
   int layers = (c3 < 0 ? payload.substring(c2 + 1)
                        : payload.substring(c2 + 1, c3)).toInt();
-  double sweep = (c3 < 0) ? SCAN_SWEEP_DEG_DEF : payload.substring(c3 + 1).toFloat();
+  double sweep = (c3 < 0) ? SCAN_SWEEP_DEG_DEF
+               : (c4 < 0 ? payload.substring(c3 + 1)
+                         : payload.substring(c3 + 1, c4)).toFloat();
+  // Optional and LAST: a host that predates it sends four fields and gets
+  // SCAN_SPEED_SCALE, which is what that host expects.
+  double rotDegS = (c4 < 0) ? 0.0 : payload.substring(c4 + 1).toFloat();
+  if (c4 >= 0 && rotDegS < 0.0) {
+    sendFeedback("[ERROR] scan speed cannot be negative, got " + String(rotDegS, 3));
+    return;
+  }
 
   if (zStep < SCAN_Z_STEP_MIN_MM) {
     sendFeedback("[ERROR] Z step must be at least " + String(SCAN_Z_STEP_MIN_MM, 2)
@@ -2732,10 +2764,20 @@ void handleScanStart(const String &payload) {
                  "will come back -1. Send SET_SCAN_CAL first.");
   }
 
+  // Warned, not refused: the board samples by POSITION, so a clamp costs
+  // time, not data. But a scan taking three times as long should say so.
+  if (rotDegS >= SCAN_ROT_DEG_S_MIN && rotDegS > (double)rotVelDegS) {
+    sendFeedback("[WARN] scan asked for " + String(rotDegS, 1)
+               + " deg/s, RM is configured for " + String(rotVelDegS, 1)
+               + " deg/s - sweeping at the lower figure. Raise RM's speed "
+                 "percentage, or ask for fewer points per layer.");
+  }
+
   scanZStepMm = zStep;
   scanDegStep = dStep;
   scanLayers  = layers;
   scanSweepDeg = sweep;
+  scanRotDegS  = rotDegS;
   scanStartZ   = currentD1();
   scanSweepFrom = currentRot();
   scanPointsSent = 0;
@@ -2745,7 +2787,8 @@ void handleScanStart(const String &payload) {
              + " zStep=" + String(zStep, 2)
              + " degStep=" + String(dStep, 2)
              + " sweep=" + String(sweep, 1)
-             + " fromZ=" + String(scanStartZ, 2));
+             + " fromZ=" + String(scanStartZ, 2)
+             + " rotDegS=" + String((double)rotVelDegS * scanRotScale(), 2));
 
   if (scanRotSwitchOn()) {
     // Already there. Nothing to seek, and driving into a covered switch is
@@ -2769,6 +2812,8 @@ void sendScanStatus() {
              + " layer=" + String(scanLayer) + "/" + String(scanLayers)
              + " dir=" + String(scanSweepDir > 0 ? "+" : "-")
              + " points=" + String(scanPointsSent)
+             + " rotDegS=" + String(scanPhase == SCAN_OFF ? 0.0
+                                  : (double)rotVelDegS * scanRotScale(), 2)
              + " cal=" + String(scanAnalogMmPerCount, 5)
              + "," + String(scanAnalogOffsetMm, 2));
 }

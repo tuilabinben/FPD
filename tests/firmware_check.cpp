@@ -1388,6 +1388,42 @@ int main() {
           "omitting the sweep still means the whole 340 deg of travel");
     run("SCAN_STOP");
 
+    // ---- the sweep SPEED is settable too, and clamped ----------------
+    // Host derives it: points per layer / sample rate is the time a layer
+    // may take, so speed = sweep / that. Optional and LAST, so an older
+    // host sending four fields still works and gets SCAN_SPEED_SCALE.
+    scanPhase = SCAN_OFF; rotDir = jzDir = 0;
+    setRot(340.0); setZ(0.0);
+    plcPoll3(0, BIT(15), 0);
+    OUT.clear();
+    run("SCAN_START:5,10,2,120,5");
+    check(scanPhase != SCAN_OFF && saw("rotDegS=5.00"),
+          "a requested sweep speed is adopted and reported");
+    check(fabs(scanRotScale() - (5.0f / rotVelDegS)) < 1e-4,
+          "  ...as a fraction of the configured RM speed, not of full travel");
+    run("SCAN_STOP");
+    check(scanRotDegS == 0.0,
+          "  ...and it is cleared, so the next scan cannot inherit it");
+
+    OUT.clear();
+    run("SCAN_START:5,10,2,120");
+    check(scanPhase != SCAN_OFF && fabs(scanRotScale() - SCAN_SPEED_SCALE) < 1e-6,
+          "no speed field falls back to the fixed scan scale");
+    run("SCAN_STOP");
+
+    OUT.clear();
+    run("SCAN_START:5,10,2,120,9999");
+    check(saw("[WARN]") && saw("RM is configured for"),
+          "a speed past what RM can do warns instead of failing silently");
+    check(scanPhase != SCAN_OFF && scanRotScale() <= 1.0f,
+          "  ...and the scan still runs, clamped to the axis's own speed");
+    run("SCAN_STOP");
+
+    OUT.clear();
+    run("SCAN_START:5,10,2,120,-3");
+    check(scanPhase == SCAN_OFF && saw("[ERROR]"),
+          "a negative speed is refused");
+
     // ---- the jog watchdog must not eat the scan ----------------------
     // A scan drives rotDir exactly as a jog does, but no host is holding a
     // key, so no JOG_HB arrives. Un-exempted, the watchdog cancelled every
