@@ -216,7 +216,15 @@ _l3 = [d for d, _r in app.store.layer_points(3)]
 check(_l1[0] > _l1[-1], "layer 1 sweeps AWAY from the switch, so its angle counts down")
 check(_l2[0] < _l2[-1], "layer 2 comes BACK to it, counting up")
 check(_l3[0] > _l3[-1], "  ...and layer 3 turns round again")
-check(abs(_l1[0] - _l3[0]) < 1e-6,
+# From the RAW points, not the hit-filtered ones. layer_points() drops
+# misses, and the simulator loses about 1.5% of readings at random -- so a
+# miss landing on the FIRST sample of either layer made this compare the
+# second angle against the first and fail, roughly one run in thirty. A
+# test that fails a few percent of the time is worse than no test: it
+# teaches you to re-run it.
+def _first_angle(layer):
+    return next(d for (n, d, _r) in app.store.points if n == layer)
+check(abs(_first_angle(1) - _first_angle(3)) < 1e-6,
       "every outward layer starts at the same angle - the switch, not a drifting count")
 check(app.store.total > 500, "a 2 deg step over 340 deg is about 171 points a layer")
 check(app.scanning is False and app.progress_var.get() == "Finished",

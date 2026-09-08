@@ -100,9 +100,28 @@ struct MotorConn{
   // RM does -- sets pos directly. Without it the firmware could only ever
   // be tested standing still at the origin.
   int32_t pos = 0;
+  // Move() RECORDS ITS TARGET. It used to swallow it, which was fine while
+  // a leg was one call and the only question was "did it start" -- but a
+  // profiled leg is a SEQUENCE of setpoints, and a swallowing Move would
+  // let every test of that sequence pass while the setpoint never moved.
+  // Same trap Serial.println and digitalWrite were in.
+  //
+  // pos is deliberately NOT updated: tests that need the axis to arrive
+  // move it themselves with setRot()/setZ(), and every test written before
+  // this still sees a machine that stays where it was put.
+  int32_t lastMoveTarget = 0;
+  int     moveCalls = 0;
+  // MoveVelocity() RECORDS TOO, same reason as Move() above: the jog ramp
+  // is a SEQUENCE of MoveVelocity commands walking a velocity, not one
+  // instant jump, and a swallowing MoveVelocity would let every ramp
+  // assertion pass while nothing was ever actually commanded in between.
+  int32_t lastVelocityCmd = 0;
+  int     velocityCalls = 0;
   void VelMax(int32_t){} void AccelMax(int32_t){} void EnableRequest(bool){}
-  void Move(int32_t,int){} bool StepsComplete(){return true;}
-  void MoveStopDecel(int32_t){} void MoveVelocity(int32_t){}
+  void Move(int32_t t,int){ lastMoveTarget = t; moveCalls++; }
+  bool StepsComplete(){return true;}
+  void MoveStopDecel(int32_t){}
+  void MoveVelocity(int32_t v){ lastVelocityCmd = v; velocityCalls++; }
   int32_t PositionRefCommanded(){return pos;} void PositionRefSet(int32_t v){pos=v;}
 };
 extern MotorConn ConnectorM0,ConnectorM1,ConnectorM2,ConnectorM3;

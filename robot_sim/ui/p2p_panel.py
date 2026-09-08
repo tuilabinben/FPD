@@ -5,7 +5,8 @@ from tkinter import ttk
 
 # No reach constants here any more. Workspace line built from operator's
 # taught boundaries by _refresh_workspace_hint() — only limits actually applied.
-from ..config import ARM_CONFIGS, DEFAULT_POINT_A, DEFAULT_POINT_B
+from ..config import (ARM_CONFIGS, DEFAULT_POINT_A, DEFAULT_POINT_B,
+                      arm_frame_note)
 from ..theme import (
     FONT_CAPTION,
     FONT_HINT,
@@ -143,24 +144,13 @@ class P2PPanelMixin:
         # secretly enormous column. Capped to cards' own width, wraps onto
         # a few lines instead, column shrinks to match.
         _caption_width = 3 * 150   # ~= one row of 3 compact coord cards
-        tk.Label(parent,
-                 text=("HOME = X 0 · Y 0 · Z 0.  X, Y measured from the turntable "
-                       "axis and may be negative; Z is height above HOME and may "
-                       "not."),
-                 bg=PANEL_BG, fg=TEXT_MUTED, wraplength=_caption_width,
-                 justify="left",
-                 font=FONT_MONO).pack(anchor="w", pady=(6, 0))
-        # Workspace line is LIVE, reports YOUR limits, not structural
-        # envelope. Old line quoted fixed 133.2-613.2 mm reach; floor
-        # assumed elbow zero really is folded home pose and fold angle is
-        # motor degrees over unmeasured gear ratio. IK no longer enforces
-        # it, so advertising it here would name a boundary nothing applies.
-        self.workspace_hint_v = tk.StringVar(value="")
-        tk.Label(parent, textvariable=self.workspace_hint_v,
-                 bg=PANEL_BG, fg=TEXT_MUTED, wraplength=_caption_width,
-                 justify="left",
-                 font=FONT_MONO).pack(anchor="w", pady=(2, 0))
-        self._refresh_workspace_hint()
+        # HOME=X0Y0Z0 explainer and the live "Your limits" line were both
+        # removed on request. This is what is left: where HOME and the
+        # working max sit. Fixed text, not a limit -- taught boundaries
+        # (Settings -> Boundaries) are what is actually enforced.
+        tk.Label(parent, text=arm_frame_note(), bg=PANEL_BG, fg=TEXT_MUTED,
+                 wraplength=_caption_width, justify="left",
+                 font=FONT_HINT).pack(anchor="w", pady=(6, 0))
 
     def _build_arm_selector(self, parent):
         row = tk.Frame(parent, bg=PANEL_BG)

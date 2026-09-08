@@ -46,47 +46,77 @@ import robot_sim.kinematics as K
 
 
 # ══════════════════════════════════════════════════════════════════════
-print("\n=== 1. THE ARM ANGLE IS ROTATION FROM HOME ===")
-check(C.ARM_HOME_DEG == 0.0, "home is 0°, not 60°")
-check(C.FOLD_ANGLE_MIN_DEG == 0.0 and C.FOLD_ANGLE_MAX_DEG == 180.0,
-      "travel is 0..180° frog-leg (base 0..90°)")
-check(C.ARM_ZERO_CAD_DEG == 0.0,
-      "HOME IS frog-leg 0 — measured, not the .m's th3_cad 60")
-check(abs(C.FOLD_ANGLE_SPEC_MAX_DEG - 146.68) < 0.01,
-      "the rated 575 mm reach is fold 146.68°, inside the 180° travel")
-check(C.FOLD_ANGLE_SINGULARITY_WARN_DEG == 170.0,
+print("\n=== 1. THE ARM ANGLE: HOME IS BASE -30, THE WORKING MAX IS BASE +60 ===")
+check(C.ARM_HOME_DEG == 0.0, "home is 0 MOTOR degrees — the stored figure never moved")
+check(C.FOLD_ANGLE_MIN_DEG == 0.0 and C.FOLD_ANGLE_MAX_DEG == 120.0,
+      "travel is 0..120° frog-leg (base -30..+90)")
+check(C.ARM_ZERO_CAD_DEG == 60.0,
+      "HOME is the CAD frame's th3_cad 60 pose again")
+check(abs(C.FOLD_ANGLE_SPEC_MAX_DEG - 90.0) < 1e-12,
+      "the working maximum is fold 90° = base +60°")
+check(C.FOLD_ANGLE_SINGULARITY_WARN_DEG == 110.0,
       "singularity warning 10° short of straight, as before")
 
-print("\n  -- the reach curve is the MEASURED one, not mophong_init.m's --")
-# Two bench measurements define the whole curve: HOME 240 mm and the arm
-# straight at 605 mm. mophong_init.m's 133.2..613.2 was found to be wrong
-# on the machine and is no longer the reference.
-check(abs(fold_angle_to_reach(0.0) - 240.0) < 0.05, "0°   -> 240 mm (retracted, measured)")
-check(abs(fold_angle_to_reach(180.0) - 605.0) < 0.05, "180° -> 605 mm (straight, measured)")
-check(abs(fold_angle_to_reach(C.FOLD_ANGLE_SPEC_MAX_DEG) - 575.0) < 0.5,
-      "146.68° -> 575 mm (the rated working reach)")
-check(abs(reach_to_fold_angle(240.0) - 0.0) < 0.05, "240 mm -> 0°")
-check(abs(reach_to_fold_angle(605.0) - 180.0) < 0.05, "605 mm -> 180°")
+print("\n  -- the reach curve is the MATLAB link set --")
+# a3+a6 = 293.2, a4+a5 = 320, so R = 293.2 - 320*cos(th3_cad).
+check(abs(fold_angle_to_reach(0.0) - 133.2) < 0.05,
+      "fold 0   = base -30 -> 133.2 mm (HOME)")
+check(abs(fold_angle_to_reach(90.0) - 570.33) < 0.05,
+      "fold 90  = base +60 -> 570.3 mm (the working maximum)")
+check(abs(fold_angle_to_reach(120.0) - 613.2) < 0.05,
+      "fold 120 = base +90 -> 613.2 mm (straight, the singularity)")
+check(abs(reach_to_fold_angle(133.2) - 0.0) < 0.05, "133.2 mm -> fold 0")
+check(abs(reach_to_fold_angle(613.2) - 120.0) < 0.05, "613.2 mm -> fold 120")
 check(all(abs(reach_to_fold_angle(fold_angle_to_reach(a)) - a) < 1e-9
-          for a in (0.0, 12.5, 60.0, 146.68, 179.9)), "the pair round-trips")
-check(abs(C.ARM_MIN_REACH_MM - 240.0) < 0.05 and abs(C.ARM_MAX_REACH_MM - 605.0) < 0.05,
-      "the reach envelope is the measured 240..605 mm")
-check(is_near_singularity(175.0) and not is_near_singularity(165.0),
+          for a in (0.0, 12.5, 60.0, 90.0, 119.9)), "the pair round-trips")
+check(abs(C.ARM_MIN_REACH_MM - 133.2) < 0.05 and abs(C.ARM_MAX_REACH_MM - 613.2) < 0.05,
+      "the arithmetic envelope is 133.2..613.2 mm")
+check(abs(C.ARM_SPEC_REACH_MM - 570.33) < 0.05,
+      "  ...with the working maximum quoted separately at 570.3 mm")
+check(is_near_singularity(115.0) and not is_near_singularity(105.0),
       "the singularity warning fires just short of straight")
 
-print("\n  -- the base angle is a linear map onto the RATED travel --")
-# NOT fold/2. That identity came from the derived 2:1 knee gearing; the
-# bench-measured arm reaches its rated 575 mm at fold 146.68°, and THAT is
-# the angle that maps to base 90°. Anything past it extrapolates.
-check(abs(K.base_angle_from_fold_angle(0.0) - 0.0) < 1e-12, "fold 0   -> base 0° (HOME)")
-check(abs(K.base_angle_from_fold_angle(C.FOLD_ANGLE_SPEC_MAX_DEG) - 90.0) < 1e-12,
-      "fold 146.68 -> base 90° (rated working reach)")
-check(all(abs(K.base_angle_from_fold_angle(f)
-              - f * (90.0 / C.FOLD_ANGLE_SPEC_MAX_DEG)) < 1e-12
-          for f in (0.0, 37.0, 90.0, 146.68, 180.0)),
-      "base is linear in fold across the travel, exactly")
+print("\n  -- the base angle is 1:1 with fold, offset 90° from th3_cad --")
+# base = th3_cad - 90 = fold - 30. NOT a scale factor: the previous frame
+# stretched fold onto 0..90 through 90/146.68, so one base degree was not
+# one arm degree and the two numbers drifted apart across the travel.
+check(abs(K.base_angle_from_fold_angle(0.0) + 30.0) < 1e-12,
+      "fold 0   -> base -30° (HOME)")
+check(abs(K.base_angle_from_fold_angle(C.FOLD_ANGLE_SPEC_MAX_DEG) - 60.0) < 1e-12,
+      "fold 90  -> base +60° (the working maximum)")
+check(abs(K.base_angle_from_fold_angle(120.0) - 90.0) < 1e-12,
+      "fold 120 -> base +90° (straight)")
+check(all(abs(K.base_angle_from_fold_angle(f) - (f - 30.0)) < 1e-12
+          for f in (0.0, 37.0, 90.0, 120.0)),
+      "base is fold minus 30, exactly, everywhere")
 check(all(abs(K.fold_angle_from_base_angle(K.base_angle_from_fold_angle(f)) - f) < 1e-9
-          for f in (0.0, 37.0, 90.0, 180.0)), "  ...and it round-trips")
+          for f in (0.0, 37.0, 90.0, 120.0)), "  ...and it round-trips")
+check(C.BASE_ANGLE_HOME_DEG == -30.0 and C.BASE_ANGLE_MAX_DEG == 60.0,
+      "the two figures are named constants, not literals in a label")
+
+print("\n  -- the HOME / MAX note is stated, and is NOT a limit --")
+_note = C.arm_frame_note()
+check("-30" in _note and "133.2" in _note, "the note names HOME: base -30°, 133.2 mm")
+check("+60" in _note and "570.3" in _note, "  ...and the maximum: base +60°, 570.3 mm")
+check(_note.count("=") == 2 and "straight" not in _note,
+      "  ...and says ONLY those two, which is how it was asked for")
+# Nothing refuses a target past the working maximum: only the arithmetic
+# span and the operator's own taught band stop the arm.
+_past_max = C.ARM_SPEC_REACH_MM + 20.0
+_d, _t2, _a1, _a2 = solve_ik(_past_max, 0.0, 514.3 + 100.0, arm_choice="A1M")
+check(abs(fold_angle_to_reach(_a1) - _past_max) < 0.5,
+      "a target 20 mm past base +60 still solves — the max really is a note")
+check(K.base_angle_from_fold_angle(_a1) > 60.0,
+      "  ...and it reports a base angle past +60, rather than clamping to it")
+_ui = open(os.path.join(os.path.dirname(HERE), "robot_sim", "ui", "p2p_panel.py"),
+           encoding="utf-8").read()
+_ui_jog = open(os.path.join(os.path.dirname(HERE), "robot_sim", "ui", "jog_panel.py"),
+               encoding="utf-8").read()
+check("arm_frame_note()" in _ui, "P2P shows both poses, from the one builder")
+check("arm_home_note()" in _ui_jog and "arm_frame_note()" not in _ui_jog,
+      "  ...while JOYSTICK shows the HOME half alone")
+check(C.arm_frame_note() == C.arm_home_note() + "   |   " + C.arm_max_note(),
+      "  ...and the pair is built from the halves, so they cannot disagree")
 
 print("\n  -- the angle counts UP as the arm turns out --")
 prev = -1e9
@@ -104,9 +134,25 @@ check(abs(fold_angle_to_reach(a1) - 300.0) < 0.5,
 print("\n  -- the elbow boundary DEFAULTS are in MOTOR degrees --")
 check([C.LIMIT_FIELDS[k][6] for k in C.ARM_FRAME_V2_RESET_KEYS]
       == [C.DEFAULT_LIM_A_MIN, C.DEFAULT_LIM_A_MAX] * 2,
-      "default elbow band is 0..1394 MOTOR° — inset at the far end only")
-check(all(C.LIMIT_FIELDS[k][3] == "motor °" for k in C.ARM_FRAME_V2_RESET_KEYS),
-      "  ...and they are labelled as motor degrees, not bare degrees")
+      "default elbow band is 0..926 MOTOR° — inset at the far end only")
+check(abs(C.ARM_MOTOR_MAX_DEG - 936.0) < 1e-9,
+      "  ...off a 0..936 motor° factory band (fold 120 × 7.80)")
+# The BOX shows a base angle; the STORE stays motor degrees. Re-calibrating
+# ARM_GEAR_RATIO must never move a boundary somebody taught, so the two
+# frames meet at _limit_to_display/_limit_from_display and nowhere else.
+check(all(C.LIMIT_FIELDS[k][3] == "base °" for k in C.ARM_FRAME_V2_RESET_KEYS),
+      "  ...and the elbow BOXES are labelled base degrees, the frame operators read")
+check(all("(base °)" in h for h, mn, _mx, _s in C.LIMIT_GROUPS
+          if mn in C.ARM_FRAME_V2_RESET_KEYS),
+      "  ...and so are their two headings, or the row would name two frames at once")
+check(abs(SD._limit_from_display("lim_a1_min", -30.0)) < 1e-9
+      and abs(SD._limit_from_display("lim_a1_max", 88.71794871794872)
+              - C.DEFAULT_LIM_A_MAX) < 1e-6,
+      "  ...but what is STORED is still motor degrees — base -30 is motor 0")
+check(abs(SD._limit_to_display("lim_a1_min", 0.0) + 30.0) < 1e-9,
+      "  ...so the default band 0..926 motor° opens the tab at -30.00 base°")
+check(SD._limit_to_display("lim_z_max", 280.0) == 280.0,
+      "  ...and ZM, whose box and store share a frame, is untouched by either")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -170,20 +216,24 @@ class Coll:
         # RM's two keys show 0..-340, not native 0..340 — same transform
         # _build_limits_tab applies when it first populates the entries.
         self._limit_vars = {
-            k: tk.StringVar(value=repr(SD._rot_limit_to_display(k, C.LIMIT_FIELDS[k][6])))
+            k: tk.StringVar(value=repr(SD._limit_to_display(k, C.LIMIT_FIELDS[k][6])))
             for k in C.LIMIT_KEYS}
         for k, v in (over or {}).items():
             self._limit_vars[k].set(v)
 
 out, err = Coll({"lim_a1_max": "1000"})._collect_limits()
-check(err is None and out["lim_a1_max"] == 1000.0, "1000° accepted on an elbow")
+check(err is None
+      and abs(out["lim_a1_max"] - SD._limit_from_display("lim_a1_max", 1000.0)) < 1e-9,
+      "1000° accepted on an elbow, and stored as the motor degrees it means")
 out, err = Coll({"lim_a1_min": "-5000"})._collect_limits()
 check(err is None, "-5000° accepted too")
 out, err = Coll({"lim_z_max": "9000"})._collect_limits()
 check(err and "MECHANICAL" in err, "ZM 9000 mm still refused")
 out, err = Coll({"lim_a1_min": "800", "lim_a1_max": "100"})._collect_limits()
-check(err is None and out["lim_a1_min"] == 800.0 and out["lim_a1_max"] == 100.0,
-      "an inverted elbow pair is accepted and stored RAW")
+check(err is None
+      and out["lim_a1_min"] == SD._limit_from_display("lim_a1_min", 800.0)
+      and out["lim_a1_max"] == SD._limit_from_display("lim_a1_max", 100.0),
+      "an inverted elbow pair is accepted and stored RAW — no sort on write")
 out, err = Coll({"lim_a1_min": "70", "lim_a1_max": "70"})._collect_limits()
 check(err and "no room to move" in err, "both ends on ONE position is refused")
 out, err = Coll({"lim_z_min": "200", "lim_z_max": "100"})._collect_limits()
@@ -277,8 +327,9 @@ class App(SD.SettingsDialogMixin):
         self.is_homed = False
         self.sim_z = self.sim_rot = 0.0
         self.sim_a1 = self.sim_a2 = C.ARM_HOME_DEG
+        self.logged = []
     def send(self, m, log_tx=True): pass
-    def log(self, m, tag="default"): pass
+    def log(self, m, tag="default"): self.logged.append((m, tag))
     def _hardware_live(self): return False
     def home(self): pass
     def reset_coordinates(self): pass
@@ -344,11 +395,17 @@ check(len(app._kb_draft) == len(KB.ACTION_ORDER), "the Controls tab built all 8 
 print("\n  -- SET HERE captures the live A1M_POS --")
 app.sim_a1 = 37.5
 app._capture_limit_here("lim_a1_max")
-check(app._limit_vars["lim_a1_max"].get() == "37.50",
-      "it takes exactly what the readout shows, in the from-home frame")
+check(app._limit_vars["lim_a1_max"].get()
+      == f"{SD._limit_to_display('lim_a1_max', 37.5):.2f}",
+      "SET HERE captures the live A1M_POS and shows it as a BASE angle")
+check(app._limit_vars["lim_a1_max"].get() == "-25.19",
+      "  ...so motor 37.5 reads -25.19, not 37.50 — the frame the operator uses")
 app.sim_a1 = 1000.0
 app._capture_limit_here("lim_a1_min")
-check(app._limit_vars["lim_a1_min"].get() == "1000.00", "a four-figure position too")
+check(app._limit_vars["lim_a1_min"].get() == "98.21",
+      "a four-figure motor position too — 1000 motor° is base 98.21°")
+check(any("98.21" in m and "motor" not in m for m, _t in app.logged[-3:]),
+      "  ...and the LOG quotes the box's own frame, not the stored count")
 messagebox.CALLS.clear()
 app._apply_limits()
 check(not [c for c in messagebox.CALLS if c[0] == "error"],
@@ -435,11 +492,11 @@ check(worst < 1e-6, "IK -> FK returns the pose it was given, to machine precisio
 # The frame constants, which the .m and the machine still agree on.
 check(abs(C.Z_OFFSET_ARM1_MM - 514.3) < 1e-9, "Z_offset(arm 1) = 514.3")
 check(C.D1_MIN_MM == 0.0 and C.D1_MAX_MM == 285.0, "d1 stroke 0..285")
-# The measured links, named outright so a change to them is a visible diff.
-check((C.A3_MM, C.A4_MM, C.A5_MM, C.A6_MM) == (45.0, 91.25, 91.25, 377.5),
-      "a3/a4/a5/a6 are the MEASURED 45/91.25/91.25/377.5")
-check(abs(C.ARM_MIN_REACH_MM - 240.0) < 1e-9 and abs(C.ARM_MAX_REACH_MM - 605.0) < 1e-9,
-      "the measured links give the measured 240..605 mm envelope")
+# The links, named outright so a change to them is a visible diff.
+check((C.A3_MM, C.A4_MM, C.A5_MM, C.A6_MM) == (45.0, 160.0, 160.0, 248.2),
+      "a3/a4/a5/a6 are the MATLAB 45/160/160/248.2")
+check(abs(C.ARM_MIN_REACH_MM - 133.2) < 1e-9 and abs(C.ARM_MAX_REACH_MM - 613.2) < 1e-9,
+      "  ...so the arithmetic envelope is 133.2..613.2 mm")
 
 print("\n  -- the two documented departures from the .m are still documented --")
 # 1. MATLAB clamps an unsolvable target silently; a machine must refuse it.
@@ -451,27 +508,29 @@ try:
 except ValueError:
     raised = True
 check(raised, "an unsolvable radius RAISES here where MATLAB would clamp")
-# The only floor left is arithmetic: with the MEASURED links the frog-leg
-# spans 422.5 ± 182.5 mm, so 240 mm is the shortest radius any elbow angle
-# reaches. There is no SEPARATE structural floor on top of that — the old
-# 133.2 mm one was R(fold = 0°) on an unmeasured gear ratio and is gone.
-# The working limit is the operator's taught band, checked at LOAD.
-raised = False
-try:
-    solve_ik(50.0, 0.0, 560.0, "A1M", idle_deg=0.0)
-except ValueError:
-    raised = True
-check(raised, "r = 50 mm is refused — below the arithmetic span, not a taught limit")
+# THE ARITHMETIC FLOOR IS NEGATIVE with these links: the frog-leg spans
+# 293.2 ± 320 mm, so acos solves anything from -26.8 mm up. 133.2 mm is
+# where the arm's own TRAVEL starts (fold 0, HOME), not where the maths
+# stops — a shorter radius comes back as a negative fold angle, which the
+# taught elbow band is what refuses. Same rule as the elbow boundaries: no
+# structural envelope, one system of record.
+check(abs(K.REACH_SOLVABLE_MIN_MM + 26.8) < 1e-9,
+      "the arithmetic floor is -26.8 mm, BELOW the 133.2 mm home reach")
+_short = solve_ik(50.0, 0.0, 560.0, "A1M", idle_deg=0.0)
+check(_short[2] < 0.0,
+      "r = 50 mm solves to a NEGATIVE fold angle, outside the travel")
+check(K.base_angle_from_fold_angle(_short[2]) < C.BASE_ANGLE_HOME_DEG,
+      "  ...which reads below base -30, so the panel shows it is behind HOME")
 # Just inside the span solves, and lands where FK agrees.
 d1s, _rs, a1s, _as = solve_ik(C.ARM_MIN_REACH_MM + 1.0, 0.0, 560.0, "A1M",
                               idle_deg=0.0)
 check(abs(K.fold_angle_to_reach(a1s) - (C.ARM_MIN_REACH_MM + 1.0)) < 1e-6,
-      "  ...while 1 mm inside the span solves and round-trips")
+      "  ...while 1 mm inside the travel solves and round-trips")
 # clamp_like_matlab still CLAMPS instead of raising — that switch is about
-# the failure MODE, which is unchanged, not about the .m's link lengths.
-d1c, _rc, a1c, _ac = solve_ik(50.0, 0.0, 560.0, "A1M", idle_deg=0.0,
+# the failure MODE, which is unchanged, not about the link lengths.
+d1c, _rc, a1c, _ac = solve_ik(700.0, 0.0, 560.0, "A1M", idle_deg=0.0,
                               clamp_like_matlab=True)
-check(abs(K.fold_angle_to_reach(a1c) - C.ARM_MIN_REACH_MM) < 1e-6,
+check(abs(K.fold_angle_to_reach(a1c) - K.REACH_SOLVABLE_MAX_MM) < 1e-6,
       "  ...and clamp_like_matlab=True clamps to the span instead of raising")
 # 2. Per-arm deck heights: the .m uses arm 1's offset for both.
 check(abs(C.Z_OFFSET_ARM1_MM - C.Z_OFFSET_ARM2_MM - 9.0) < 1e-9,
@@ -501,7 +560,7 @@ check([d for d, _c, _dir in C.PLC_DEVICE_MAP if d in ("M10", "M11", "M12", "M13"
 # machine: M32 follows ZM, M30 follows A2M.
 check(C.PLC_SENSOR_PANEL == (
         ("M32", "ZM  lift",      "Z",   "Z_DOWN",  -1),
-        ("M31", "RM  turntable", "ROT", "ROT_CW",  +1),
+        ("M31", "RM  turntable", "ROT", "ROT_CCW", -1),
         ("M30", "A2M arm 2",     "A2",  "A2_BACK", -1),
       ), "the sensor panel IS the three travel limits, nothing else")
 check("const int PLC_M_LIMIT_Z   = 32;" in fw
@@ -548,12 +607,12 @@ check("homeDirFor(i)" in home_body,
 # end sent HOME the wrong way with nowhere separate to correct it.
 check("plcLimitEndFor" not in home_body,
       "  ...and NOT from the limit-blocking end, which is a different fact")
-# RM is mounted inverted (see PLC_LIMIT_END_ROT), so its switch sits at
-# the +1/CW end, not -1 — HOME_DIR_* must match PLC_LIMIT_END_* per axis,
-# not carry one blanket sign.
-check("const int HOME_DIR_Z   = -1;" in fw and "const int HOME_DIR_ROT = +1;" in fw
+# HOME_DIR_* must still match PLC_LIMIT_END_* per axis — they name the same
+# physical switch. All three are negative: RM's M31 is at the CCW end, which
+# is where HOME parks it and where finishHoming() then sets its zero.
+check("const int HOME_DIR_Z   = -1;" in fw and "const int HOME_DIR_ROT = -1;" in fw
       and "const int HOME_DIR_A2  = -1;" in fw,
-      "  ...ZM/A2M back off NEGATIVE, RM backs off POSITIVE — it is inverted")
+      "  ...all three drive NEGATIVE onto their switch — down, retract, CCW")
 # HOME is not a jog, so no keep-alive arrives: the jog watchdog cancelled
 # the move 700 ms in, which is why HOME looked like it did nothing at all.
 wd_body = fw.split("void serviceJogWatchdog() {")[1].split("\n}")[0]
@@ -618,9 +677,9 @@ check(abs(motor_deg_to_reach(_m) - fold_angle_to_reach(60.0)) < 1e-9,
       "%.0f motor° is fold 60°, R = %.1f mm" % (_m, fold_angle_to_reach(60.0)))
 check(abs(motor_deg_to_reach(_m) - fold_angle_to_reach(60.0 * C.ARM_GEAR_RATIO)) > 100.0,
       "  ...and NOT fold %.0f°, far further out — the old bug" % _m)
-check(abs(reach_to_motor_deg(575.0)
+check(abs(reach_to_motor_deg(C.ARM_SPEC_REACH_MM)
           - motor_deg_from_fold_angle(C.FOLD_ANGLE_SPEC_MAX_DEG)) < 0.01,
-      "575 mm maps back to the rated 146.68 fold° (the JEL drawing figure)")
+      "570.3 mm maps back to fold 90° = base +60, the working maximum")
 
 print("\n  -- the speed figures split the same way --")
 check(abs(C.arm_motor_speed_deg_s(150, 125) - 1125.0) < 0.01,
@@ -637,15 +696,16 @@ print("\n  -- taught limits survive a re-calibration --")
 # The whole reason limits are stored in motor degrees: changing the ratio
 # must not move a boundary the operator taught off the physical stop.
 saved_ratio = C.ARM_GEAR_RATIO
-# Captured at the 575 mm stop, i.e. the rated fold angle times the ratio.
+# Captured at the working maximum, i.e. fold 90 (base +60) times the ratio.
 taught_motor = C.FOLD_ANGLE_SPEC_MAX_DEG * C.ARM_GEAR_RATIO
 before = motor_deg_to_reach(taught_motor)
 import robot_sim.kinematics as KIN
 KIN.ARM_GEAR_RATIO = saved_ratio / 2.0     # pretend the bench says half
 after = KIN.motor_deg_to_reach(taught_motor)
 KIN.ARM_GEAR_RATIO = saved_ratio
-check(abs(before - 575.0) < 0.5,
-      "a boundary taught at %.2f motor° reads 575 mm" % taught_motor)
+check(abs(before - C.ARM_SPEC_REACH_MM) < 0.5,
+      "a boundary taught at %.2f motor° reads %.1f mm"
+      % (taught_motor, C.ARM_SPEC_REACH_MM))
 check(abs(after - before) > 50.0,
       "  ...and after re-calibration the SAME stored number means a new reach")
 check(taught_motor == C.FOLD_ANGLE_SPEC_MAX_DEG * C.ARM_GEAR_RATIO,
@@ -733,7 +793,7 @@ for _axis, _lo, _hi, _home in (("ZM", C.DEFAULT_LIM_Z_MIN, C.DEFAULT_LIM_Z_MAX, 
           "%s home %.2f is inside its default limits [%.2f, %.2f]"
           % (_axis, _home, _lo, _hi))
 check(C.ARM_MOTOR_MIN_DEG == 0.0
-      and abs(C.ARM_MOTOR_MAX_DEG - 180.0 * C.ARM_GEAR_RATIO) < 1e-9,
+      and abs(C.ARM_MOTOR_MAX_DEG - 120.0 * C.ARM_GEAR_RATIO) < 1e-9,
       "  ...while the factory envelope is the full fold travel times the ratio")
 
 print("\n  -- RM's zero is its CCW stop, which is HOME --")
@@ -889,9 +949,18 @@ check('if (!axisLimited(whichArm == 1 ? "A1" : "A2")) return;' in fw,
       "  ...and the elbow clamp asks per arm, so switching A1 off leaves A2 armed")
 check('if (axisLimited("Z")) {' in fw and 'if (axisLimited("ROT")) {' in fw,
       "  ...ZM and RM are gated separately too, not behind one shared return")
-check('if (axisEnforced("Z") &&' in fw,
-      "target validation skips an axis that is switched off, or it would refuse "
-      "a point the machine is willing to drive to")
+# The per-axis switch still gates JOG. What it no longer gates is a P2P
+# target: taught boundaries were removed from that path on request, so
+# jointTargetIsLegal() checks PHYSICAL travel and nothing else.
+jtl = fw.split("bool jointTargetIsLegal(")[1].split("\n}")[0]
+check("axisEnforced" not in jtl and "limD1Min" not in jtl and "limRotMin" not in jtl,
+      "a P2P target is no longer validated against the taught boundaries")
+check("D1_MIN_MM" in jtl and "D1_MAX_MM" in jtl,
+      "  ...but ZM's physical stroke still is — that is the top stop, not a setting")
+check("ROT_MIN_DEG" in jtl and "ROT_MAX_DEG" in jtl,
+      "  ...and RM's travel too, since past it no bearing is reachable at all")
+check("armBand" not in jtl,
+      "  ...while the elbows keep no check here, the frog-leg arithmetic bounds them")
 check("SET_LIMIT_ENFORCE:" in fw, "the board takes the per-axis command")
 check("SET_LIMIT_LOCK no longer exists" in fw,
       "  ...and REFUSES the old SET_LIMIT_LOCK rather than aliasing it onto "
@@ -945,9 +1014,10 @@ class Readout:
             setattr(self, v, tk.StringVar())
 ro = Readout(a1=C.FOLD_ANGLE_SPEC_MAX_DEG * C.ARM_GEAR_RATIO, a2=0.0)
 ro._update_jog_readout()
-check(ro.a1_pos_v.get() == "90.00 base deg",
-      "A1M at the rated fold angle reads 90.00 base deg, not the raw motor figure")
-check(ro.a2_pos_v.get() == "0.00 base deg", "  ...and A2M at home reads 0.00 base deg")
+check(ro.a1_pos_v.get() == "60.00 base deg",
+      "A1M at the working-max fold angle reads 60.00 base deg, not the raw motor figure")
+check(ro.a2_pos_v.get() == "-30.00 base deg",
+      "  ...and A2M at home reads -30.00 base deg, the new HOME figure")
 # The BOARD's telemetry path writes the same cards. It used to write them
 # itself, in motor degrees, AFTER the jog readout had written base degrees
 # -- so the panel showed the base angle only until the next [POS] line
@@ -971,22 +1041,27 @@ class Telemetry:
 tm = Telemetry()
 tm._update_p2p_telemetry(0.0, 0.0, C.FOLD_ANGLE_SPEC_MAX_DEG * C.ARM_GEAR_RATIO,
                          0.0, pct=50)
-check(tm.a1_pos_v.get() == "90.00 base deg" and tm.a2_pos_v.get() == "0.00 base deg",
+check(tm.a1_pos_v.get() == "60.00 base deg" and tm.a2_pos_v.get() == "-30.00 base deg",
       "board telemetry writes the SAME base-angle cards as the jog readout")
 check(tm.p2p_repaints == 1,
       "  ...through one readout, repainting each panel once, so they cannot drift")
 
 check("th3_cad, 60 deg = retracted" not in fw,
-      "the boot banner no longer announces the th3_cad convention")
-check("HOME IS 0" in fw, "  ...it says HOME IS 0")
+      "the boot banner no longer announces the th3_cad convention as the frame")
+check("HOME IS 0" in fw, "  ...it says HOME IS 0, in MOTOR degrees")
+check("HOME = base -30 deg" in fw and "MAX = base +60 deg" in fw,
+      "  ...and states the HOME and MAX poses in the operator's base frame")
+check("NOT A LIMIT" in fw,
+      "  ...saying outright that the max is a note, not something enforced")
 check(C.ARM_HOME_DEG == 0.0 and C.FOLD_ANGLE_HOME_DEG == 0.0,
       "home is 0 in both the motor frame and the fold frame")
-# The CAD offset went to 0 with the measured geometry: fold 0 IS the
-# retracted pose, so there is no frame shift left to carry.
-check(C.ARM_ZERO_CAD_DEG == 0.0,
-      "ARM_ZERO_CAD_DEG is 0 — fold 0 is the retracted pose outright")
-check(abs(fold_angle_to_reach(0.0) - C.ARM_MIN_REACH_MM) < 0.05,
-      "  ...and fold 0° really is the 240 mm retracted reach")
+# The CAD offset is 60 again: HOME is th3_cad 60, and the base angle the
+# operator reads is that minus 90.
+check(C.ARM_ZERO_CAD_DEG == 60.0,
+      "ARM_ZERO_CAD_DEG is 60 — HOME is the CAD frame's retracted pose")
+check(abs(fold_angle_to_reach(0.0) - C.ARM_MIN_REACH_MM) < 0.05
+      and abs(C.ARM_MIN_REACH_MM - 133.2) < 0.05,
+      "  ...and fold 0° really is the 133.2 mm retracted reach")
 
 
 
@@ -1446,9 +1521,9 @@ print("\n=== 24. the reach envelope is YOURS, not a structural guess ===")
 # The 133.2 mm floor was R(fold = 0): it assumed the elbow's zero really is
 # the folded home pose, measured through an unverified ARM_GEAR_RATIO. The
 # IK now refuses only radii the geometry cannot solve at all.
-check(abs(K.REACH_SOLVABLE_MAX_MM - 605.0) < 1e-9
-      and abs(K.REACH_SOLVABLE_MIN_MM - 240.0) < 1e-9,
-      "the only hard bound left is a3+a6 ± (a4+a5) = 422.5 ± 182.5 mm")
+check(abs(K.REACH_SOLVABLE_MAX_MM - 613.2) < 1e-9
+      and abs(K.REACH_SOLVABLE_MIN_MM + 26.8) < 1e-9,
+      "the only hard bound left is a3+a6 ± (a4+a5) = 293.2 ± 320 mm")
 src_kin = open(os.path.join(os.path.dirname(HERE), "robot_sim",
                             "kinematics.py"), encoding="utf-8").read()
 reach_body = src_kin.split("def _check_reach")[1].split("\ndef ")[0]
@@ -1457,18 +1532,18 @@ check("ARM_MIN_REACH_MM" not in reach_body and "ARM_MAX_REACH_MM" not in reach_b
 # The band a taught elbow pair really sweeps. NOT min/max of the endpoints:
 # reach is a cosine, so once a band crosses an extreme the extreme radius
 # is INSIDE the interval, and endpoint-only under-reports it.
-_peak = 180.0 * C.ARM_GEAR_RATIO          # motor° at the straight arm
+_peak = 120.0 * C.ARM_GEAR_RATIO          # motor° at the straight arm
 lo, hi = K.reach_band_from_motor_deg(0.0, C.ARM_MOTOR_MAX_DEG)
-check(abs(lo - 240.0) < 0.05 and abs(hi - 605.0) < 0.05,
-      "the factory motor band sweeps the full 240..605 mm")
+check(abs(lo - 133.2) < 0.05 and abs(hi - 613.2) < 0.05,
+      "the factory motor band sweeps the full 133.2..613.2 mm")
 lo, hi = K.reach_band_from_motor_deg(_peak - 20.0, _peak + 20.0)
-check(abs(hi - 605.0) < 0.05,
+check(abs(hi - 613.2) < 0.05,
       "  ...and a band straddling the straight arm finds the peak BETWEEN its ends")
 # fold -260..480 spans the whole curve, so BOTH extremes are interior.
 # The endpoint-only version reported 593.9..613.2 here and refused every
 # ordinary target — the bug reachBandFor was written to fix.
 lo, hi = K.reach_band_from_motor_deg(-2.0 * _peak, 3.0 * _peak)
-check(abs(hi - 605.0) < 0.05 and abs(lo - 240.0) < 0.05,
+check(abs(hi - 613.2) < 0.05 and abs(lo + 26.8) < 0.05,
       "  ...and a band spanning the whole curve finds BOTH extremes inside it")
 
 print("\n  -- the panel advertises those limits, and repaints when they change --")
@@ -1508,22 +1583,49 @@ check("A1M not enforced" in hn2.workspace_hint_v.get(),
 check("_refresh_workspace_hint" in src_sd.split("def _apply_limits")[1].split("\n    def ")[0],
       "APPLY on the Boundaries tab repaints it")
 
-print("\n  -- LOAD is where the working envelope is enforced --")
+print("\n  -- LOAD WARNS about a taught boundary, the BOARD stops the leg --")
+# Removed on request. LOAD used to refuse a point outside the operator's
+# own boundaries; it loads it now. The protection is not gone -- the board
+# keeps its own copy of every boundary and clamps each leg -- so the point
+# runs and stops ON the limit instead of being turned away up front.
+load_body = src_p2c.split("def p2p_load_parameters")[1].split("\n    def ")[0]
+lim_arm = load_body.split("_limit_violation")[1].split("_sensor_violation")[0]
+check("showerror" not in lim_arm,
+      "a point outside a taught boundary is no longer refused at LOAD")
+check("return" not in lim_arm,
+      "  ...and LOAD carries on to the rest of the checks instead of bailing")
+check('tag="warn"' in lim_arm,
+      "  ...but it is still SAID, as a warning")
+# The board reports a bare [LIMIT] with no idea which typed number caused
+# it. Without this line nothing on screen connects the two.
+check("_limit_violation" in load_body,
+      "  ...so the description is still computed, not deleted with the refusal")
+
 viol_body = src_p2c.split("def _limit_violation")[1].split("\n    def ")[0]
 check("_limit_pair(" in viol_body,
       "the check SORTS the pair — elbow boundaries are stored as taught")
 check("_axis_enforced(" in viol_body,
       "  ...and skips an axis whose enforcement is off")
 check("Settings" in viol_body,
-      "  ...and the refusal points at the tab that owns the number")
+      "  ...and the message points at the tab that owns the number")
+
+# ONLY the taught boundary was relaxed. A PLC switch is a physical fact
+# about the machine, and a program runs unattended.
+sens_arm = load_body.split("_sensor_violation")[1]
+check("showerror" in sens_arm and "return" in sens_arm,
+      "the PLC sensor block is UNCHANGED — P2P still refuses to run into a switch")
 # The firmware has to agree, or the GUI and a bare terminal disagree about
 # what is reachable.
-check('if (axisEnforced(axisTok)) {' in fw,
-      "the board checks the taught reach band only when that arm is enforced")
-check("no solution: the frog-leg" in fw,
-      "  ...and keeps the arithmetic refusal, which is not switchable")
-check('if (axisEnforced("Z") && (d1 <' in fw and 'if (axisEnforced("ROT") && (th2 <' in fw,
-      "  ...and the IK's ZM and RM checks respect their switches too")
+ik_body = fw.split("IkResult solveIkFrogleg(")[1].split("\n}\n")[0]
+check("outside the band YOU taught" not in ik_body,
+      "the board's IK no longer refuses a radius outside the taught elbow band")
+check("no solution: the frog-leg" in ik_body,
+      "  ...and keeps the arithmetic refusal, which is not switchable and never was")
+check("limD1Min" not in ik_body and "limRotMin" not in ik_body,
+      "  ...nor does it check the taught ZM and RM bands any more")
+check("D1_MAX_MM" in ik_body and "ROT_MAX_DEG" in ik_body,
+      "  ...but the physical stroke and RM's travel still refuse, being machine "
+      "facts rather than settings")
 
 
 print("\n=== 25. a taught boundary applies IMMEDIATELY, with no reference ===")
@@ -1810,16 +1912,17 @@ check('right_col.grid(row=0, column=1' in _panel_body,
       "  ...board in column 1")
 
 # Verified live: grid weight=0 alone was NOT enough. "Natural width" is
-# still whatever the column's widest child asks for, and the HOME-frame
-# caption + workspace-hint labels are long, single-line sentences with no
-# wraplength -- an unwrapped Label reports its full text width as its
-# natural size, which made the LEFT column itself thousands of pixels
-# wide (cards sat left-aligned inside a secretly enormous column) and
+# still whatever the column's widest child asks for, and a long single-line
+# sentence with no wraplength -- an unwrapped Label reports its full text
+# width as its natural size, which made the LEFT column itself thousands of
+# pixels wide (cards sat left-aligned inside a secretly enormous column) and
 # pushed the board off the right edge with no horizontal scrollbar to
-# reach it. wraplength is what actually caps it.
+# reach it. wraplength is what actually caps it. The HOME-frame caption and
+# the live "Your limits" line were removed on request -- arm_frame_note()
+# is the label left in this function, and it still needs the same cap.
 _coord_body2 = src_p2p2.split("def _build_coordinate_inputs")[1].split("\n    def ")[0]
-check(_coord_body2.count("wraplength=") >= 2,
-      "the HOME caption and workspace-hint labels are wrapped, not left to "
+check(_coord_body2.count("wraplength=") >= 1,
+      "the remaining arm-frame-note label is wrapped, not left to "
       "report their full sentence as the column's natural width")
 check("_refresh_xy_board" in src_p2p2, "  ...and repaints it on every keystroke")
 check("_refresh_xy_board" in src_p2c,
@@ -1868,10 +1971,11 @@ check(_axis["M32"] == "Z" and _axis["M30"] == "A2",
 _ends = {b: e for b, _l, _a, _c, e in C.PLC_SENSOR_PANEL}
 check(_ends["M32"] == -1 and _ends["M30"] == -1,
       "M32 (ZM) and M30 (A2M) sit at the MINIMUM of their axis")
-check(_ends["M31"] == +1,
-      "M31 (RM) sits at the MAXIMUM — RM is mounted inverted")
+check(_ends["M31"] == -1,
+      "M31 (RM) sits at the MINIMUM too — RM's zero IS its switch, so calling "
+      "it the maximum refused every rot > 0 target and pinned the turntable")
 _cmds = {b: c for b, _l, _a, c, _e in C.PLC_SENSOR_PANEL}
-check(_cmds["M32"] == "Z_DOWN" and _cmds["M31"] == "ROT_CW"
+check(_cmds["M32"] == "Z_DOWN" and _cmds["M31"] == "ROT_CCW"
       and _cmds["M30"] == "A2_BACK",
       "the jog command that drives INTO each switch matches its end")
 check(C.PLC_SENSOR_JOINT_INDEX == {"Z": 0, "ROT": 1, "A1": 2, "A2": 3},
@@ -1909,14 +2013,14 @@ check(any("driving INTO M32" in m for m, _t in sj.logged), "jogging DOWN into M3
 check(any(t == "warn" for _m, t in sj.logged), "  ...as a warning, not an error")
 check(any("not blocked" in m for m, _t in sj.logged), "  ...and says it is not blocked")
 sj.logged.clear()
-sj.warn_if_jogging_into_sensor("ROT_CW")
+sj.warn_if_jogging_into_sensor("ROT_CCW")
 check(any("driving INTO M31" in m for m, _t in sj.logged),
-      "turning CW into M31 warns — the opposite end from M32")
+      "turning CCW into M31 warns — the same end of travel as M32's")
 sj.logged.clear()
 sj.warn_if_jogging_into_sensor("Z_UP")
 check(not sj.logged, "jogging AWAY from a covered sensor is silent")
-sj.warn_if_jogging_into_sensor("ROT_CCW")
-check(not sj.logged, "  ...and so is turning CCW off M31")
+sj.warn_if_jogging_into_sensor("ROT_CW")
+check(not sj.logged, "  ...and so is turning CW off M31")
 sc = Sensed()          # nothing covered
 sc.warn_if_jogging_into_sensor("Z_DOWN")
 check(not sc.logged, "and a clear sensor never warns")
@@ -1943,10 +2047,14 @@ check(sp._sensor_violation(80.0, 100.0, 100.0, 100.0) is None,
 check(sp._sensor_violation(50.0, 100.0, 100.0, 100.0) is None,
       "  ...and an axis that does not move is never refused")
 sp7 = Sensed(covered=("M31",), pose=(50.0, 100.0, 100.0, 100.0))
-check(sp7._sensor_violation(50.0, 140.0, 100.0, 100.0) is not None,
-      "with M31 covered, turning RM further CW is refused")
-check(sp7._sensor_violation(50.0, 60.0, 100.0, 100.0) is None,
-      "  ...and turning CCW is allowed — M31 is at the max end")
+check(sp7._sensor_violation(50.0, 60.0, 100.0, 100.0) is not None,
+      "with M31 covered, turning RM further CCW is refused")
+check(sp7._sensor_violation(50.0, 140.0, 100.0, 100.0) is None,
+      "  ...and turning CW is allowed — M31 is at the min end")
+# The reported bug: RM parked on M31 at 0, and every ordinary point refused.
+sp8 = Sensed(covered=("M31",), pose=(0.0, 0.0, 0.0, 0.0))
+check(sp8._sensor_violation(45.0, 45.0, 0.0, 0.0) is None,
+      "  ...so a point at rot 45 runs from a home-parked RM, not 'further in'")
 check(sp7._sensor_violation(50.0, 100.0, 140.0, 100.0) is None,
       "  ...and A1M is unaffected, having no limit device at all")
 sp0 = Sensed(pose=(50.0, 100.0, 100.0, 100.0))
@@ -2007,7 +2115,7 @@ check(fw.index("plcServiceLimitLatch();") < fw.index("plcServiceLimitStops();\n"
       "  ...and it latches the end BEFORE the stop zeroes the direction it reads")
 
 print("\n  -- the firmware splits it the same way --")
-check("PLC_LIMIT_END_Z   = -1" in fw and "PLC_LIMIT_END_ROT = +1" in fw,
+check("PLC_LIMIT_END_Z   = -1" in fw and "PLC_LIMIT_END_ROT = -1" in fw,
       "the board agrees on which end each limit is at")
 check("runLegBlockedByLimit" in fw, "it refuses a P2P leg")
 check("PLC_SENSOR_BLOCKS_" not in fw,
@@ -2624,6 +2732,219 @@ check("width=128" not in _dlg_src,
 check("sw = max(sw, strip_w)" in _dlg_src,
       "the window is sized from the strip, so a seventh tab widens the window "
       "instead of being cut off")
+
+
+print("\n=== 32. the SCAN panel layout ===")
+import robot_sim.ui.xy_board as XYB
+import robot_sim.ui.scan_plot as SP
+
+# The two plots sit in the same slot of the same section and the operator
+# switches between them. At 360 against 560 the scan read as the lesser view,
+# and the same 200 mm of wall got half the pixels.
+check(C.SCAN_PLOT_SIZE == XYB.BOARD_PX,
+      "the scan plot is drawn at the same size as the P2P board")
+# The margin carries the degree labels ringing the plot, so it has to scale
+# with it -- a fixed 28 px was right at 360 and crowded them at 560.
+_small, _big = SP.ScanPolarPlot.__new__(SP.ScanPolarPlot), SP.ScanPolarPlot.__new__(SP.ScanPolarPlot)
+_small.size, _big.size = 360, 560
+check(abs(_big._radius_px / _big.size - _small._radius_px / _small.size) < 1e-9,
+      "  ...and its label margin is proportional, not a fixed pixel count")
+
+_panel_src = open(os.path.join(os.path.dirname(HERE), "robot_sim", "ui",
+                               "scan_panel.py"), encoding="utf-8").read()
+# Packed left and right, the gap between SAVE CSV and EMERGENCY STOP grew
+# with the window: two clusters with a hole in the middle.
+check('side="right"' not in _panel_src,
+      "no scan button is pinned to the right edge -- the row is one centred group")
+check(_panel_src.count("group.pack()") == 1,
+      "  ...packed with no side, which is what centres it")
+# ...but the stop keeps its distance. Flush against SAVE CSV it would be one
+# slip from the button reached for most.
+_estop = _panel_src.split('text="EMERGENCY STOP')[1]
+check('padx=(44, 0)' in _estop and '(0, 10)' not in _estop,
+      "  ...with EMERGENCY STOP set apart by a wider gap than the other buttons")
+
+_hint_src = _panel_src.split("def _refresh_scan_hint")[1]
+check(_hint_src.count(chr(8226)) == 5,
+      "the derived numbers are five bullets, one fact each, not three dense lines")
+
+# THE SECTION TITLE CARRIES THE SWEEP, and the sweep is a field now. It was
+# the constant "340 deg SWEEP" from when it was fixed, so the heading
+# contradicted the box under it.
+import robot_sim.ui.scan_panel as SPANEL
+
+
+class _TitleApp(SPANEL.ScanPanelMixin):
+    """Just enough for the title path: the field it reads, the label it
+    writes, and the mode that gates it."""
+
+    def __init__(self, mode="SCAN"):
+        self.root = tk.Tk()
+        self.mode = mode
+        self.scan_sweep_v = tk.StringVar(value="340")
+        self.motion_title_label = tk.Label(self.root, text="")
+
+
+_t = _TitleApp()
+_t.scan_sweep_v.set("320")
+_t._refresh_scan_title()
+check("320" in _t.motion_title_label.cget("text"),
+      "the SCAN heading follows the sweep field, it does not say a fixed 340")
+_t.scan_sweep_v.set("90")
+_t._refresh_scan_title()
+check("90" in _t.motion_title_label.cget("text")
+      and "320" not in _t.motion_title_label.cget("text"),
+      "  ...and it keeps following, rather than sticking at the first value")
+
+# It is read on EVERY keystroke, so it sees the way to a number as well as
+# the number. A heading that flickers through 4 deg is worse than one that
+# waits for a real value.
+for _partial in ("", "-", "abc"):
+    _t.scan_sweep_v.set(_partial)
+    check(_t._scan_mode_title() == "SCAN",
+          "  ...half-typed %r leaves a bare SCAN, not a wrong number"
+          % (_partial,))
+_t.scan_sweep_v.set("400")
+check(_t._scan_mode_title() == "SCAN",
+      "  ...and a sweep past the travel is not advertised in the heading either")
+
+# Typing in a scan box while another panel is on show must not retitle it.
+_p2p = _TitleApp(mode="P2P")
+_p2p.motion_title_label.config(text="3. MOTION CONTROL - POINT TO POINT")
+_p2p.scan_sweep_v.set("120")
+_p2p._refresh_scan_title()
+check("POINT TO POINT" in _p2p.motion_title_label.cget("text"),
+      "  ...and it only ever retitles the panel actually on show")
+
+# set_mode has to ASK for the title, not carry its own copy of the number.
+_safety_src = open(os.path.join(os.path.dirname(HERE), "robot_sim", "core",
+                                "safety.py"), encoding="utf-8").read()
+check("_scan_mode_title()" in _safety_src and "340° SWEEP" not in _safety_src,
+      "  ...and switching INTO scan reads the field too, with no literal 340 left")
+
+
+print("\n=== 33. angular motion profiles ===")
+# Ported from Compare_Angular_Motion_Profiles.m. The .m stays the reference:
+# if these drift, the graph in Settings draws something the report does not.
+import robot_sim.motion_profile as MP
+
+# The .m's own worked example -- 180 deg, 60 deg/s, 120 deg/s^2, rS = 0.5 --
+# solved by hand so the test does not ask the code to confirm itself:
+#   trapezoid  ta = 0.5, tv = 2.5              -> T = 3.50
+#   s-curve    tJ = tA = 0.25, tV = 2.25       -> T = 3.75, J = 480
+#   pure       tJ = 0.5, tA = 0, tV = 2.0      -> T = 4.00, J = 240
+_tr = MP.generate("TRAPEZOIDAL", 180, 60, 120, samples=4001)
+_sc = MP.generate("SCURVE", 180, 60, 120, samples=4001)
+_ps = MP.generate("PURE_SCURVE", 180, 60, 120, samples=4001)
+check(abs(_tr.T - 3.50) < 1e-9, "trapezoidal takes 3.50 s over the .m's example")
+check(abs(_sc.T - 3.75) < 1e-9, "  ...the S-curve 3.75 s, the price of bounded jerk")
+check(abs(_ps.T - 4.00) < 1e-9, "  ...and the pure S-curve 4.00 s, slowest of the three")
+check(abs(_sc.J - 480.0) < 1e-9 and abs(_ps.J - 240.0) < 1e-9,
+      "peak jerk is alphaMax/tJ — 480 and 240 deg/s^3")
+check(_tr.peak_jerk is None,
+      "trapezoidal reports NO peak jerk: it is infinite at the corners, and a "
+      "list of zeros would be a quieter lie than no answer")
+
+# Every profile must actually cover the angle asked for. Integrating the
+# velocity is an independent check -- it does not read s at all.
+def _integ(t, y):
+    return sum(0.5 * (y[k] + y[k + 1]) * (t[k + 1] - t[k]) for k in range(len(t) - 1))
+for _name, _p in (("trapezoidal", _tr), ("S-curve", _sc), ("pure S-curve", _ps)):
+    # Tolerance, not equality: the trapezoid rule is exact only where a
+    # sample lands on a corner of the curve, which the grid does not
+    # promise. 0.01 deg on 180 is still 0.006%.
+    check(abs(_integ(_p.t, _p.v) - 180.0) < 0.01,
+          "  ...%s's velocity integrates to the 180 deg commanded" % _name)
+    check(abs(_p.v[0]) < 1e-9 and abs(_p.v[-1]) < 1e-9,
+          "  ...%s starts and ends at rest" % _name)
+
+# A short move cannot reach omegaMax, and all three must degrade instead of
+# overshooting it.
+for _k in ("TRAPEZOIDAL", "SCURVE", "PURE_SCURVE"):
+    _short = MP.generate(_k, 5, 60, 120, samples=2001)
+    check(_short.Vp < 60.0 and abs(_integ(_short.t, _short.v) - 5.0) < 0.001,
+          "  ...a 5 deg move never reaches omegaMax on %s, and still lands" % _k)
+
+check(MP.generate("SCURVE", 180, 60, 120).kind == "SCURVE"
+      and MP.generate("PURE_SCURVE", 180, 60, 120).kind == "PURE_SCURVE",
+      "the pure S-curve is the SAME generator at r = 1, and says which it is")
+try:
+    MP.generate("NONE", 180, 60, 120)
+    check(False, "NONE is not a generatable profile")
+except ValueError:
+    check(True, "NONE is not a generatable profile — it means 'do not apply one'")
+
+
+print("\n  -- the Settings tab --")
+_ms = open(os.path.join(os.path.dirname(HERE), "robot_sim", "ui",
+                        "settings_dialog.py"), encoding="utf-8").read()
+check('("motion", "Motion", self._build_motion_tab)' in _ms,
+      "Motion is its own tab — a graph does not fit beside the speed fields")
+check(len(C.MOTION_PROFILES) == 4 and C.MOTION_PROFILE_NONE == "NONE",
+      "four choices: the three profiles and no profile")
+check(C.DEFAULT_MOTION_PROFILE == C.MOTION_PROFILE_NONE,
+      "  ...defaulting to NONE, so nothing changes for anyone who ignores it")
+check(C.MOTION_PROFILE_NONE != C.MOTION_PROFILE_TRAPEZOIDAL,
+      "  ...and NONE is kept distinct from TRAPEZOIDAL even though the shape "
+      "matches — 'not in play' and 'this shape, chosen' are different answers")
+
+_ma = App(); _ma.open_settings_dialog()
+check(_ma._motion_var.get() == C.DEFAULT_MOTION_PROFILE, "the tab opens on the stored value")
+for _k, _label, _blurb in C.MOTION_PROFILES:
+    _ma._motion_buttons[_k].invoke()
+    check(_ma._motion_var.get() == _k, "  ...choosing %s selects it" % _label)
+    if _k == C.MOTION_PROFILE_NONE:
+        check("No profile" in _ma._motion_summary_v.get(),
+              "  ...and NONE draws no curve, it says so instead")
+    else:
+        check("peak" in _ma._motion_summary_v.get(),
+              "  ...and %s reports its peaks" % _label)
+
+# ONE choice, not four toggles: two profiles at once has no meaning.
+check(len({id(b.opts.get("variable")) for b in _ma._motion_buttons.values()}) == 1,
+      "all four share one variable, so the choice is exclusive by construction")
+
+_ma._motion_var.set(C.MOTION_PROFILE_SCURVE)
+_ma_logged, _ma_sent = [], []
+_ma.log = lambda m, tag="default": _ma_logged.append(m)
+_ma.send = lambda c, log_tx=True: _ma_sent.append(c)
+_ma._apply_motion()
+check(_ma.settings[C.MOTION_PROFILE_KEY] == C.MOTION_PROFILE_SCURVE,
+      "APPLY stores the choice")
+check(any("SET_MOTION_PROFILE:SCURVE" in c for c in _ma_sent),
+      "  ...and SENDS it, so the board actually executes the shape")
+check(any("Jog still ramps linearly" in m for m in _ma_logged),
+      "  ...saying where it applies and where it does not — a setting that "
+      "looks like it changed more than it did is the worst kind")
+# The board holds it in RAM, like the limits, so a reconnect must re-send.
+_push = src_sd.split("def _push_settings_to_board")[1].split("\n    def ")[0]
+check("_send_motion_profile()" in _push,
+      "  ...and the handshake re-sends it, or a rebooted board would go back "
+      "to its own trapezoid while the panel still showed an S-curve")
+_ma._default_motion()
+check(_ma._motion_var.get() == C.DEFAULT_MOTION_PROFILE, "DEFAULTS returns it to NONE")
+
+# A file from a newer build naming a shape this one cannot draw must fall
+# back to NONE, not to whichever profile happens to be first.
+_mb = App(); _mb.settings[C.MOTION_PROFILE_KEY] = "QUINTIC"
+_mb.open_settings_dialog()
+check(_mb._motion_var.get() == C.MOTION_PROFILE_NONE,
+      "an unknown stored profile falls back to NONE, never to a different shape")
+
+# The graph is drawn against RM's OWN numbers, so it must follow the Speed
+# tab rather than a textbook 60/120.
+_mc = App(); _mc.open_settings_dialog()
+_omega, _alpha = _mc._motion_preview_limits()
+check(abs(_omega - C.rot_speed_deg_s(C.MASTER_RPM, C.DEFAULT_ROT_PCT)) < 1e-9,
+      "the preview uses RM's configured speed, not the .m's example")
+check(abs(_alpha - C.rot_accel_deg_s2(C.MASTER_ACC_RPM_S, C.DEFAULT_ROT_ACC_PCT)) < 1e-9,
+      "  ...and RM's own ACCEL percentage, which is not the speed one")
+_mc._speed_vars["rot_pct"].set("25")
+check(_mc._motion_preview_limits()[0] < _omega,
+      "  ...and it follows the Speed tab as it is typed")
+_mc._speed_vars["rot_pct"].set("")
+check(_mc._motion_preview_limits()[0] > 0,
+      "  ...while a half-typed speed falls back instead of raising")
 
 
 print("\n" + ("ALL PYTHON CHECKS PASSED" if not FAIL else "FAILURES: %s" % FAIL))

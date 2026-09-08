@@ -139,6 +139,18 @@ class Button(Widget):
     def invoke(self):
         fn = self.opts.get("command")
         return fn() if fn else None
+class Radiobutton(Widget):
+    """invoke() does what a click does: SET THE VARIABLE, then call the
+    command. A stub that only ran the command would let a test pass while
+    the selection never moved — the same vacuous-pass trap as a
+    swallowing Serial.println."""
+    def invoke(self):
+        var = self.opts.get("variable")
+        if var is not None and "value" in self.opts:
+            var.set(self.opts["value"])
+        fn = self.opts.get("command")
+        return fn() if fn else None
+class Checkbutton(Radiobutton): pass
 class Entry(Widget):
     def get(self): return self.opts.get("_text", "")
     # Real Text.insert takes trailing tag names; accept and ignore them.

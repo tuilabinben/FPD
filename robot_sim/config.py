@@ -123,6 +123,62 @@ ACCEL_KEYS = ("rot_acc_pct", "arm_acc_pct", "z_acc_pct")
 
 ACCEL_WIRE_KEYS = ("rot_acc_pct", "arm_acc_pct", "z_acc_pct")
 
+# ------------------------------------------------------------------
+# ANGULAR MOTION PROFILE — the SHAPE of the ramp, not its size.
+#
+# Ported from Compare_Angular_Motion_Profiles.m; the maths lives in
+# robot_sim/motion_profile.py and the .m stays the reference for it.
+#
+# The speed and accel percentages above say how fast and how hard. This
+# says what acceleration does BETWEEN those values, which is what the
+# motor actually hears:
+#
+#   NONE / TRAPEZOIDAL   acceleration steps -> jerk is infinite at the
+#                        corners. On an open-loop stepper with no encoder
+#                        that is where steps are lost.
+#   SCURVE               rS = 0.5 of the ramp eases in and out, 7 phases,
+#                        jerk bounded
+#   PURE_SCURVE          rS = 1, no constant-acceleration phase at all;
+#                        smoothest, and the slowest for a given limit
+#
+# NONE and TRAPEZOIDAL are kept apart on purpose even though the shape is
+# the same. NONE means "this setting is not in play, the board ramps the
+# way it always did"; TRAPEZOIDAL is a positive choice of that shape. A
+# menu whose off position is spelled the same as one of its options cannot
+# say which of the two the operator meant.
+# ------------------------------------------------------------------
+MOTION_PROFILE_KEY = "motion_profile"
+
+MOTION_PROFILE_NONE = "NONE"
+MOTION_PROFILE_TRAPEZOIDAL = "TRAPEZOIDAL"
+MOTION_PROFILE_SCURVE = "SCURVE"
+MOTION_PROFILE_PURE_SCURVE = "PURE_SCURVE"
+
+# (key, menu label, one line under it)
+MOTION_PROFILES = (
+    (MOTION_PROFILE_NONE, "No profile",
+     "The board ramps the way it always has. Nothing here is applied."),
+    (MOTION_PROFILE_TRAPEZOIDAL, "Trapezoidal",
+     "Constant acceleration, cruise, constant deceleration. Fastest, and "
+     "the jerk at each corner is theoretically infinite."),
+    (MOTION_PROFILE_SCURVE, "S-curve",
+     "Seven phases, rS = 0.5. Half the ramp eases the acceleration in and "
+     "out, so jerk is bounded. A little slower."),
+    (MOTION_PROFILE_PURE_SCURVE, "Pure S-curve",
+     "rS = 1 — no constant-acceleration phase at all. Smoothest on the "
+     "drivetrain, and the slowest of the three."),
+)
+MOTION_PROFILE_KEYS = tuple(k for k, _l, _d in MOTION_PROFILES)
+
+DEFAULT_MOTION_PROFILE = MOTION_PROFILE_NONE
+
+# What the preview graph draws. A profile has no shape until it is given an
+# angle and two limits, so the panel picks a representative RM move and
+# says which one — a curve with no numbers on it would be decoration.
+# 180 deg is the .m's own worked example, which makes the two comparable.
+MOTION_PREVIEW_ANGLE_DEG = 180.0
+MOTION_PREVIEW_SAMPLES = 360
+
 ROT_ACC_MAX_DEG_S2 = 400.0
 Z_ACC_MAX_MM_S2 = 400.0
 ARM_ACC_RPM_MAX = 2000.0
@@ -150,22 +206,21 @@ ARM_MOTOR_RPM_MAX = 400.0
 # ------------------------------------------------------------------
 import math
 
-# SOLVED FROM TWO BENCH MEASUREMENTS, not mophong_init.m.
-# Only the two SUMS below measured; split within each pair not, since reach curve only uses sums:
-#   R = (a3+a6) - (a4+a5) * cos(frog-leg angle)
-#   HOME, frog-leg 0deg:   (a3+a6)-(a4+a5) = 240mm  measured
-#   straight, 180deg:      (a3+a6)+(a4+a5) = 605mm  measured
-#   -> a3+a6 = 422.5, a4+a5 = 182.5
+# THE MATLAB LINK SET, restored on request together with the base-angle frame below.
 #
-# a3 keeps old 45.0 (base radius unchanged), a6 carries correction; a4/a5 stay equal. If links
-# measured individually later, only sums must be preserved.
+#   R = (a3+a6) - (a4+a5) * cos(th3_cad)     a3+a6 = 293.2, a4+a5 = 320
 #
-# .m file still says 45/160/160/248.2 -> 133.2..613.2mm. mophong_init.m NOT reference for this
-# machine — wrong in several places, abandoned as ground truth. Bench measurements above are.
+# HOME is th3_cad 60 (base -30) -> R = 133.2 mm, CONFIRMED on the machine. Straight is
+# th3_cad 180 (fold 120) -> 613.2 mm. This replaces the bench-solved 422.5/182.5 pair that
+# read 240 mm at home: that pair was solved from a 240/605 measurement taken in the old
+# frog-leg-from-home frame, and the machine's own home pose is the 133 mm one.
+#
+# Only the two SUMS matter — the reach curve uses nothing else — so if the links are ever
+# measured individually, preserve a3+a6 and a4+a5.
 A3_MM = 45.0
-A4_MM = 91.25
-A5_MM = 91.25
-A6_MM = 377.5
+A4_MM = 160.0
+A5_MM = 160.0
+A6_MM = 248.2
 
 D_BASE_MM = 388.0
 D3_ARM1_MM = 50.0
@@ -217,6 +272,14 @@ Z_MM_PER_MOTOR_REV = 20.0
 def rot_speed_deg_s(master_rpm, pct):
     """Turntable speed (°/s) for a master RPM and RM's percentage."""
     return master_rpm * (pct / 100.0) * ROT_RPM_SCALE * 360.0 / (60.0 * I_RM_TOTAL)
+
+
+def rot_accel_deg_s2(master_acc_rpm_s, pct):
+    """Turntable acceleration (°/s²). Same shape as the speed above, and
+    the same shape as the firmware's rotAccDegS2 — the ramp is scaled from
+    its OWN percentage, which is the whole point of the accel family."""
+    return (master_acc_rpm_s * (pct / 100.0) * ROT_RPM_SCALE
+            * 360.0 / (60.0 * I_RM_TOTAL))
 
 
 def arm_motor_speed_deg_s(master_rpm, pct):
@@ -276,29 +339,34 @@ ACCEL_PREVIEW_BY_KEY = {p[1]: p for p in ACCEL_PREVIEW}
 ARM_LINK_SUM_MM = A4_MM + A5_MM            
 ARM_RADIAL_OFFSET_MM = A3_MM + A6_MM       
 
-# MEASURED ON MACHINE. mophong_init.m no longer reference.
-# .m frame put HOME at th3_cad 60deg, 133.2mm reach, arm straight at 613.2mm. Neither survived
-# contact w/ machine: HOME measures 240mm from turntable axis, arm straight at ~605mm. Those
-# two numbers are what A3..A6 above solved from — see note beside them.
+# THE ANGLE FRAME. Three names for one physical pose, and only the first is stored anywhere:
 #
-# So HOME is frog-leg 0, not 60. Frog-leg opens full 180deg over travel, base link swings half
-# (0..90deg) since knee geared 2:1 vs shoulder — makes base = fold/2 exact, not approximation.
+#   motor deg   what the board counts. 0 at HOME. = fold * ARM_GEAR_RATIO
+#   fold deg    frog-leg rotation FROM HOME, 0..120. = th3_cad - ARM_ZERO_CAD_DEG
+#   base deg    what the operator reads: -30 at HOME, +60 at the working maximum
 #
-# CONSEQUENCE: MATLAB parity sweep in tests/python_check.py can't pass anymore. Intended — .m
-# found wrong in several places, dropped as ground truth. Do NOT adjust numbers here to make
-# sweep green; re-point test at these measurements or retire it.
-ARM_ZERO_CAD_DEG = 0.0
+# ARM_ZERO_CAD_DEG is 60 again: HOME is the CAD frame's th3_cad 60 pose, R = 133.2 mm.
+ARM_ZERO_CAD_DEG = 60.0
 
 FOLD_ANGLE_HOME_DEG = 0.0
-# Rated working reach 575mm sits BELOW 605mm straight-arm pose on purpose: 180deg is
-# singularity, no program should plan up against it. 146.68deg = fold angle putting wafer
-# centre at 575mm under measured geometry.
-FOLD_ANGLE_SPEC_MAX_DEG = 146.68
+# THE WORKING MAXIMUM, base +60 = th3_cad 150 = R 570.3 mm. It is a NOTE, not a limit:
+# nothing refuses a target past it, and the default elbow band runs to the full travel. What
+# it is for is the panel line and the boot banner -- the pose the arm is meant to work up to.
+FOLD_ANGLE_SPEC_MAX_DEG = 90.0
 FOLD_ANGLE_MIN_DEG = FOLD_ANGLE_HOME_DEG
-FOLD_ANGLE_MAX_DEG = 180.0
+# Straight out, th3_cad 180. The singularity, and the end of the arithmetic.
+FOLD_ANGLE_MAX_DEG = 120.0
 
-# Straight out = singularity; keeps same 10deg warning before it that old 110-of-120 gave.
-FOLD_ANGLE_SINGULARITY_WARN_DEG = 170.0
+# 10 deg short of straight, as before.
+FOLD_ANGLE_SINGULARITY_WARN_DEG = 110.0
+
+# THE BASE ANGLE IS THE DISPLAY FRAME, 1:1 with fold and offset 90 deg from th3_cad:
+#     base = fold + ARM_ZERO_CAD_DEG - BASE_ANGLE_CAD_OFFSET_DEG = fold - 30
+# HOME reads -30, the working maximum +60, straight +90. Wire protocol, taught boundaries and
+# everything the board stores stay MOTOR degrees.
+BASE_ANGLE_CAD_OFFSET_DEG = 90.0
+BASE_ANGLE_HOME_DEG = FOLD_ANGLE_HOME_DEG + ARM_ZERO_CAD_DEG - BASE_ANGLE_CAD_OFFSET_DEG
+BASE_ANGLE_MAX_DEG = FOLD_ANGLE_SPEC_MAX_DEG + ARM_ZERO_CAD_DEG - BASE_ANGLE_CAD_OFFSET_DEG
 
 
 def _reach_at(fold_deg):
@@ -308,8 +376,27 @@ def _reach_at(fold_deg):
         math.radians(fold_deg + ARM_ZERO_CAD_DEG))
 
 
-ARM_MIN_REACH_MM = _reach_at(FOLD_ANGLE_MIN_DEG)   
-ARM_MAX_REACH_MM = _reach_at(FOLD_ANGLE_MAX_DEG)   
+ARM_MIN_REACH_MM = _reach_at(FOLD_ANGLE_MIN_DEG)   # 133.2 mm, base -30, HOME
+ARM_MAX_REACH_MM = _reach_at(FOLD_ANGLE_MAX_DEG)   # 613.2 mm, base +90, straight
+# The working maximum, base +60. NOT enforced anywhere -- ARM_MAX_REACH_MM above is where the
+# arithmetic stops, and the taught band is where the machine stops.
+ARM_SPEC_REACH_MM = _reach_at(FOLD_ANGLE_SPEC_MAX_DEG)   # 570.3 mm
+
+
+def arm_home_note():
+    """Where HOME is. The half JOYSTICK shows, on its own."""
+    return f"HOME = base {BASE_ANGLE_HOME_DEG:+.0f}° · R {ARM_MIN_REACH_MM:.1f} mm"
+
+
+def arm_max_note():
+    """Where the working maximum is. NOT a limit — see FOLD_ANGLE_SPEC_MAX_DEG."""
+    return f"MAX = base {BASE_ANGLE_MAX_DEG:+.0f}° · R {ARM_SPEC_REACH_MM:.1f} mm"
+
+
+def arm_frame_note():
+    """Both poses, for P2P. JOYSTICK takes arm_home_note() alone: jogging is
+    where you are, and a target ceiling is a P2P question."""
+    return f"{arm_home_note()}   |   {arm_max_note()}"
 
 ARM_LINK_MM = ARM_LINK_SUM_MM / 2.0
 
@@ -413,13 +500,13 @@ LIMIT_FIELDS = {
                     ROT_MIN_DEG, ROT_MAX_DEG, DEFAULT_LIM_ROT_MIN, 2),
     "lim_rot_max": ("CW limit",        "ROT", "MAX", "°",
                     ROT_MIN_DEG, ROT_MAX_DEG, DEFAULT_LIM_ROT_MAX, 2),
-    "lim_a1_min":  ("Taught limit A",  "A1",  "MIN", "motor °",
+    "lim_a1_min":  ("Taught limit A",  "A1",  "MIN", "base °",
                     None, None, DEFAULT_LIM_A_MIN, 2),
-    "lim_a1_max":  ("Taught limit B",  "A1",  "MAX", "motor °",
+    "lim_a1_max":  ("Taught limit B",  "A1",  "MAX", "base °",
                     None, None, DEFAULT_LIM_A_MAX, 2),
-    "lim_a2_min":  ("Taught limit A",  "A2",  "MIN", "motor °",
+    "lim_a2_min":  ("Taught limit A",  "A2",  "MIN", "base °",
                     None, None, DEFAULT_LIM_A_MIN, 2),
-    "lim_a2_max":  ("Taught limit B",  "A2",  "MAX", "motor °",
+    "lim_a2_max":  ("Taught limit B",  "A2",  "MAX", "base °",
                     None, None, DEFAULT_LIM_A_MAX, 2),
 }
 
@@ -431,8 +518,8 @@ LIMIT_KEYS = tuple(LIMIT_FIELDS)
 LIMIT_GROUPS = (
     ("ZM — lift",         "lim_z_min",   "lim_z_max",   1.0),
     ("RM — turntable",    "lim_rot_min", "lim_rot_max", 1.0),
-    ("A1M — arm 1 elbow (motor °)", "lim_a1_min",  "lim_a1_max",  None),
-    ("A2M — arm 2 elbow (motor °)", "lim_a2_min",  "lim_a2_max",  None),
+    ("A1M — arm 1 elbow (base °)", "lim_a1_min",  "lim_a1_max",  None),
+    ("A2M — arm 2 elbow (base °)", "lim_a2_min",  "lim_a2_max",  None),
 )
 
 PID_FIELDS = (
@@ -493,9 +580,16 @@ PLC_DEVICE_MAP = (
 # M30=ZM order was an assumption, and it made ZM watch a bit that sits at 1 — so every
 # Z_DOWN was refused wherever the carriage really was. Keep this in step with
 # PLC_M_LIMIT_* in the firmware; python_check.py asserts the two agree.
+#
+# ALL THREE SIT AT THE MINIMUM, RM INCLUDED. M31 read +1/CW for a while and
+# that pinned the turntable: HOME drives RM onto M31 and zeroes the counter
+# there, so RM's 0 IS the switch, and calling 0 the MAXIMUM end refused every
+# P2P point with rot > 0 as "further in" while CCW ran under lim_rot_min = 0.
+# The home state -- M30 and M31 and M32 together, at the minimum of all four
+# axes -- only makes sense with this switch at RM's home end.
 PLC_SENSOR_PANEL = (
     ("M32", "ZM  lift",      "Z",   "Z_DOWN",  -1),
-    ("M31", "RM  turntable", "ROT", "ROT_CW",  +1),
+    ("M31", "RM  turntable", "ROT", "ROT_CCW", -1),
     ("M30", "A2M arm 2",     "A2",  "A2_BACK", -1),
 )
 
@@ -571,7 +665,10 @@ ROT_HOME_DEG = 0.0
 ARM_HOME_DEG = FOLD_ANGLE_HOME_DEG * ARM_GEAR_RATIO    
 Z_HOME_MM = D1_MIN_MM
 
-DEFAULT_POINT_A = (240.0, 0.0, 45.0)
+# X0 IS THE HOME REACH, not a round number near it: the panel opens on the pose the arm is
+# actually in, so the first thing read is where the machine is rather than a target it has to
+# be driven to. Derived, so a frame change moves it instead of leaving a stale literal.
+DEFAULT_POINT_A = (ARM_MIN_REACH_MM, 0.0, 45.0)
 DEFAULT_POINT_B = (250.0, 250.0, 135.0)
 
 ARM_CONFIGS = ("A1M", "A2M", "BOTH")
@@ -626,7 +723,7 @@ JOG_KEY_HINT = _kb.to_hint(_kb.active_map())
 
 LOG_MAX_LINES = 800
 
-WINDOW_TITLE = "Robot Motion Controller — P2P + Joystick (v5)"
+WINDOW_TITLE = "Robot Motion Controller — P2P · Joystick · Scan (v5)"
 WINDOW_GEOMETRY = "1400x900"
 WINDOW_MIN_SIZE = (900, 500)
 
@@ -704,7 +801,11 @@ SCAN_MISS_WARN_FRACTION = 0.25
 # cannot be compared with the layer above it by eye.
 SCAN_PLOT_MIN_RANGE_MM = 200.0
 SCAN_PLOT_RINGS = 4
-SCAN_PLOT_SIZE = 360
+# Same as the P2P board's BOARD_PX, deliberately. The two plots sit in the
+# same slot of the same section and the operator switches between them --
+# at 360 against 560 the scan looked like the lesser view of the two, and
+# a wall 200 mm out was drawn in half the pixels P2P gave the same 200 mm.
+SCAN_PLOT_SIZE = 560
 # Repaint on a timer, not per point: 341 points a layer.
 SCAN_REDRAW_MS = 250
 

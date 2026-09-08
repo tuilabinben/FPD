@@ -135,12 +135,14 @@ class SafetyMixin:
         self.send("HOME")
 
         self.jog_status_var.set("Homing...")
-        self.status_var.set("HOMING — waiting for the PLC to return DONE...")
-        # HOME is now a request to the PLC, which owns the reference
-        # position — this controller doesn't drive the axes itself.
-        self.log("HOME sent. ClearCore holds its IO-0 output ON into the PLC's X0 "
-                 "input — a wire, not a network message — and waits for DONE (M1). "
-                 "Every other motion control is locked except ESTOP.")
+        self.status_var.set("HOMING — driving each axis onto its switch...")
+        # The BOARD homes. It reads M30..M32 and stops each axis on its own
+        # switch; the PLC is never asked, and a dead read refuses the home.
+        self.log("HOME sent. ClearCore drives ZM, RM and A2M onto their own "
+                 "travel switches (M32/M31/M30) at reduced speed and stops each "
+                 "one on its own bit — the PLC is not asked. A1M has no switch "
+                 "and does not move. Every motion control except ESTOP is locked."
+                 )
 
         if not self._hardware_live():
             self._schedule("_home_sim_job", 800, self._simulate_home_complete)
@@ -267,8 +269,10 @@ class SafetyMixin:
         # naming the OTHER one leaves the third packed underneath.
         frames = {"P2P": self.p2p_frame, "JOG": self.jog_frame,
                   "SCAN": self.scan_frame}
+        # The scan title carries the sweep, and the sweep is a FIELD now, so
+        # it is read rather than spelled. It said 340 while the box said 320.
         titles = {"P2P": "POINT TO POINT", "JOG": "JOYSTICK",
-                  "SCAN": "SCAN — 340° SWEEP"}
+                  "SCAN": self._scan_mode_title()}
         for key, frame in frames.items():
             if key != mode:
                 frame.pack_forget()

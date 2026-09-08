@@ -18,6 +18,8 @@ from ..config import (
     DEFAULT_SCAN_SLICE_GAP_MM,
     DEFAULT_SCAN_SWEEP_DEG,
     SCAN_SENSOR_KINDS,
+    SCAN_SWEEP_MAX_DEG,
+    SCAN_SWEEP_MIN_DEG,
 )
 from ..theme import (
     ACCENT_GREEN,
@@ -158,41 +160,82 @@ class ScanPanelMixin:
         row = tk.Frame(parent, bg=PANEL_BG)
         row.pack(fill="x", pady=(12, 0))
 
+        # CENTRED AS ONE GROUP, not pinned to the two edges. Packed left and
+        # right, the gap between SAVE CSV and EMERGENCY STOP grew with the
+        # window, so on a wide screen the row read as two unrelated clusters
+        # with a hole in the middle and the eye had to cross it.
+        group = tk.Frame(row, bg=PANEL_BG)
+        group.pack()
+
         self.btn_scan_start = RoundedButton(
-            row, text="START SCAN", icon="◎", bg_color=ACCENT_GREEN,
+            group, text="START SCAN", icon="◎", bg_color=ACCENT_GREEN,
             fg_color=INK_DARK, width=170, height=42, command=self.start_scan)
         self.btn_scan_start.pack(side="left", padx=(0, 10))
 
         # NOT in motion_lock_widgets: that list dies while moving, which
         # is when STOP has to work.
         self.btn_scan_stop = RoundedButton(
-            row, text="STOP SCAN", icon="■", bg_color=SURFACE,
+            group, text="STOP SCAN", icon="■", bg_color=SURFACE,
             fg_color=TEXT_LIGHT, width=150, height=42, command=self.stop_scan)
         self.btn_scan_stop.pack(side="left", padx=(0, 10))
 
         self.btn_scan_read = RoundedButton(
-            row, text="TEST READ", icon="📏", bg_color=SURFACE,
+            group, text="TEST READ", icon="📏", bg_color=SURFACE,
             fg_color=TEXT_LIGHT, width=150, height=42,
             command=self.scan_test_read)
         self.btn_scan_read.pack(side="left", padx=(0, 10))
 
         self.btn_scan_save = RoundedButton(
-            row, text="SAVE CSV…", icon="💾", bg_color=SURFACE,
+            group, text="SAVE CSV…", icon="💾", bg_color=SURFACE,
             fg_color=TEXT_LIGHT, width=150, height=42,
             command=self.save_scan_csv)
-        self.btn_scan_save.pack(side="left", padx=(0, 10))
+        self.btn_scan_save.pack(side="left")
 
         # Same audited path as the other panels: one stop, three buttons.
-        RoundedButton(row, text="EMERGENCY STOP  SPACE", icon="⏹",
+        #
+        # It travels with the group now rather than sitting at the far right,
+        # but it keeps a WIDER GAP than the 10 px between the others. Grouped
+        # flush against SAVE CSV it would be one slip away from the button the
+        # operator reaches for most, and the gap is the only thing separating
+        # a stop from a save.
+        RoundedButton(group, text="EMERGENCY STOP  SPACE", icon="⏹",
                       bg_color=ACCENT_RED, fg_color=TEXT_LIGHT, width=260,
                       height=42, command=self.emergency_stop_all).pack(
-            side="right")
+            side="left", padx=(44, 0))
 
         self.motion_lock_widgets += [self.btn_scan_read]
+
+    # ── the section title carries the sweep ──────────────────────────
+    def _scan_mode_title(self):
+        """"SCAN — 320° SWEEP", from the field the operator typed in.
+
+        It was the constant "340° SWEEP" from when the sweep was fixed, so
+        the heading contradicted the box under it the moment the sweep
+        became settable.
+
+        Falls back to a bare "SCAN" rather than a stale or half-typed
+        number: this is read on every keystroke, so it sees "3", "" and "-"
+        on the way to "320", and a heading that flickers through 3° is
+        worse than one that says nothing until the number is one.
+        """
+        try:
+            sweep = float(self.scan_sweep_v.get())
+        except (AttributeError, TypeError, ValueError):
+            return "SCAN"
+        if not SCAN_SWEEP_MIN_DEG <= sweep <= SCAN_SWEEP_MAX_DEG:
+            return "SCAN"
+        return f"SCAN — {sweep:g}° SWEEP"
+
+    def _refresh_scan_title(self):
+        label = getattr(self, "motion_title_label", None)
+        if label is None or getattr(self, "mode", None) != "SCAN":
+            return                      # built, but not the panel on show
+        label.config(text="3. MOTION CONTROL — " + self._scan_mode_title())
 
     # ── live readouts ────────────────────────────────────────────────
     def _refresh_scan_hint(self, *_a):
         """Every keystroke: what the four numbers work out as."""
+        self._refresh_scan_title()
         plan, error = self.scan_current_plan()
         if error:
             self.scan_hint_v.set("—")
@@ -200,13 +243,18 @@ class ScanPanelMixin:
             self.scan_warn_v.set(error)
             self.scan_warn_lbl.config(fg=ACCENT_RED)
             return
+        # ONE DERIVED FACT PER BULLET. These were three dense lines with the
+        # facts separated by "·", which reads as prose and has to be picked
+        # apart to answer a single question. They are five separate answers
+        # and are listed as five.
         self.scan_hint_v.set(
-            f"{plan['deg_step']:.2f}° between points · "
-            f"{plan['points_in_slice']} points a slice\n"
-            f"RM {plan['rot_deg_s']:.1f}°/s · {plan['slice_seconds']:.2f} s a "
-            f"slice · {plan['sweep_seconds_total']:.0f} s of sweeping\n"
-            f"ZM {plan['z_travel_mm']:.1f} mm total, ceiling "
-            f"{plan['z_travel_max_mm']:g} mm")
+            f"• {plan['deg_step']:.2f}° between points\n"
+            f"• {plan['points_in_slice']} points a slice\n"
+            f"• RM turns {plan['rot_deg_s']:.1f}°/s\n"
+            f"• {plan['slice_seconds']:.2f} s a slice · "
+            f"{plan['sweep_seconds_total']:.0f} s of sweeping\n"
+            f"• ZM rises {plan['z_travel_mm']:.1f} mm "
+            f"(ceiling {plan['z_travel_max_mm']:g} mm)")
         self.scan_hint_lbl.config(
             fg=ACCENT_ORANGE if plan["z_travel_over"] else ACCENT_MINT)
         self.scan_warn_v.set("  ".join("⚠ " + w for w in plan["warnings"]))

@@ -31,6 +31,9 @@ import math
 from .config import (
     ARM2_Z_DROP_MM,
     ARM_GEAR_RATIO,
+    BASE_ANGLE_CAD_OFFSET_DEG,
+    BASE_ANGLE_HOME_DEG,
+    BASE_ANGLE_MAX_DEG,
     ARM_LINK_SUM_MM,
     ARM_RADIAL_OFFSET_MM,
     D1_MAX_MM,
@@ -118,7 +121,8 @@ def fold_angle_to_reach(fold_deg):
 
         R = A3 + A6 - (A4 + A5) * cos(fold + ARM_ZERO_CAD_DEG)
 
-    0° -> 133.2 mm (retracted home), 120° -> 613.2 mm (straight arm).
+    0° -> 133.2 mm (HOME, base -30), 90° -> 570.3 mm (base +60, the
+    working maximum), 120° -> 613.2 mm (straight arm, base +90).
     """
     return ARM_RADIAL_OFFSET_MM - ARM_LINK_SUM_MM * math.cos(
         math.radians(fold_deg + ARM_ZERO_CAD_DEG))
@@ -153,29 +157,30 @@ def motor_deg_from_fold_angle(fold_deg):
 # ----------------------------------------------------------------------
 # Arm BASE angle — number operator reads off machine
 # ----------------------------------------------------------------------
-# Base (shoulder) link swings 0deg at HOME (240mm reach) to 90deg at rated
-# working reach 575mm. Scale anchored on FOLD_ANGLE_SPEC_MAX_DEG
-# (146.68deg fold = 575mm reach = 90deg base) not geometric singularity at
-# 180deg — singularity never valid target, anchoring there would make
-# "straight out" read ~73deg instead of the 90 operator sees on machine.
+# 1:1 with the frog-leg angle, offset 90deg from the CAD frame:
+#
+#     base = th3_cad - 90 = fold + ARM_ZERO_CAD_DEG - 90
+#
+#   base -30  = fold   0 = th3_cad  60 = HOME,             R 133.2 mm
+#   base +60  = fold  90 = th3_cad 150 = working maximum,  R 570.3 mm
+#   base +90  = fold 120 = th3_cad 180 = straight,         R 613.2 mm
+#
+# NOT a scale factor. The previous frame stretched fold onto 0..90 base
+# through 90/146.68, so one base degree was not one arm degree and the two
+# numbers drifted apart across the travel.
 #
 # DISPLAY ONLY. Wire protocol, taught boundaries, everything board stores
 # stay MOTOR degrees — see CLAUDE.md section 1b.
-BASE_ANGLE_MAX_DEG = 90.0
 
 
 def base_angle_from_fold_angle(fold_deg):
-    """Frog-leg rotation from home (deg) -> arm base angle (deg).
-
-    0 deg fold -> 0 deg base (240 mm, retracted home).
-    FOLD_ANGLE_SPEC_MAX_DEG -> 90 deg base (575 mm, rated working reach).
-    """
-    return fold_deg * (BASE_ANGLE_MAX_DEG / FOLD_ANGLE_SPEC_MAX_DEG)
+    """Frog-leg rotation from home (deg) -> arm base angle (deg)."""
+    return fold_deg + ARM_ZERO_CAD_DEG - BASE_ANGLE_CAD_OFFSET_DEG
 
 
 def fold_angle_from_base_angle(base_deg):
     """Arm base angle (deg) -> frog-leg rotation from home."""
-    return base_deg * (FOLD_ANGLE_SPEC_MAX_DEG / BASE_ANGLE_MAX_DEG)
+    return base_deg + BASE_ANGLE_CAD_OFFSET_DEG - ARM_ZERO_CAD_DEG
 
 
 def base_angle_from_motor_deg(motor_deg):

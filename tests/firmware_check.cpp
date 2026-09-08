@@ -199,49 +199,56 @@ int main() {
   check(saw("[ERROR] SET_SPEED needs"), "the old GUI's 5-field form is now refused");
   run("SET_SPEED:150,375,75,125,50,75,125,50");   // restore for anything after this
 
-  printf("\n=== B. THE ARM ANGLE IS ROTATION FROM HOME ===\n");
-  check(fabs(FOLD_ANGLE_HOME_DEG - 0.0) < 1e-9, "home is 0 deg, not 60");
+  printf("\n=== B. HOME IS BASE -30, THE WORKING MAX IS BASE +60 ===\n");
+  check(fabs(FOLD_ANGLE_HOME_DEG - 0.0) < 1e-9, "home is 0 fold deg (base -30)");
   check(fabs(FOLD_ANGLE_MIN_DEG - 0.0) < 1e-9, "travel starts at 0");
-  check(fabs(FOLD_ANGLE_MAX_DEG - 180.0) < 1e-9, "and ends at 180, the straight arm");
-  // The CAD offset went to 0 with the measured links: fold 0 IS the
-  // retracted pose, so there is no frame shift left to carry.
-  check(fabs(ARM_ZERO_CAD_DEG - 0.0) < 1e-9, "0 deg from home IS the retracted pose");
+  check(fabs(FOLD_ANGLE_MAX_DEG - 120.0) < 1e-9, "and ends at 120, the straight arm");
+  // HOME is the CAD frame's th3_cad 60 pose again, so the offset is 60 and
+  // the base angle the operator reads is th3_cad - 90.
+  check(fabs(ARM_ZERO_CAD_DEG - 60.0) < 1e-9, "fold 0 IS th3_cad 60, the retracted pose");
+  check(fabs(FOLD_ANGLE_SPEC_MAX_DEG - 90.0) < 1e-9,
+        "the working maximum is fold 90 = base +60");
   check(fabs(currentA1() - 0.0) < 1e-6, "A1M reads 0 at the reference pose");
   check(fabs(currentA2() - 0.0) < 1e-6, "A2M too");
 
-  printf("\n  -- the reach curve is unchanged, only its labels moved --\n");
-  const double R_MIN_MM = ARM_RADIAL_OFFSET_MM - ARM_LINK_SUM_MM;   // 240.0
-  const double R_MAX_MM = ARM_RADIAL_OFFSET_MM + ARM_LINK_SUM_MM;   // 605.0
-  check(fabs(reachFromFoldAngle(0.0)   - R_MIN_MM) < 0.05, "0 deg   -> 240 mm (retracted)");
-  check(fabs(reachFromFoldAngle(180.0) - R_MAX_MM) < 0.05, "180 deg -> 605 mm (straight)");
-  check(fabs(reachFromFoldAngle(FOLD_ANGLE_SPEC_MAX_DEG) - 575.0) < 0.5,
-        "146.68  -> 575 mm (JEL drawing)");
-  check(fabs(foldAngleFromReach(R_MIN_MM) - 0.0)   < 0.05, "240 mm -> 0 deg");
-  check(fabs(foldAngleFromReach(R_MAX_MM) - 180.0) < 0.05, "605 mm -> 180 deg");
+  printf("\n  -- the reach curve is the MATLAB link set --\n");
+  const double R_MIN_MM  = 133.2;    // fold 0,   base -30, HOME
+  const double R_MAX_MM  = 613.2;    // fold 120, base +90, straight
+  const double R_SPEC_MM = 570.33;   // fold 90,  base +60, working maximum
+  check(fabs(ARM_RADIAL_OFFSET_MM - 293.2) < 1e-9
+        && fabs(ARM_LINK_SUM_MM - 320.0) < 1e-9,
+        "a3+a6 = 293.2 and a4+a5 = 320, the MATLAB sums");
+  check(fabs(reachFromFoldAngle(0.0)   - R_MIN_MM) < 0.05, "fold 0   -> 133.2 mm (HOME)");
+  check(fabs(reachFromFoldAngle(120.0) - R_MAX_MM) < 0.05, "fold 120 -> 613.2 mm (straight)");
+  check(fabs(reachFromFoldAngle(FOLD_ANGLE_SPEC_MAX_DEG) - R_SPEC_MM) < 0.05,
+        "fold 90  -> 570.3 mm (base +60, the working maximum)");
+  check(fabs(foldAngleFromReach(R_MIN_MM) - 0.0)   < 0.05, "133.2 mm -> fold 0");
+  check(fabs(foldAngleFromReach(R_MAX_MM) - 120.0) < 0.05, "613.2 mm -> fold 120");
   check(fabs(foldAngleFromReach(reachFromFoldAngle(37.5)) - 37.5) < 1e-6,
         "the pair round-trips");
-  check(fabs(FOLD_SINGULARITY_WARN_DEG - 170.0) < 1e-9,
+  check(fabs(FOLD_SINGULARITY_WARN_DEG - 110.0) < 1e-9,
         "the singularity warning sits just short of the straight arm");
 
   printf("\n  -- reachBandFor finds extremes INSIDE the band, in the new frame --\n");
   { double lo, hi;
-    reachBandFor(0.0, 180.0, lo, hi);
+    reachBandFor(0.0, 120.0, lo, hi);
     check(fabs(lo - R_MIN_MM) < 0.05 && fabs(hi - R_MAX_MM) < 0.05,
-          "the normal band 0..180 -> 240..605 mm");
+          "the normal band 0..120 -> 133.2..613.2 mm");
     // cos peaks where fold + ARM_ZERO_CAD_DEG is a multiple of 180, so with
-    // the offset now 0 that is 0, 180, 360, -180.
+    // the offset back at 60 those are fold 120, 300, -60.
     reachBandFor(-200.0, 400.0, lo, hi);
-    check(fabs(lo - R_MIN_MM) < 0.5 && fabs(hi - R_MAX_MM) < 0.05,
+    check(fabs(lo - (ARM_RADIAL_OFFSET_MM - ARM_LINK_SUM_MM)) < 0.5
+          && fabs(hi - R_MAX_MM) < 0.05,
           "a wide taught band -200..400 spans the WHOLE curve, not just its ends");
-    reachBandFor(179.0, 181.0, lo, hi);
+    reachBandFor(119.0, 121.0, lo, hi);
     check(fabs(hi - R_MAX_MM) < 0.05,
-          "a band straddling 180 still finds the peak between its endpoints"); }
+          "a band straddling 120 still finds the peak between its endpoints"); }
 
   printf("\n=== C. taught boundaries: no envelope, unordered ===\n");
   isHomed = true;
   run("RESET_LIMITS");
   check(fabs(limA1Min - 0.0) < 1e-9
-        && fabs(limA1Max - 180.0 * ARM_GEAR_RATIO_DEF) < 1e-9,
+        && fabs(limA1Max - 120.0 * ARM_GEAR_RATIO_DEF) < 1e-9,
         "factory elbow band is the full fold travel in MOTOR deg");
   run("SET_LIMIT:A1,MAX,1000");
   check(fabs(limA1Max - 1000.0) < 1e-6, "1000 deg accepted - there is NO ceiling");
@@ -298,12 +305,14 @@ int main() {
   a2Dir = 1; serviceArmSoftLimit(a2Dir, 45.0f, 2);
   check(a2Dir == 0, "  ...while A2, untouched, still stops at its own");
   a1Dir = a2Dir = 0;
+  // The per-axis switch still governs JOG, above. It no longer governs a P2P
+  // TARGET, because the taught bands were removed from that path entirely --
+  // so both arms are accepted here regardless of which switch is off.
   { String why;
     check(jointTargetIsLegal(10, 0, 500, 20, why),
-          "  ...a target past A1's boundary is accepted too, not refused by a "
-          "limit the board has been told to stop applying");
-    check(!jointTargetIsLegal(10, 0, 20, 500, why),
-          "  ...while the same target on A2 is still refused"); }
+          "  ...a target past A1's boundary is accepted");
+    check(jointTargetIsLegal(10, 0, 20, 500, why),
+          "  ...and so is one past A2's, the elbows being unchecked at LOAD now"); }
   run("SET_LIMIT:A1,MAX,90");
   check(saw("[LIMIT_SET] A1 MAX = 90.00"),
         "  ...a switched-off boundary is still EDITABLE — teaching one is "
@@ -370,17 +379,17 @@ int main() {
     check(solved > 500, "the sweep actually solved a few hundred poses");
     check(worst < 1e-6, "IK -> FK returns the pose it was given"); }
 
-  // The measured links, named outright so a change is a visible diff.
-  check(fabs(A3_MM - 45.0) < 1e-9 && fabs(A4_MM - 91.25) < 1e-9
-        && fabs(A5_MM - 91.25) < 1e-9 && fabs(A6_MM - 377.5) < 1e-9,
-        "a3/a4/a5/a6 are the MEASURED 45/91.25/91.25/377.5");
+  // The links, named outright so a change is a visible diff.
+  check(fabs(A3_MM - 45.0) < 1e-9 && fabs(A4_MM - 160.0) < 1e-9
+        && fabs(A5_MM - 160.0) < 1e-9 && fabs(A6_MM - 248.2) < 1e-9,
+        "a3/a4/a5/a6 are the MATLAB 45/160/160/248.2");
   check(fabs(Z_OFFSET_ARM1_MM - 514.3) < 1e-9, "Z_offset(arm 1) = 514.3");
   check(fabs(armGearRatio - 7.80) < 1e-9, "the arm ratio is the measured 7.80");
 
-  check(fabs(FOLD_ANGLE_SPEC_MAX_DEG - 146.68) < 0.01,
-        "FOLD_ANGLE_SPEC_MAX_DEG is the rated 146.68 fold deg");
-  check(fabs(reachFromFoldAngle(FOLD_ANGLE_SPEC_MAX_DEG) - 575.0) < 0.5,
-        "  ...and really does land on the drawing's 575 mm");
+  check(fabs(FOLD_ANGLE_SPEC_MAX_DEG - 90.0) < 0.01,
+        "FOLD_ANGLE_SPEC_MAX_DEG is fold 90 = base +60");
+  check(fabs(reachFromFoldAngle(FOLD_ANGLE_SPEC_MAX_DEG) - 570.33) < 0.05,
+        "  ...and really does land on 570.3 mm");
 
   printf("\n  -- the idle arm HOLDS, it does not snap home --\n");
   // 45, not 560: ikToJoints takes Z FROM HOME now. 560 used to be an
@@ -447,33 +456,33 @@ int main() {
   // guess, and one that rejected radii the arm can physically hold.
   run("RESET_LIMITS");
   run("SET_LIMIT_ENFORCE:A1,0");
-  // 50 mm is now below the ARITHMETIC span too -- with the measured links
-  // the frog-leg spans 422.5 +/- 182.5, so 240 mm is the shortest radius
-  // any elbow angle reaches. Switching the boundary off cannot buy that.
+  // The frog-leg spans 293.2 +/- 320, so the ARITHMETIC floor is -26.8 mm:
+  // 50 mm solves, to a negative fold angle behind HOME. What refuses a
+  // radius like that is the taught elbow band, not a structural envelope --
+  // so with A1's boundary switched off it goes through.
   { IkResult r = solveIkFromHome(1, 50, 0, 45);
-    check(!r.ok, "r = 50 mm is refused even with A1's boundary switched off");
-    check(std::string(r.error.c_str()).find("no solution") != std::string::npos,
-          "  ...as arithmetic, not as an opinion about the envelope"); }
-  { // Just inside the span DOES solve with the boundary off.
-    IkResult r = solveIkFromHome(1, 245, 0, 45);
-    check(r.ok, "  ...while 245 mm, inside the span, solves"); }
+    check(r.ok, "r = 50 mm solves with A1's boundary switched off");
+    check(r.th3 < 0.0, "  ...to a NEGATIVE fold angle, behind HOME"); }
+  { // The home reach itself, with the boundary off.
+    IkResult r = solveIkFromHome(1, 140, 0, 45);
+    check(r.ok, "  ...while 140 mm, just past HOME, solves normally"); }
   { IkResult r = solveIkFromHome(1, 700, 0, 45);
     check(!r.ok, "700 mm is still refused — no elbow angle reaches it");
     check(std::string(r.error.c_str()).find("no solution") != std::string::npos,
           "  ...as arithmetic, not as an opinion about the envelope"); }
+  // THE TAUGHT BAND NO LONGER GATES A SOLVE. Removed on request: a P2P
+  // point outside the operator's own boundary now solves, loads and runs.
   run("SET_LIMIT_ENFORCE:A1,1");
   run("SET_LIMIT:A1,MIN,10"); run("SET_LIMIT:A1,MAX,230");
-  { // 400 mm solves on the arithmetic (240..605), and the taught band
-    // 10..230 motor deg only reaches ~264 mm, so a refusal here IS the band.
+  { // 400 mm is far outside the 10..230 motor deg band, which reaches only
+    // ~264 mm, and inside the arithmetic span. It solves anyway now.
     IkResult r = solveIkFromHome(1, 400, 0, 45);
-    check(!r.ok, "with the boundary back on, 400 mm is outside the taught band");
-    check(std::string(r.error.c_str()).find("YOU taught") != std::string::npos,
-          "  ...and the message names it as YOUR limit, not fixed structure"); }
-  { // A2's own band is untouched, so it answers for itself.
-    run("SET_LIMIT_ENFORCE:A2,0");
-    IkResult r = solveIkFromHome(2, 245, 0, 45);
-    check(r.ok, "and the switch is per arm — A2 still solves 245 mm");
-    run("SET_LIMIT_ENFORCE:A2,1"); }
+    check(r.ok, "400 mm solves even though the taught band does not reach it");
+    check(std::string(r.error.c_str()).find("YOU taught") == std::string::npos,
+          "  ...and no taught-band refusal is left to produce"); }
+  { IkResult r = solveIkFromHome(1, 700, 0, 45);
+    check(!r.ok && std::string(r.error.c_str()).find("no solution") != std::string::npos,
+          "  ...while the ARITHMETIC span still refuses 700 mm, as it always did"); }
   run("RESET_LIMITS");
 
   printf("\n  -- HOME is the P2P reference: X 0, Y 0, Z 0 --\n");
@@ -610,8 +619,9 @@ int main() {
         "  ...and HOME_DIR_* matches PLC_LIMIT_END_* on every axis, RM included");
   check(HOME_DIR_Z < 0 && HOME_DIR_A2 < 0,
         "  ...ZM and A2M back off NEGATIVE (down, retract)");
-  check(HOME_DIR_ROT > 0,
-        "  ...but RM backs off POSITIVE (CW) — it is mounted inverted");
+  check(HOME_DIR_ROT < 0,
+        "  ...and so does RM (CCW) — M31 is at the end HOME parks it at, "
+        "which is the end finishHoming() then calls zero");
   check(a1Dir == 0, "  ...and A1M, which has no switch, is not moved at all");
 
   // M1 is not read at all now: the limits are what say the axes arrived.
@@ -723,19 +733,20 @@ int main() {
     // WHICH way each switch stops, spelled out. The checks below derive
     // from PLC_LIMIT_END_*, so on their own they stay green whichever sign
     // the constants carry — these pin the sign itself. ZM sits at the
-    // BOTTOM of the stroke, so Z_UP is the way off it. RM is mounted
-    // inverted, so ROT_CCW is the way off ITS switch, not ROT_CW.
+    // BOTTOM of the stroke, so Z_UP is the way off it. M31 is at RM's CCW
+    // end -- the pose HOME parks it at and then calls zero -- so ROT_CW is
+    // the way off ITS switch, not ROT_CCW.
     plcPoll3(0, BIT(15), BIT(0));         // M31 (RM) and M32 (ZM) both tripped
     jzDir = 1;                            // Z_UP
-    rotDir = -1;                          // ROT_CCW
-    plcServiceLimitStops();
-    check(jzDir == 1, "a tripped M32 still allows Z_UP — ZM's switch is at the bottom");
-    check(rotDir == -1, "a tripped M31 still allows ROT_CCW — RM is inverted");
-    jzDir = -1;                           // Z_DOWN
     rotDir = 1;                           // ROT_CW
     plcServiceLimitStops();
+    check(jzDir == 1, "a tripped M32 still allows Z_UP — ZM's switch is at the bottom");
+    check(rotDir == 1, "a tripped M31 still allows ROT_CW — that is the way off it");
+    jzDir = -1;                           // Z_DOWN
+    rotDir = -1;                          // ROT_CCW
+    plcServiceLimitStops();
     check(jzDir == 0, "  ...and Z_DOWN into M32 is stopped");
-    check(rotDir == 0, "  ...and ROT_CW into M31 is stopped");
+    check(rotDir == 0, "  ...and ROT_CCW into M31 is stopped");
     // Back to a clean slate: an untripped poll is what clears the per-axis
     // warn latch, and a left-over jog direction would leak into the HOME
     // state checks further down.
@@ -959,8 +970,9 @@ int main() {
   printf("\n  -- the three do NOT sit at the same end --\n");
   check(PLC_LIMIT_END_Z == -1 && PLC_LIMIT_END_A2 == -1,
         "M30 and M32 mark the MINIMUM of their axis");
-  check(PLC_LIMIT_END_ROT == +1,
-        "M31 marks the MAXIMUM of RM, which is mounted inverted");
+  check(PLC_LIMIT_END_ROT == -1,
+        "M31 marks the MINIMUM of RM too -- HOME parks RM on it and zeroes "
+        "the counter there, so RM's 0 IS the switch");
 
   // Still no boundary is ever written from a device read.
   check(fabs(limA1Max - a1MaxBefore) < 1e-9
@@ -1147,14 +1159,25 @@ int main() {
   isMoving = false; runPhase = PHASE_NONE;
   plcPoll3(0, 0, 0);                                    // clear the limit bit
 
-  printf("\n  -- taught soft limits are still checked, unlike the sensor block --\n");
+  printf("\n  -- a taught limit no longer blocks a leg; PHYSICAL travel still does --\n");
   OUT.clear();
+  isMoving = false; runPhase = PHASE_NONE;
   run("SET_LIMITS_ENABLED:1"); run("SET_LIMIT_ENFORCE:ROT,1");
-  run("SET_LIMIT:ROT,MIN,10");           // home (RM=0) now outside the band
+  run("SET_LIMIT:ROT,MIN,10");           // home (RM=0) is outside this band
   run("RESET_POSITION");
-  check(!isMoving && runPhase == PHASE_NONE, "home outside a taught limit is refused");
-  check(saw("[ERROR] RESET_POSITION refused"), "  ...and says why");
+  check(isMoving, "a taught RM limit excluding home no longer refuses the move");
+  cancelRun();
   run("RESET_LIMITS");                   // restore
+  isMoving = false; runPhase = PHASE_NONE;
+  { // ...but the stroke is not a setting. Past it the carriage is driving
+    // into its own top stop, so this one still refuses.
+    String why;
+    check(!jointTargetIsLegal(D1_MAX_MM + 50.0f, 0.0f, 0.0f, 0.0f, why),
+          "  ...while a Z past the physical stroke is still refused");
+    check(!jointTargetIsLegal(0.0f, ROT_MAX_DEG + 20.0f, 0.0f, 0.0f, why),
+          "  ...and so is a bearing past RM's travel");
+    check(jointTargetIsLegal(10.0f, 200.0f, 5000.0f, 5000.0f, why),
+          "  ...and the elbows are not checked here at all any more"); }
 
   printf("\n  -- completion uses its own message, not [RUN] or [HOME] --\n");
   OUT.clear(); isMoving = false; runPhase = PHASE_NONE;
@@ -1244,14 +1267,14 @@ int main() {
     check(rotDir == PLC_LIMIT_END_ROT,
           "  ...turning toward the end the switch is actually at");
 
-    setRot(150.0); serviceScan();
+    setRot(50.0); serviceScan();
     check(scanPhase == SCAN_SEEK, "still seeking while the switch reads clear");
 
     // Arrival. In the real loop plcServiceLimitStops() has already zeroed
     // rotDir by now -- driving into a covered switch is the one direction
     // it refuses -- so the scan has to read arrival from the BIT, not from
     // the fact that the axis stopped.
-    setRot(340.0);
+    setRot(0.0);
     plcPoll3(0, BIT(15), 0);              // M31 covered
     rotDir = 0;
     OUT.clear();
@@ -1261,16 +1284,16 @@ int main() {
     check(scanPhase == SCAN_SWEEP, "  ...sweeping");
     check(rotDir == -PLC_LIMIT_END_ROT,
           "  ...AWAY from the switch, since there is nothing past it");
-    check(saw("[SCAN_PT] 1,340.00"), "the sample at the reference angle is taken");
+    check(saw("[SCAN_PT] 1,0.00"), "the sample at the reference angle is taken");
 
-    // ---- layer 1: away from the switch, 340 -> 0 ---------------------
+    // ---- layer 1: away from the switch, 0 -> 340 ---------------------
     plcPoll3(0, 0, 0);                    // moved off the switch
-    for (int deg = 339; deg >= 0; deg--) {
+    for (int deg = 1; deg <= 340; deg++) {
       setRot((double)deg);
       serviceScan();
     }
-    check(saw("[SCAN_PT] 1,250.00") && saw("[SCAN_PT] 1,160.00")
-          && saw("[SCAN_PT] 1,70.00"),
+    check(saw("[SCAN_PT] 1,90.00") && saw("[SCAN_PT] 1,180.00")
+          && saw("[SCAN_PT] 1,270.00"),
           "one point every 90 deg on the way out");
     check(scanPhase == SCAN_LIFT, "340 deg later the layer ends and it lifts");
     check(jzDir == 1, "  ...driving ZM up through the jog path");
@@ -1286,16 +1309,16 @@ int main() {
           "  ...turning back the other way, so the return leg collects a layer");
     check(jzDir == 0, "  ...and ZM has stopped");
 
-    for (int deg = 1; deg <= 180; deg++) {
+    for (int deg = 339; deg >= 160; deg--) {
       setRot((double)deg);
       serviceScan();
     }
-    check(saw("[SCAN_PT] 2,90.00"), "it samples on the way back too");
+    check(saw("[SCAN_PT] 2,250.00"), "it samples on the way back too");
     check(scanPhase == SCAN_SWEEP, "  ...and is still sweeping half way round");
 
     // The switch, not the angle count, is what ends a return leg -- so a
     // turntable that has drifted still finishes square with its reference.
-    setRot(300.0);
+    setRot(40.0);
     plcPoll3(0, BIT(15), 0);
     rotDir = 0;
     OUT.clear();
@@ -1308,7 +1331,7 @@ int main() {
 
     // ---- starting from ON the switch ---------------------------------
     OUT.clear();
-    setRot(340.0); setZ(0.0);
+    setRot(0.0); setZ(0.0);
     plcPoll3(0, BIT(15), 0);
     run("SCAN_START:10,90,2");
     check(!saw("[SCAN_SEEK]"), "already on the switch, there is nothing to seek");
@@ -1318,18 +1341,20 @@ int main() {
     // ---- a seek that never finds it ----------------------------------
     OUT.clear();
     scanPhase = SCAN_OFF; rotDir = jzDir = 0;
-    setRot(0.0);
+    setRot(100.0);
     plcPoll3(0, 0, 0);
     run("SCAN_START:10,90,2");
     check(scanPhase == SCAN_SEEK, "seeking again");
-    setRot(SCAN_SEEK_MAX_DEG + 10.0);
+    // The seek runs CCW now, so the distance covered without a switch is
+    // measured the other way -- scanTravelled() is |now - start|.
+    setRot(100.0 - (SCAN_SEEK_MAX_DEG + 10.0));
     OUT.clear();
     serviceScan();
     check(saw("[SCAN_ABORT]") && saw("without finding its switch"),
           "a switch that never comes aborts instead of grinding on forever");
 
     // ---- stopping ----------------------------------------------------
-    setRot(340.0);
+    setRot(0.0);
     plcPoll3(0, BIT(15), 0);
     OUT.clear();
     run("SCAN_START:10,90,2");
@@ -1351,7 +1376,7 @@ int main() {
     OUT.clear();
     run("SCAN_START:10,90,2");
     plcPoll3(0, 0, 0);                    // off the switch, mid-sweep
-    setRot(200.0);
+    setRot(140.0);
     rotDir = 0;                           // as a soft limit would leave it
     OUT.clear();
     serviceScan();
@@ -1360,7 +1385,7 @@ int main() {
 
     // ---- the sweep is settable, within the travel --------------------
     scanPhase = SCAN_OFF; rotDir = jzDir = 0;
-    setRot(340.0); setZ(0.0);
+    setRot(0.0); setZ(0.0);
     plcPoll3(0, BIT(15), 0);
     OUT.clear();
     run("SCAN_START:5,10,2,120");
@@ -1393,7 +1418,7 @@ int main() {
     // may take, so speed = sweep / that. Optional and LAST, so an older
     // host sending four fields still works and gets SCAN_SPEED_SCALE.
     scanPhase = SCAN_OFF; rotDir = jzDir = 0;
-    setRot(340.0); setZ(0.0);
+    setRot(0.0); setZ(0.0);
     plcPoll3(0, BIT(15), 0);
     OUT.clear();
     run("SCAN_START:5,10,2,120,5");
@@ -1429,7 +1454,7 @@ int main() {
     // key, so no JOG_HB arrives. Un-exempted, the watchdog cancelled every
     // sweep 700 ms in and the abort blamed a PLC switch.
     OUT.clear();
-    setRot(340.0); setZ(0.0);
+    setRot(0.0); setZ(0.0);
     plcPoll3(0, BIT(15), 0);
     run("SCAN_START:10,90,2");
     check(scanPhase == SCAN_SWEEP && rotDir != 0, "a scan is sweeping");
@@ -1450,7 +1475,7 @@ int main() {
           "  ...and the lift between layers survives it too");
 
     scanPhase = SCAN_OFF; rotDir = jzDir = 0;
-    startJog(rotDir, +1);
+    startJog(rotDir, +1, JOG_AXIS_ROT);
     OUT.clear();
     MOCK_MILLIS += JOG_WATCHDOG_MS * 4;
     serviceJogWatchdog();
@@ -1464,6 +1489,446 @@ int main() {
     setRot(0.0); setZ(0.0);
     rotDir = jzDir = 0;
     scanPhase = SCAN_OFF;
+    plcPoll3(0, 0, 0);
+  }
+
+  {
+    printf("\n=== M. the motion profile DRIVES a run leg ===\n");
+    isMoving = false; isHoming = false; runPhase = PHASE_NONE;
+    runProfileActive = false;
+    setRot(0.0); setZ(0.0);
+    ConnectorM1.moveCalls = 0;
+
+    OUT.clear();
+    run("SET_MOTION_PROFILE:NOPE");
+    check(saw("[ERROR]") && motionProfile == PROFILE_NONE,
+          "an unknown profile name is refused, and changes nothing");
+    run("SET_MOTION_PROFILE:SCURVE");
+    check(motionProfile == PROFILE_SCURVE, "SET_MOTION_PROFILE:SCURVE is taken");
+
+    // A leg planned under one shape must not have another swapped under it.
+    isMoving = true;
+    OUT.clear();
+    run("SET_MOTION_PROFILE:TRAPEZOIDAL");
+    check(motionProfile == PROFILE_SCURVE && saw("refused"),
+          "  ...and it is REFUSED mid-move, not applied to a leg in flight");
+    isMoving = false;
+
+    // ---- with NO profile, the leg is one Move, exactly as before -------
+    run("SET_MOTION_PROFILE:NONE");
+    setRot(0.0);
+    ConnectorM1.moveCalls = 0;
+    beginRunLeg(PHASE_DUAL, 0.0f, 180.0f, 0.0f, 0.0f, true);
+    check(!runProfileActive && ConnectorM1.moveCalls == 1,
+          "with NONE the leg is a single absolute Move — unchanged behaviour");
+    check(fabs(ConnectorM1.lastMoveTarget / pulsesPerDegRot()
+               * (INVERT_ROT ? -1 : 1) - 180.0) < 0.5,
+          "  ...straight to the target, with the step generator's own ramp");
+    isMoving = false; runPhase = PHASE_NONE; runProfileActive = false;
+
+    // ---- with a profile, the leg is a walked SETPOINT ------------------
+    run("SET_MOTION_PROFILE:SCURVE");
+    setRot(0.0);
+    ConnectorM1.moveCalls = 0;
+    MOCK_MILLIS = 100000;
+    beginRunLeg(PHASE_DUAL, 0.0f, 180.0f, 0.0f, 0.0f, true);
+    check(runProfileActive && ConnectorM1.moveCalls == 0,
+          "a profiled leg commands NOTHING yet — at u=0 the setpoint is where "
+          "the axes already are");
+    check(runPlan.T > 0.0, "  ...and it has a planned duration");
+
+    isMoving = true;
+    double planT = runPlan.T;
+    // Sampled at a fixed EARLY time, not a fraction of the leg: most of a
+    // 180 deg move is cruise, and by a tenth of the way through both
+    // shapes are already cruising. The RAMP is where they differ.
+    double sAt50ms = -1, sAtHalf = -1;
+    for (int step = 1; step <= 4000 && runProfileActive; step++) {
+      advance(5);
+      serviceRun();
+      double deg = ConnectorM1.lastMoveTarget / pulsesPerDegRot()
+                 * (INVERT_ROT ? -1 : 1);
+      unsigned long el = MOCK_MILLIS - 100000;
+      if (sAt50ms < 0 && el >= 50) sAt50ms = deg;
+      if (sAtHalf < 0 && el / 1000.0 >= planT * 0.5) sAtHalf = deg;
+    }
+    check(ConnectorM1.moveCalls > 50,
+          "  ...then the setpoint is walked, many commands over the leg");
+    check(!runProfileActive, "  ...and the walk ends when the profile does");
+    check(fabs(ConnectorM1.lastMoveTarget / pulsesPerDegRot()
+               * (INVERT_ROT ? -1 : 1) - 180.0) < 0.5,
+          "  ...landing on the EXACT target, not a fraction short of it");
+    check(fabs(sAtHalf - 90.0) < 6.0,
+          "  ...half way through the time is half way through the move");
+
+    // THE SHAPE ITSELF. An S-curve starts from zero acceleration, so at a
+    // tenth of the way through it has covered far less than a trapezoid,
+    // which is already at full acceleration from the first instant.
+    run("SET_MOTION_PROFILE:TRAPEZOIDAL");
+    setRot(0.0);
+    isMoving = false; runPhase = PHASE_NONE; runProfileActive = false;
+    MOCK_MILLIS = 200000;
+    beginRunLeg(PHASE_DUAL, 0.0f, 180.0f, 0.0f, 0.0f, true);
+    isMoving = true;
+    double trapT = runPlan.T;
+    double trapAt50ms = -1;
+    for (int step = 1; step <= 4000 && runProfileActive; step++) {
+      advance(5);
+      serviceRun();
+      if (trapAt50ms < 0 && (MOCK_MILLIS - 200000) >= 50)
+        trapAt50ms = ConnectorM1.lastMoveTarget / pulsesPerDegRot()
+                   * (INVERT_ROT ? -1 : 1);
+    }
+    // THE SIGNATURE OF THE SHAPE. In the first 50 ms the trapezoid is
+    // already at full acceleration and has covered 0.5*a*t^2; the S-curve
+    // is still easing in and has covered only J*t^3/6, several times less.
+    // If this ratio ever collapses to 1 the profile is not being executed
+    // and only the timing changed.
+    check(trapAt50ms > sAt50ms * 3.0,
+          "the S-curve is genuinely EASED: 50 ms in it has moved several "
+          "times less than the trapezoid, which is at full acceleration "
+          "from the first instant");
+    check(runPlan.T > 0 && trapT < planT,
+          "  ...and the trapezoid finishes sooner, which is what smoothness costs");
+
+    run("SET_MOTION_PROFILE:NONE");
+    isMoving = false; runPhase = PHASE_NONE; runProfileActive = false;
+    setRot(0.0); setZ(0.0);
+  }
+
+  {
+    printf("\n=== N. jog gets the ramp's USEFUL HALF -- ease up, ease down ===\n");
+    rotDir = a1Dir = a2Dir = jzDir = 0;
+    jogRampRot = JogRamp(); jogRampA1 = JogRamp();
+    jogRampA2 = JogRamp(); jogRampZ = JogRamp();
+
+    // ---- NONE: unchanged -- still an instant jump to full speed --------
+    run("SET_MOTION_PROFILE:NONE");
+    ConnectorM1.velocityCalls = 0;
+    run("ROT_CW");
+    check(ConnectorM1.velocityCalls == 1
+          && abs(ConnectorM1.lastVelocityCmd) == abs(rotVelPulses),
+          "with NONE, ROT_CW is still one instant MoveVelocity at full speed");
+    run("ROT_STOP");
+    check(ConnectorM1.lastVelocityCmd == 0 && !jogRampRot.releasing,
+          "  ...and ROT_STOP is still one instant MoveVelocity(0)");
+
+    // ---- SCURVE: the key-down EASES, it does not jump ------------------
+    run("SET_MOTION_PROFILE:SCURVE");
+    rotDir = 0;
+    MOCK_MILLIS = 300000;
+    run("ROT_CW");
+    check(jogRampRot.active && rotDir == 1,
+          "ROT_CW under SCURVE arms a ramp instead of commanding full speed");
+    check(abs(ConnectorM1.lastVelocityCmd) < abs(rotVelPulses) / 20,
+          "  ...at t=0 the commanded speed is essentially zero");
+
+    double T = 2.0 * jogRampRot.tJ + jogRampRot.tA;
+    check(T > 0.0, "  ...and a nonzero ramp time was actually planned");
+
+    int32_t midCmd = 0;
+    advance((unsigned long)(T * 500.0));         // halfway through the ease
+    serviceJogRamps();
+    midCmd = ConnectorM1.lastVelocityCmd;
+    check(abs(midCmd) > 0 && abs(midCmd) < abs(rotVelPulses),
+          "  ...mid-ease the commanded speed sits strictly between 0 and full");
+
+    advance((unsigned long)(T * 1000.0) + 20);   // past the end of the ease
+    serviceJogRamps();
+    check(!jogRampRot.active,
+          "  ...the ramp finishes on its own once T has elapsed");
+    check(abs(abs(ConnectorM1.lastVelocityCmd) - rotVelPulses) <= 1,
+          "  ...landing on the EXACT configured speed, not a fraction short");
+
+    // A steady jog is left to applyJogVelocities() same as always, not
+    // re-driven by the ramp -- serviceJogRamps() must be a no-op here.
+    int callsBefore = ConnectorM1.velocityCalls;
+    serviceJogRamps();
+    check(ConnectorM1.velocityCalls == callsBefore,
+          "  ...and once steady, serviceJogRamps() commands nothing more");
+
+    // ---- release from STEADY eases back down, it does not jump ---------
+    run("ROT_STOP");
+    check(rotDir == 0 && jogRampRot.releasing,
+          "ROT_STOP after a steady profiled jog arms the release ease");
+    check(abs(abs(ConnectorM1.lastVelocityCmd) - rotVelPulses) <= 1,
+          "  ...and does NOT zero the motor the instant the key lifts");
+
+    advance((unsigned long)(T * 500.0));
+    serviceJogRamps();
+    check(abs(ConnectorM1.lastVelocityCmd) > 0
+          && abs(ConnectorM1.lastVelocityCmd) < abs(rotVelPulses),
+          "  ...mid-release the speed is easing down, strictly between 0 and full");
+
+    advance((unsigned long)(T * 1000.0) + 20);
+    serviceJogRamps();
+    check(!jogRampRot.releasing && ConnectorM1.lastVelocityCmd == 0,
+          "  ...and comes to rest exactly at zero, not a moment early");
+
+    // ---- release MID ramp-up is left to the plain hard stop -------------
+    // Mirroring a ramp that never reached vp needs solving from wherever
+    // it sits, which is the closed-loop problem Theta lets ramp-up skip.
+    rotDir = 0; jogRampRot = JogRamp();
+    MOCK_MILLIS += 1000;
+    run("ROT_CW");
+    check(jogRampRot.active, "armed again for the mid-ramp-release case");
+    advance(5);
+    run("ROT_STOP");
+    check(!jogRampRot.active && !jogRampRot.releasing
+          && ConnectorM1.lastVelocityCmd == 0,
+          "a release before the ramp reached vp hard-stops instead of "
+          "trying to mirror an unfinished ease");
+
+    // ---- cancelJog() (ESTOP/STOP) OVERRIDES an in-progress ease --------
+    rotDir = 0; jogRampRot = JogRamp();
+    run("ROT_CW");
+    advance((unsigned long)(T * 1000.0) + 20);
+    serviceJogRamps();                       // now steady at vp
+    run("ROT_STOP");
+    advance(5);                              // mid-release, still moving
+    cancelJog();
+    check(!jogRampRot.releasing && ConnectorM1.lastVelocityCmd == 0,
+          "cancelJog() (ESTOP/STOP) wins over an in-progress release ease");
+    int callsAfterCancel = ConnectorM1.velocityCalls;
+    advance(50);
+    serviceJogRamps();
+    check(ConnectorM1.velocityCalls == callsAfterCancel,
+          "  ...and a stale ramp cannot re-issue a command on a later pass");
+
+    run("SET_MOTION_PROFILE:NONE");
+    rotDir = a1Dir = a2Dir = jzDir = 0;
+    jogRampRot = JogRamp(); jogRampA1 = JogRamp();
+    jogRampA2 = JogRamp(); jogRampZ = JogRamp();
+  }
+
+  printf("\n=== S2. the scan eases INTO a move, and never out of one ===\n");
+  {
+    // The scan drives itself through the jog primitives, so it inherits
+    // the motion profile with them -- but only the ramp-up half. Every
+    // scan stop stays hard: a return leg ends ON the RM switch, and a lift
+    // ends at the height the next layer is measured from.
+    OUT.clear(); clearTx(); ETH_RX.clear();
+    isMoving = false; isHoming = false; runPhase = PHASE_NONE;
+    rotDir = a1Dir = a2Dir = jzDir = 0;
+    scanPhase = SCAN_OFF;
+    plcLimitSensorEnabled[1] = true;
+    setRot(0.0); setZ(0.0);
+    plcPoll3(0, 0, 0);
+    PULSE_US = 5828;
+
+    // ---- with no profile picked, nothing changes ---------------------
+    run("SET_MOTION_PROFILE:NONE");
+    ConnectorM1.velocityCalls = 0;
+    run("SCAN_START:10,90,2");
+    check(scanPhase == SCAN_SEEK, "the seek starts");
+    check(!jogRampRot.active,
+          "PROFILE_NONE arms no ramp -- a scan is exactly what it always was");
+    check(abs(ConnectorM1.lastVelocityCmd) > 0,
+          "  ...and RM is commanded flat, at once");
+    run("SCAN_STOP");
+
+    // ---- TRAPEZOIDAL is the same, on purpose -------------------------
+    run("SET_MOTION_PROFILE:TRAPEZOIDAL");
+    setRot(0.0);
+    run("SCAN_START:10,90,2");
+    check(!jogRampRot.active,
+          "TRAPEZOIDAL arms none either -- its jerk at the corner IS the step");
+    run("SCAN_STOP");
+
+    // ---- S-curve: the sweep ramps up ---------------------------------
+    run("SET_MOTION_PROFILE:SCURVE");
+    setRot(0.0); setZ(0.0);
+    plcPoll3(0, 0, 0);
+    ConnectorM1.lastVelocityCmd = 0;
+    run("SCAN_START:10,90,2");
+    check(jogRampRot.active, "SCURVE arms the turntable's ramp for the seek");
+    check(ConnectorM1.lastVelocityCmd == 0,
+          "  ...so RM is NOT commanded to full speed on the first pass");
+    advance(5);
+    serviceJogRamps();
+    int32_t early = ConnectorM1.lastVelocityCmd;
+    check(early != 0 && abs(early) < abs(rotVelPulses),
+          "  ...it is walked up, a step at a time");
+    advance(4000);
+    serviceJogRamps();
+    check(!jogRampRot.active, "  ...and the ease finishes at the held speed");
+
+    // ---- arriving at the switch is a HARD stop -----------------------
+    setRot(340.0);
+    plcPoll3(0, BIT(15), 0);
+    ConnectorM1.velocityCalls = 0;
+    serviceScan();
+    check(saw("[SCAN_REF]"), "the switch is found");
+    check(ConnectorM1.velocityCalls > 0,
+          "  ...and RM really was commanded, not just flagged");
+    check(scanPhase == SCAN_SWEEP && scanRotMove.active,
+          "layer 1 then runs a PLANNED leg in the other direction");
+    check(scanRotMove.plan.T > 0.0 && scanRotMove.plan.Theta > 0.0,
+          "  ...with a real Theta, because a sweep knows how far it goes");
+
+    // ---- the lift eases up too ---------------------------------------
+    plcPoll3(0, 0, 0);
+    for (int deg = 339; deg >= 0; deg--) { setRot((double)deg); serviceScan(); }
+    check(scanPhase == SCAN_LIFT, "the layer ends and it lifts");
+    check(scanZMove.active, "  ...as a planned move, not a step to full speed");
+    check(ConnectorM0.lastVelocityCmd == 0,
+          "  ...so ZM is not commanded to full lift speed at once");
+
+    // ---- reaching the height is a HARD stop --------------------------
+    // An ease-DOWN here would overshoot, and the next layer is measured
+    // from this height -- the error would show as layer spacing that grows
+    // down the file, which nothing in the data could reveal.
+    advance(5);
+    serviceScanMoves();
+    check(scanZMove.active, "the lift is still following its plan");
+    setZ(10.0);
+    serviceScan();
+    check(ConnectorM0.lastVelocityCmd == 0 && !jogRampZ.active,
+          "at height ZM is STOPPED outright, mid-ease or not");
+
+    // ---- an abort mid-ease actually stops ----------------------------
+    // applyJogVelocities() skips an axis that is mid-ease, so a stop that
+    // went through it would leave a half-ramped axis running with nothing
+    // left to command it to zero.
+    setRot(0.0); setZ(0.0);
+    plcPoll3(0, 0, 0);
+    scanPhase = SCAN_OFF;
+    rotDir = jzDir = 0;
+    run("SCAN_START:10,90,2");
+    check(jogRampRot.active, "a fresh scan is mid-ease");
+    ConnectorM1.lastVelocityCmd = 12345;
+    run("SCAN_STOP");
+    check(ConnectorM1.lastVelocityCmd == 0,
+          "SCAN_STOP commands zero even while the ramp is still climbing");
+    check(!jogRampRot.active && !jogRampRot.releasing,
+          "  ...and the ramp state is cleared, so nothing re-commands it after");
+
+    setRot(0.0); setZ(0.0);
+    run("SCAN_START:10,90,2");
+    ConnectorM1.lastVelocityCmd = 12345;
+    ConnectorM0.lastVelocityCmd = 12345;
+    run("ESTOP");
+    check(ConnectorM1.lastVelocityCmd == 0 && ConnectorM0.lastVelocityCmd == 0,
+          "E-STOP mid-ease stops both scan axes outright");
+
+    run("SET_MOTION_PROFILE:NONE");
+    scanPhase = SCAN_OFF;
+    rotDir = jzDir = 0;
+    setRot(0.0); setZ(0.0);
+    plcPoll3(0, 0, 0);
+  }
+
+  printf("\n=== S3. a scan leg gets the WHOLE profile, both ends ===\n");
+  {
+    // A scan leg has a length -- a sweep is scanSweepDeg, a lift is the Z
+    // step -- so unlike a jog it can plan its own deceleration and arrive
+    // at the target already at rest. These check the shape end to end.
+    OUT.clear(); clearTx(); ETH_RX.clear();
+    isMoving = false; isHoming = false; runPhase = PHASE_NONE;
+    rotDir = a1Dir = a2Dir = jzDir = 0;
+    scanPhase = SCAN_OFF;
+    plcLimitSensorEnabled[1] = true;
+    PULSE_US = 5828;
+
+    // TRAPEZOIDAL gets a plan here, unlike jog. Jog skips it because its
+    // corner jerk IS the step a plain MoveVelocity() already gives; a leg
+    // with a known length is a different question, and the trapezoid is a
+    // positive choice of that shape.
+    run("SET_MOTION_PROFILE:TRAPEZOIDAL");
+    setRot(340.0); setZ(0.0);
+    plcPoll3(0, BIT(15), 0);
+    run("SCAN_START:10,90,2");
+    check(scanPhase == SCAN_SWEEP, "already on the switch, it sweeps at once");
+    check(scanRotMove.active, "TRAPEZOIDAL plans a scan leg");
+    check(!scanRotMove.plan.sCurve, "  ...and it really is the trapezoid");
+    run("SCAN_STOP");
+
+    // ---- the velocity SHAPE over one planned sweep -------------------
+    run("SET_MOTION_PROFILE:PURE_SCURVE");
+    setRot(340.0); setZ(0.0);
+    plcPoll3(0, BIT(15), 0);
+    run("SCAN_START:10,90,2");
+    check(scanRotMove.active, "a fresh leg is planned");
+    check(scanRotMove.plan.sCurve, "  ...as an S-curve");
+    double T = scanRotMove.plan.T;
+    check(T > 0.05, "  ...over a real span of time");
+
+    // Sample the commanded velocity across the leg. rotDir must stay
+    // non-zero or scanMoveTick() correctly gives the axis up.
+    plcPoll3(0, 0, 0);                       // off the switch, mid-sweep
+    // Sampled against the RAMP, not against T. Over 340 degrees the ramp is
+    // a fraction of the leg -- a tenth of T is already deep in the cruise,
+    // and three samples inside it would all read the same.
+    unsigned long t0 = scanRotMove.t0;
+    int32_t vEarly = 0, vMid = 0, vLate = 0;
+    MOCK_MILLIS = t0 + 5;
+    serviceScanMoves(); vEarly = ConnectorM1.lastVelocityCmd;
+    MOCK_MILLIS = t0 + (unsigned long)(T * 500.0);          // half way
+    serviceScanMoves(); vMid = ConnectorM1.lastVelocityCmd;
+    MOCK_MILLIS = t0 + (unsigned long)(T * 1000.0) - 5;     // just short of the end
+    serviceScanMoves(); vLate = ConnectorM1.lastVelocityCmd;
+
+    check(abs(vEarly) < abs(vMid),
+          "the leg accelerates out of the start instead of stepping to speed");
+    check(abs(vLate) < abs(vMid),
+          "  ...and DECELERATES into the target -- the half a jog cannot have");
+    check(abs(vLate) > 0,
+          "  ...without stopping dead short of it");
+
+    // ---- the plan hands over to a bounded creep ----------------------
+    advance((unsigned long)(T * 1000.0) + 50);
+    serviceScanMoves();
+    check(!scanRotMove.active && scanRotMove.creeping,
+          "with the plan spent the leg creeps the last of the gap");
+    check(abs(ConnectorM1.lastVelocityCmd) > 0
+          && abs(ConnectorM1.lastVelocityCmd) < abs(vMid),
+          "  ...slowly, so the end condition is what stops it, not the clock");
+    check(scanRotMove.creepV >= 1.0,
+          "  ...and the creep is never rounded away to nothing");
+
+    // ---- a safety stop still wins, mid-plan --------------------------
+    run("SCAN_STOP");
+    setRot(0.0); setZ(0.0);
+    plcPoll3(0, BIT(15), 0);
+    run("SCAN_START:10,90,2");
+    check(scanRotMove.active, "another planned leg is running");
+    rotDir = 0;                              // as a soft limit or PLC stop leaves it
+    ConnectorM1.lastVelocityCmd = 12345;
+    serviceScanMoves();
+    check(ConnectorM1.lastVelocityCmd == 12345,
+          "a zeroed direction makes the plan give the axis UP, not re-command it");
+    check(!scanRotMove.active && !scanRotMove.creeping,
+          "  ...and the plan is abandoned, so nothing revives it later");
+
+    // ---- and applyJogVelocities() does not stomp a planned leg -------
+    run("SCAN_STOP");
+    setRot(0.0); setZ(0.0);
+    plcPoll3(0, BIT(15), 0);
+    run("SCAN_START:10,90,2");
+    check(scanRotMove.active && scanOwnsRot(), "the scan owns RM");
+    ConnectorM1.lastVelocityCmd = 999;
+    applyJogVelocities();
+    check(ConnectorM1.lastVelocityCmd == 999,
+          "applyJogVelocities leaves a profiled scan axis alone");
+
+    run("SCAN_STOP");
+    check(!scanOwnsRot() && !scanOwnsZ(), "stopping releases both axes");
+
+    // ---- PROFILE_NONE is still the flat old path ---------------------
+    run("SCAN_STOP");
+    run("SET_MOTION_PROFILE:NONE");
+    setRot(340.0); setZ(0.0);
+    plcPoll3(0, BIT(15), 0);
+    run("SCAN_START:10,90,2");
+    check(!scanRotMove.active && !scanRotMove.creeping,
+          "PROFILE_NONE plans nothing -- a scan is exactly what it always was");
+    check(abs(ConnectorM1.lastVelocityCmd) > 0,
+          "  ...and RM is commanded flat, at once");
+    run("SCAN_STOP");
+
+    scanPhase = SCAN_OFF;
+    rotDir = jzDir = 0;
+    setRot(0.0); setZ(0.0);
     plcPoll3(0, 0, 0);
   }
 

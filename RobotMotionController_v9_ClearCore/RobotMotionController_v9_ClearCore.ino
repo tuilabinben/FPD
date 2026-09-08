@@ -25,6 +25,44 @@ enum RunPhase { PHASE_NONE, PHASE_TO_HOME_FIRST, PHASE_TO_A, PHASE_TO_B,
 
 enum HomeState { HOME_IDLE, HOME_REQUESTED, HOME_COMPLETE, HOME_FAILED };
 
+// The motion-profile and jog-ramp types are up here for the same reason as
+// the three above, and it is not a style choice: Arduino generates a
+// prototype for every function in the sketch and injects it ABOVE this
+// block. A parameter type declared further down therefore breaks the
+// PROTOTYPE, not the definition -- which is why the compiler blamed
+// planTrapezoid ("declared void") and releaseJogRamp ("not declared in
+// this scope") while both were plainly written out below. g++ on
+// firmware_check.cpp never sees an injected prototype, so the suite
+// stayed green through it.
+enum MotionProfileKind {
+  PROFILE_NONE = 0,
+  PROFILE_TRAPEZOID = 1,
+  PROFILE_SCURVE = 2,
+  PROFILE_PURE_SCURVE = 3,
+};
+
+// A planned profile, evaluated on demand rather than sampled into an
+// array -- the board needs s(t) at one instant per pass, not 400 of them.
+struct ProfilePlan {
+  bool   sCurve;      // false = trapezoid, and the three fields below apply
+  double T;           // total time, seconds
+  double Theta;       // total displacement, in u (always 1.0 here)
+  double vp, ta, tv, alphaMax;                 // trapezoid
+  double dur[7], jrk[7], s0[7], v0[7], a0[7], tStart[7];   // s-curve phases
+};
+
+// One axis's jog ease. What it does, and why no safety stop uses it, is
+// documented where the ramp functions themselves live.
+struct JogRamp {
+  bool   active    = false;   // easing up toward vp
+  bool   releasing = false;   // easing down toward 0
+  unsigned long t0 = 0;
+  double tJ = 0, tA = 0, J = 0, alphaMax = 0, vp = 0;
+  int    dir = 0;             // direction locked in when the ramp started
+};
+
+enum JogAxisId { JOG_AXIS_ROT, JOG_AXIS_A1, JOG_AXIS_A2, JOG_AXIS_Z };
+
 void plcNetworkInit();
 void servicePlc();
 double armFoldFromMotor(double motorDeg);
@@ -40,6 +78,8 @@ int plcLimitEndFor(int i);              // which end that switch refuses RIGHT N
 bool runLegBlockedByLimit(float d1, float rot, float a2, String &why);
 void applyMotionParams();
 void applyJogVelocities();
+bool scanOwnsRot();      // a profiled scan leg owns this axis right now
+bool scanOwnsZ();
 void reportMotionProfile();
 void reachBandFor(double thMin, double thMax, double &rMin, double &rMax);
 
@@ -47,6 +87,8 @@ void reportLimits();
 void resetLimitsToFactory();
 void cancelJog();
 void cancelRun();
+void commandRunLeg();
+void moveJointsAbsolute(float d1, float rot, float a1, float a2);
 void cancelHoming();
 void cancelScan(const String &why);
 bool anyJogActive();
@@ -62,10 +104,12 @@ bool axisLimited(const String &axis);
 // ══════════════════════════════════════════════════════════════
 // GEOMETRY — mirrors robot_sim/config.py and mophong_init.m.
 // ══════════════════════════════════════════════════════════════
+// THE MATLAB LINK SET. HOME is th3_cad 60 (base -30), R = 133.2 mm, confirmed on the
+// machine; straight is th3_cad 180, R = 613.2 mm. Only the two SUMS are used.
 const double A3_MM = 45.0;
-const double A4_MM = 91.25;
-const double A5_MM = 91.25;
-const double A6_MM = 377.5;
+const double A4_MM = 160.0;
+const double A5_MM = 160.0;
+const double A6_MM = 248.2;
 
 const double D_BASE_MM  = 388.0;
 const double D3_ARM1_MM = 50.0;
@@ -83,23 +127,31 @@ const double ARM_RADIAL_OFFSET_MM = A3_MM + A6_MM;
 
 const double I_RM_TOTAL = 1 * 6.5;
 
-const double ARM_ZERO_CAD_DEG = 0.0;
+// THE ANGLE FRAME, mirroring robot_sim/config.py:
+//   motor deg = fold * armGearRatio, 0 at HOME -- the only figure stored anywhere
+//   fold deg  = th3_cad - ARM_ZERO_CAD_DEG, 0..120
+//   base deg  = fold - 30, what the operator reads: -30 HOME, +60 working max
+// The board never reports the base angle; the GUI derives it. These constants exist so both
+// sides agree about which pose is which.
+const double ARM_ZERO_CAD_DEG = 60.0;
 
 const double FOLD_ANGLE_HOME_DEG     = 0.0;
-const double FOLD_ANGLE_SPEC_MAX_DEG = 146.68;
+// base +60, R 570.3 mm. A NOTE, not a limit -- nothing here refuses a target past it.
+const double FOLD_ANGLE_SPEC_MAX_DEG = 90.0;
 const double FOLD_ANGLE_MIN_DEG      = FOLD_ANGLE_HOME_DEG;
-const double FOLD_ANGLE_MAX_DEG      = 180.0;
-const double FOLD_SINGULARITY_WARN_DEG = 170.0;
+const double FOLD_ANGLE_MAX_DEG      = 120.0;      // straight, base +90, R 613.2 mm
+const double FOLD_SINGULARITY_WARN_DEG = 110.0;    // 10 deg short of straight
 
-// MOTOR degrees per FROG-LEG degree. MEASURED on the machine: at full
-// extension the arm reaches 575 mm, where the earlier 10.0 put the same
-// motor position at 498 mm, so 10.0 * fold(498)/fold(575) = 7.80. A reach
-// measurement rather than an angle one, because reach is what a tape
-// measure can read on this machine.
+// MOTOR degrees per FROG-LEG degree. MEASURED as a reach, not an angle:
+// 10.0 * fold(498)/fold(575) = 7.80, the arm reaching 575 mm where the earlier 10.0 put that
+// same motor position at 498 mm.
 //
-// The Simscape model says 2 -- shoulder x-1, knee x-2 -- and the model is
-// wrong here: it describes the LINKAGE, not the gearbox in front of it.
-// Do not restore 2 from the .m.
+// THAT ARITHMETIC RAN ON THE PREVIOUS REACH CURVE. On this one the same two measurements
+// imply 7.61. 7.80 is kept because it is what the machine has been running -- re-derive it
+// only with the arm in front of you, and SET_ARM_RATIO changes it with no re-flash.
+//
+// Simscape says 2 (shoulder x1, knee x-2). That is the LINKAGE, not the
+// gearbox in front of it. Do not restore 2 from the .m.
 const double ARM_GEAR_RATIO_DEF = 7.80;
 const double ARM_GEAR_RATIO_MIN = 0.01, ARM_GEAR_RATIO_MAX = 1000.0;
 double armGearRatio = ARM_GEAR_RATIO_DEF;
@@ -193,10 +245,9 @@ const double ROT_GEAR_RATIO_MIN = 0.01, ROT_GEAR_RATIO_MAX = 1000.0;
 double rotGearRatio = ROT_GEAR_RATIO_DEF;
 double pulsesPerDegRot() { return (PULSES_PER_MOTOR_REV * rotGearRatio) / 360.0; }
 
-// AM1/AM2 elbow gearing. This is PULSES PER MOTOR DEGREE and is exact --
-// the driver's own step count, nothing derived. The gear train between
-// the motor and the frog-leg link is armGearRatio, measured at 7.80.
-//   [notes §13]
+// AM1/AM2 elbow gearing. PULSES PER MOTOR DEGREE, exact -- the driver's
+// own step count. The train between motor and frog-leg link is
+// armGearRatio, measured at 7.80.  [notes §13]
 const double PULSES_PER_DEG_ARM_MOTOR = PULSES_PER_MOTOR_REV / 360.0;
 
 const double Z_MICROSTEPS_PER_STEP  = 4.0;
@@ -243,17 +294,15 @@ const float ARM_PCT_DEF        = 62.5f;
 const float ROT_PCT_DEF        = 50.0f;
 const float Z_PCT_DEF          = 200.0f;
 
-// ACCELERATION HAS ITS OWN DEFAULTS, and they are NOT the speed ones.
+// ACCELERATION HAS ITS OWN DEFAULTS, NOT the speed ones.
 //
-// Acceleration decides how far an axis carries on after the operator lets
-// go -- coast = v^2 / 2a -- so an axis tuned for speed alone overshoots.
-// The arm proved it: sharing a 125% speed figure it ramped for 0.40 s and
-// coasted 225 MOTOR degrees, most of its taught band, on every release.
+// Accel decides how far an axis carries on after the key is released --
+// coast = v^2 / 2a. At 125% speed and 125% accel the arm ramped 0.40 s
+// and coasted 225 MOTOR degrees, most of its taught band, every release.
 //
-// Off the machine, with the speeds above. Keep them in step with
-// DEFAULT_*_ACC_PCT in robot_sim/config.py -- python_check.py reads this
-// file and fails if they drift -- and do not collapse them back onto the
-// speed percentages.
+// Off the machine. Keep in step with DEFAULT_*_ACC_PCT in
+// robot_sim/config.py -- python_check.py reads this file and fails on
+// drift. Do not collapse them back onto the speed percentages.
 const float ROT_ACC_PCT_DEF    = 100.0f;
 const float ARM_ACC_PCT_DEF    = 70.0f;
 const float Z_ACC_PCT_DEF      = 200.0f;
@@ -329,23 +378,21 @@ const uint16_t PLC_PORT = 1025;
 #define CC_IP_3 200
 
 // M30..M32 ARE THE ONLY DEVICES THIS BOARD READS.
-// M1 (DONE), M5..M8 (home sensors) and M10..M13 (run) were all polled and
-// reported once. They gated nothing - HOME completes on M30..M32 and the
-// home-state latch is the same three bits - so reporting them only invited
-// the operator to read a lamp that decides nothing. The panel showed M5..M8
-// while M30 was the bit actually refusing a jog.
+// M1 (DONE), M5..M8 (home sensors) and M10..M13 (run) were polled and
+// reported but gated nothing, so they only invited the operator to read a
+// lamp that decides nothing. The panel showed M5..M8 while M30 was the
+// bit actually refusing a jog.
 
 // TRAVEL LIMIT SWITCHES. Unlike the old M5..M8 these DO stop an axis.
-// A1M has no switch fitted, so there is deliberately no PLC_M_LIMIT_A1.
+// A1M has no switch fitted -- deliberately no PLC_M_LIMIT_A1.
 //
-// ZM AND A2M ARE SWAPPED FROM THE OBVIOUS ORDER, measured on the machine:
-// M32 is the device that tracks ZM (covered at the bottom of the stroke,
-// clearing as Z rises), and M30 is A2M's. The board originally assumed the
-// tidy M30=ZM / M32=A2M order, so ZM watched M30 — which sits at 1 — and
-// with its switch at the minimum end every Z_DOWN was refused wherever the
-// carriage actually was. That is the jog fault chased through soft limits,
-// gear ratios and poll rates for a whole session; none of those could have
-// fixed it, because the bit being read was never ZM's.
+// ZM AND A2M ARE SWAPPED from the tidy order, measured on the machine:
+// M32 tracks ZM (covered at the bottom, clears as Z rises), M30 is A2M's.
+// The board first assumed M30=ZM, so ZM watched a bit sitting at 1 and,
+// with its switch at the minimum end, every Z_DOWN was refused wherever
+// the carriage was. That fault was chased through soft limits, gear
+// ratios and poll rates for a session; none could have fixed it, because
+// the bit being read was never ZM's.
 const int PLC_M_LIMIT_Z   = 32;
 const int PLC_M_LIMIT_ROT = 31;
 const int PLC_M_LIMIT_A2  = 30;
@@ -403,16 +450,14 @@ const unsigned long PLC_LIMIT_LED_BLINK_MS = 250;
 // ==============================================================
 // 340 DEGREE SCAN  --  distance sensor on the arm, one sweep per layer
 // ==============================================================
-// A separate application (Scan/) drives this. It is in THIS firmware and
-// not a second sketch on purpose: the scan sweeps RM with the same jog
-// primitives an operator's key press uses, so every soft limit, every PLC
-// travel switch and the E-STOP path apply to it unchanged. A second sketch
-// would have had to reimplement all of that, and would have got it wrong.
+// Driven by a separate application (Scan/), but living in THIS firmware
+// on purpose: the scan sweeps RM through the same jog primitives a key
+// press uses, so every soft limit, PLC switch and the E-STOP path apply
+// unchanged. A second sketch would have had to reimplement all of it.
 //
-// PINS. IO-3/4/5 are the PLC limit lamps and IO-1/IO-2 belong to the opt-in
-// rotary limit sensors, so the scan takes IO-0 and, for the echo, IO-1 --
-// which is free while ENABLE_ROT_Z_LIMIT_SENSORS is 0. Check that flag
-// before wiring.
+// PINS. IO-3/4/5 are the PLC limit lamps, IO-1/IO-2 belong to the opt-in
+// rotary sensors, so the scan takes IO-0 and IO-1 for the echo -- free
+// while ENABLE_ROT_Z_LIMIT_SENSORS is 0. Check that flag before wiring.
 #define SCAN_TRIG_PIN    IO0    // ultrasonic trigger out
 #define SCAN_ECHO_PIN    IO1    // ultrasonic echo in
 #define SCAN_ANALOG_PIN  A9     // analog laser / IR distance in
@@ -423,10 +468,10 @@ const unsigned long PLC_LIMIT_LED_BLINK_MS = 250;
 enum ScanSensorKind { SCAN_SENSOR_ULTRASONIC = 0, SCAN_SENSOR_ANALOG = 1 };
 int scanSensorKind = SCAN_SENSOR_ULTRASONIC;
 
-// Ultrasonic: HC-SR04 family. 10 us trigger, echo pulse width is the round
-// trip, so the distance is half of it. 30 ms of echo is about 5 m, past
-// which there is nothing this machine can see and waiting costs sweep
-// accuracy -- a blocking read smears the angle the sample is stamped with.
+// Ultrasonic: HC-SR04 family. 10 us trigger, echo width is the round
+// trip, so distance is half. 30 ms echo is about 5 m; past that there is
+// nothing to see and waiting costs sweep accuracy -- a blocking read
+// smears the angle the sample is stamped with.
 const unsigned long SCAN_TRIG_US       = 10;
 const unsigned long SCAN_ECHO_TIMEOUT_US = 30000;
 const double SCAN_MM_PER_US = 0.1715;        // 343 m/s, halved for the return trip
@@ -437,13 +482,12 @@ const double SCAN_MM_PER_US = 0.1715;        // 343 m/s, halved for the return t
 double scanAnalogMmPerCount = 0.0;
 double scanAnalogOffsetMm   = 0.0;
 
-// Scanning sweeps slowly. At full RM speed a 30 ms ultrasonic read happens
-// over 3 degrees of travel, which is the width of the feature you are
-// trying to find. A quarter of that is the point of this scale.
+// Scanning sweeps slowly. At full RM speed a 30 ms ultrasonic read spans
+// 3 degrees of travel -- the width of the feature you are looking for.
+// A quarter of that is the point of this scale.
 //
-// THE FALLBACK, not the rule: SCAN_START may carry a sweep speed in deg/s,
-// derived by the host from sample rate and points per layer. A 0, or a
-// line without the field, falls back to this scale.
+// FALLBACK, not the rule: SCAN_START may carry a sweep speed in deg/s,
+// derived by the host. A 0, or a line without the field, falls back here.
 const float SCAN_SPEED_SCALE = 0.20f;
 
 // Requested sweep speed, deg/s at the output, 0 = none given. Clamped to
@@ -453,21 +497,21 @@ double scanRotDegS = 0.0;
 const double SCAN_ROT_DEG_S_MIN = 0.01;
 
 const double SCAN_SWEEP_DEG_DEF  = 340.0;   // the turntable's whole travel
-// A SHORTER sweep is allowed -- scanning one wall is a real job, and 340 is
-// the travel, not a requirement. Longer is not: the turntable cannot reach
-// past its own stop, so the extra degrees would be spent grinding into the
-// RM soft limit and the layer would abort mid-sweep. Refused up front
-// instead, where the number can still be corrected.
+// SHORTER sweep allowed -- scanning one wall is a real job, and 340 is
+// the travel, not a requirement. Longer is not: the turntable cannot
+// reach past its own stop, so the extra degrees would grind into the RM
+// soft limit and abort the layer mid-sweep. Refused up front, where the
+// number can still be corrected.
 const double SCAN_SWEEP_DEG_MIN  = 1.0;
 const double SCAN_DEG_STEP_MIN   = 0.10;
 const double SCAN_DEG_STEP_MAX   = 90.0;   // a quarter turn, the coarsest that still means anything
 const double SCAN_Z_STEP_MIN_MM  = 0.10;
 const int    SCAN_LAYERS_MAX     = 500;
 
-// Positions are integer step counts divided by a pulses-per-unit figure, so
-// an axis commanded to exactly 340 deg reads 339.998. Every arrival test
-// here needs a tolerance or the phase never advances -- the sweep would run
-// into the RM soft limit waiting for a number it cannot land on.
+// Positions are step counts over a pulses-per-unit figure, so an axis
+// commanded to exactly 340 deg reads 339.998. Every arrival test needs a
+// tolerance or the phase never advances -- the sweep would run into the
+// RM soft limit waiting for a number it cannot land on.
 const double SCAN_ANGLE_EPS_DEG  = 0.05;
 const double SCAN_Z_EPS_MM       = 0.02;
 
@@ -476,10 +520,9 @@ const double SCAN_Z_EPS_MM       = 0.02;
 enum ScanPhase { SCAN_OFF, SCAN_SEEK, SCAN_SWEEP, SCAN_LIFT };
 ScanPhase scanPhase = SCAN_OFF;
 
-// Far more than a turn: the switch should be found inside 360 deg, and
-// anything past that means it is not going to be. Without this a miswired
-// switch turns into an axis grinding against its soft limit until somebody
-// notices.
+// Far more than a turn: the switch should be found inside 360 deg.
+// Without this a miswired switch grinds against the soft limit until
+// somebody notices.
 const double SCAN_SEEK_MAX_DEG = 400.0;
 
 int    scanLayer = 0;             // 1-based once running
@@ -497,35 +540,35 @@ double scanSweepFrom = 0.0;       // the angle THIS layer started at
 
 // -1 = axis minimum, +1 = axis maximum
 // ZM sits at the BOTTOM of the stroke, so it stops Z_DOWN and Z_UP comes
-// off it. RM is mounted inverted: its switch stops ROT_CW, not ROT_CCW.
+// off it. RM's M31 is at the CCW end -- the end the arm parks at, and the
+// end its own counter calls 0 -- so it stops ROT_CCW.
+//
+// IT READ +1/CW AND THAT PINNED RM OUTRIGHT. HOME drives RM onto M31 and
+// finishHoming() calls PositionRefSet(0) there, so RM's zero IS the
+// switch. Calling that zero the axis MAXIMUM made every P2P point with
+// rot > 0 read as "further into" a covered switch and be refused, while
+// the one direction left, CCW, ran straight under lim_rot_min = 0. An
+// axis cannot stand on its minimum and on its maximum switch at once --
+// and the home state (M30 && M31 && M32, at the minimum of all four
+// axes) only holds if this switch is at RM's home end.
 const int PLC_LIMIT_END_Z   = -1;
-const int PLC_LIMIT_END_ROT = +1;
+const int PLC_LIMIT_END_ROT = -1;
 const int PLC_LIMIT_END_A2  = -1;
 
-// A2M's switch is wired at BOTH ends of its travel; the other two are not.
-// One PLC device, two physical switches in parallel, so the bit alone
-// cannot say which end tripped it. The DIRECTION THE AXIS WAS TRAVELLING
-// when the bit went on does say, and that is what plcServiceLimitLatch()
-// records: covered while driving forward is the FORWARD limit, covered
-// while driving back is the BACK limit. Only that direction is refused;
-// the other stays available, or the axis would be pinned on its own
-// switch with no way off.
+// A2M switch wired at BOTH ends. One device, two switches, so the bit
+// cannot say which end. TRAVEL DIRECTION when bit went on can, and that
+// is what plcServiceLimitLatch() records. Only that direction refused --
+// other stays open, else axis pinned on own switch with no way off.
 //
-// PLC_LIMIT_END_* above stays the HOME-side end. It is what the latch
-// falls back to when the bit comes on with the axis stopped (which is
-// what sitting at HOME looks like), it is the end HOME drives toward, and
-// it is the only end that may count toward the home state -- a bit that
-// is on because the arm is fully EXTENDED must never be read as "at home"
-// and zero the counters.
+// PLC_LIMIT_END_* = the HOME-side end. Latch fallback when bit comes on
+// with axis stopped, the end HOME drives toward, and the ONLY end that
+// may count toward home state. A bit on because the arm is fully
+// EXTENDED must never read as at-home and zero the counters.
 //
-// KNOWN GAP, deliberate: a board that boots with the bit ALREADY on has
-// no edge to latch from, so it assumes the home end. Powering up with the
-// arm parked at home is the normal case and that assumption is right; if
-// the machine was powered down sitting on the FAR switch it will read as
-// the back end until the switch clears once. The alternative -- refusing
-// to guess -- either pins the axis (both directions refused) or blocks
-// HOME forever, since HOME is what would produce the edge in the first
-// place.
+// KNOWN GAP, deliberate: board booting with bit already on has no edge,
+// assumes home end. Parked at home is the normal case, so that is right.
+// Refusing to guess instead either pins the axis or blocks HOME forever
+// -- and HOME is what would produce the edge.
 const bool PLC_LIMIT_BOTH_ENDS_Z   = false;
 const bool PLC_LIMIT_BOTH_ENDS_ROT = false;
 const bool PLC_LIMIT_BOTH_ENDS_A2  = true;
@@ -572,9 +615,305 @@ bool isMoving = false;
 RunPhase runPhase = PHASE_NONE;
 float runStartD1 = 0, runStartRot = 0, runStartA1 = 0, runStartA2 = 0;
 float runTargetD1 = 0, runTargetRot = 0, runTargetA1 = 0, runTargetA2 = 0;
+
+// ══════════════════════════════════════════════════════════════
+// ANGULAR MOTION PROFILE  --  the SHAPE of a run leg's ramp
+// ══════════════════════════════════════════════════════════════
+// Ported from Compare_Angular_Motion_Profiles.m, the same maths the GUI's
+// robot_sim/motion_profile.py draws. All three must agree: the panel
+// promises a curve and this is what executes it.
+//
+// WHY THIS EXISTS AT ALL. Move(MOVE_TARGET_ABSOLUTE) gives a TRAPEZOIDAL
+// ramp and nothing else -- VelMax and AccelMax are the only knobs, so
+// acceleration steps between three values and the jerk at each corner is
+// infinite. That step is what an open-loop stepper hears as a bang, and
+// with no encoder there is nothing to notice a lost step.
+//
+// HOW THE SHAPE IS IMPOSED. Not by asking the step generator for it; it
+// cannot do it. The leg is INTERPOLATED instead: a normalised profile runs
+// on u = 0..1 and every service pass commands each axis to
+// start + u*(target-start). The generator only ever chases a setpoint that
+// is already moving the way we want, which it can do because the setpoint
+// never asks for more than the axis's own VelMax/AccelMax.
+//
+// ONE TIME BASE FOR ALL FOUR AXES. u is shared, so they start together,
+// finish together and hold their ratios all the way. The profile's limits
+// are the tightest any axis imposes -- min over axes of vmax/|delta| and
+// amax/|delta| -- so no axis is ever asked past its own ceiling.
+//
+// That coordination is a CHANGE, not just a smoothing: the unprofiled path
+// issues four independent Move() calls that finish whenever they finish.
+// With a profile the leg is one motion. Worth knowing before comparing the
+// two by eye.
+MotionProfileKind motionProfile = PROFILE_NONE;
+
+// rS from the .m. 0.5 eases half the ramp; the pure S-curve is r = 1,
+// where the constant-acceleration phase disappears entirely.
+const double SCURVE_RATIO = 0.5;
+
+ProfilePlan runPlan;
+bool          runProfileActive = false;
+unsigned long runProfileT0 = 0;
+
+// generateTrapezoidalAngular(), reduced to its timing.
+void planTrapezoid(ProfilePlan &p, double Theta, double omegaMax, double alphaMax) {
+  p.sCurve = false;
+  p.Theta = Theta;
+  p.alphaMax = alphaMax;
+  double thetaMin = omegaMax * omegaMax / alphaMax;
+  if (Theta >= thetaMin) {
+    p.vp = omegaMax;
+    p.ta = p.vp / alphaMax;
+    p.tv = Theta / p.vp - p.ta;
+  } else {
+    // Too short to reach omegaMax: the trapezium becomes a triangle.
+    p.vp = sqrt(Theta * alphaMax);
+    p.ta = p.vp / alphaMax;
+    p.tv = 0.0;
+  }
+  p.T = 2.0 * p.ta + p.tv;
+}
+
+// generateSCurveAngular(). r = 1 gives the pure S-curve, where tA is zero
+// and the two eases are the whole ramp.
+void planSCurve(ProfilePlan &p, double Theta, double omegaMax,
+                double alphaMax, double r) {
+  p.sCurve = true;
+  p.Theta = Theta;
+  p.alphaMax = alphaMax;
+
+  double taMax = (1.0 + r) * omegaMax / alphaMax;
+  double thetaMin = omegaMax * taMax;
+  double vp = (Theta >= thetaMin) ? omegaMax
+                                  : sqrt(Theta * alphaMax / (1.0 + r));
+  double tJ = r * vp / alphaMax;
+  double tA = (1.0 - r) * vp / alphaMax;
+  double tV = Theta / vp - (2.0 * tJ + tA);
+  if (tV < 1e-12) tV = 0.0;
+  double J = (tJ > 0.0) ? alphaMax / tJ : 0.0;
+
+  const double durs[7] = {tJ, tA, tJ, tV, tJ, tA, tJ};
+  const double jerks[7] = {J, 0.0, -J, 0.0, -J, 0.0, J};
+  p.T = 0.0;
+  for (int i = 0; i < 7; i++) {
+    p.dur[i] = durs[i];
+    p.jrk[i] = jerks[i];
+    p.T += durs[i];
+  }
+
+  // State at the START of each phase, integrated forward once.
+  p.s0[0] = p.v0[0] = p.a0[0] = 0.0;
+  p.tStart[0] = 0.0;
+  for (int k = 1; k < 7; k++) {
+    double h = p.dur[k - 1], j = p.jrk[k - 1];
+    p.a0[k] = p.a0[k - 1] + j * h;
+    p.v0[k] = p.v0[k - 1] + p.a0[k - 1] * h + 0.5 * j * h * h;
+    p.s0[k] = p.s0[k - 1] + p.v0[k - 1] * h + 0.5 * p.a0[k - 1] * h * h
+            + j * h * h * h / 6.0;
+    p.tStart[k] = p.tStart[k - 1] + p.dur[k - 1];
+  }
+}
+
+// Displacement at time t. Past the end it pins to Theta, so a late service
+// pass can never command a setpoint beyond the target.
+double profileAt(const ProfilePlan &p, double t) {
+  if (t <= 0.0) return 0.0;
+  if (t >= p.T) return p.Theta;
+
+  if (!p.sCurve) {
+    if (t <= p.ta) return 0.5 * p.alphaMax * t * t;
+    double thetaA = 0.5 * p.alphaMax * p.ta * p.ta;
+    if (t <= p.ta + p.tv) return thetaA + p.vp * (t - p.ta);
+    double tau = t - (p.ta + p.tv);
+    return thetaA + p.vp * p.tv + p.vp * tau - 0.5 * p.alphaMax * tau * tau;
+  }
+
+  // First phase that both CONTAINS t and actually exists. The length test
+  // matters at r = 1, where the two constant-acceleration phases are zero
+  // length and would otherwise swallow the sample.
+  int k = 6;
+  double tEnd = 0.0;
+  for (int i = 0; i < 7; i++) {
+    tEnd += p.dur[i];
+    if (t <= tEnd + 1e-12 && p.dur[i] > 1e-14) { k = i; break; }
+  }
+  double tau = t - p.tStart[k];
+  if (tau < 0.0) tau = 0.0;
+  if (tau > p.dur[k]) tau = p.dur[k];
+  double j = p.jrk[k];
+  return p.s0[k] + p.v0[k] * tau + 0.5 * p.a0[k] * tau * tau
+       + j * tau * tau * tau / 6.0;
+}
+
+// Plans the CURRENT leg on u = 0..1, from runStart*/runTarget*.
+//
+// The limits are normalised by each axis's own share of the move: an axis
+// covering 90 deg while another covers 9 needs a tenth of the u-rate to
+// stay inside the same ceiling, so the profile takes the tightest of the
+// four and every axis is inside its own limit for the whole leg.
+//
+// Returns false for a leg with nothing to do, or one whose limits have not
+// been computed yet -- the caller then falls back to the plain Move(),
+// which is also what PROFILE_NONE gets.
+bool planRunProfile() {
+  const double dz  = fabs((double)runTargetD1  - runStartD1);
+  const double dr  = fabs((double)runTargetRot - runStartRot);
+  const double da1 = fabs((double)runTargetA1  - runStartA1);
+  const double da2 = fabs((double)runTargetA2  - runStartA2);
+  if (dz < 1e-6 && dr < 1e-6 && da1 < 1e-6 && da2 < 1e-6) return false;
+
+  const double deltas[4] = {dz, dr, da1, da2};
+  const double vmax[4] = {zVelMmS, rotVelDegS, armVelDegS, armVelDegS};
+  const double amax[4] = {zAccMmS2, rotAccDegS2, armAccDegS2, armAccDegS2};
+
+  double omegaU = 0.0, alphaU = 0.0;
+  for (int i = 0; i < 4; i++) {
+    if (deltas[i] < 1e-9) continue;          // this axis is not moving
+    if (vmax[i] <= 0.0 || amax[i] <= 0.0) return false;
+    const double vu = vmax[i] / deltas[i];
+    const double au = amax[i] / deltas[i];
+    if (omegaU <= 0.0 || vu < omegaU) omegaU = vu;
+    if (alphaU <= 0.0 || au < alphaU) alphaU = au;
+  }
+  if (omegaU <= 0.0 || alphaU <= 0.0) return false;
+
+  switch (motionProfile) {
+    case PROFILE_TRAPEZOID:   planTrapezoid(runPlan, 1.0, omegaU, alphaU); break;
+    case PROFILE_SCURVE:      planSCurve(runPlan, 1.0, omegaU, alphaU, SCURVE_RATIO); break;
+    case PROFILE_PURE_SCURVE: planSCurve(runPlan, 1.0, omegaU, alphaU, 1.0); break;
+    default: return false;
+  }
+  return runPlan.T > 1e-6;
+}
+
+// EVERY run leg starts here, so the profile cannot be wired to one entry
+// point and missed on another. With no profile this is exactly what the
+// code did before: one absolute Move per axis.
+void commandRunLeg() {
+  runProfileActive = false;
+  if (motionProfile != PROFILE_NONE && planRunProfile()) {
+    runProfileT0 = millis();
+    runProfileActive = true;
+    // Nothing commanded yet on purpose: at u = 0 the setpoint IS where the
+    // axes already are, and serviceRun() walks it from there.
+    return;
+  }
+  moveJointsAbsolute(runTargetD1, runTargetRot, runTargetA1, runTargetA2);
+}
+
+const char *motionProfileName() {
+  switch (motionProfile) {
+    case PROFILE_TRAPEZOID:   return "TRAPEZOIDAL";
+    case PROFILE_SCURVE:      return "SCURVE";
+    case PROFILE_PURE_SCURVE: return "PURE_SCURVE";
+    default:                  return "NONE";
+  }
+}
 unsigned long lastRunReportTime = 0;
 
 int rotDir = 0, a1Dir = 0, a2Dir = 0, jzDir = 0;
+
+// ── JOG RAMP -- the "useful half" of the leg profile, on a held key ──
+//
+// A leg profile needs Theta (the total move) up front to size the
+// cruise phase; a jog key has none -- the operator lets go whenever.
+// What IS known the moment the key goes down is the axis's own jog
+// speed and accel, and that is exactly the s-curve's ramp-up math
+// (tJ, tA, J) with Theta and the cruise/tV term left out. So only that
+// half gets built: ease up to the held speed, and mirror it easing
+// back down on release. NONE and TRAPEZOIDAL are skipped entirely --
+// TRAPEZOIDAL's jerk is infinite at the corners anyway, which is
+// exactly the plain MoveVelocity() step jog already did, so there is
+// nothing to add for it.
+//
+// Deliberately NOT wired into any SAFETY stop -- soft limit, PLC
+// limit, watchdog, cancelJog/ESTOP. Every one of those still calls
+// MoveVelocity(0) directly and unconditionally; only a voluntary
+// *_STOP / stopArmJog release gets the eased-down ramp. cancelJog()
+// clears the ramp state below so a stale ramp can never out-live it.
+JogRamp jogRampRot, jogRampA1, jogRampA2, jogRampZ;
+
+
+bool jogRampWanted() {
+  return motionProfile == PROFILE_SCURVE || motionProfile == PROFILE_PURE_SCURVE;
+}
+
+// Velocity at time t into an ease from rest to vp -- planSCurve()'s own
+// three ramp-up phases (+J, hold accel, -J), Theta and tV left out.
+double jogRampV(const JogRamp &r, double t) {
+  double T = 2.0 * r.tJ + r.tA;
+  if (t <= 0.0)  return 0.0;
+  if (t >= T)    return r.vp;
+  if (t <= r.tJ) return 0.5 * r.J * t * t;
+  double v1 = 0.5 * r.alphaMax * r.tJ;
+  if (t <= r.tJ + r.tA) return v1 + r.alphaMax * (t - r.tJ);
+  double tau = t - (r.tJ + r.tA);
+  double v2 = v1 + r.alphaMax * r.tA;
+  return v2 + r.alphaMax * tau - 0.5 * r.J * tau * tau;
+}
+
+// Arms a fresh ramp-up. vp/alphaMax are THIS axis's own jog speed and
+// accel (pulses/s, pulses/s^2), already scaled by boost/home/scan --
+// same numbers applyJogVelocities() would otherwise command flat.
+void armJogRamp(JogRamp &r, int dir, double vp, double alphaMax) {
+  r.dir      = dir;
+  r.vp       = fabs(vp);
+  r.alphaMax = fabs(alphaMax);
+  r.active = r.releasing = false;
+  if (!jogRampWanted() || r.vp <= 1e-9 || r.alphaMax <= 1e-9) return;
+  double rS = (motionProfile == PROFILE_PURE_SCURVE) ? 1.0 : SCURVE_RATIO;
+  r.tJ = rS * r.vp / r.alphaMax;
+  r.tA = (1.0 - rS) * r.vp / r.alphaMax;
+  r.J  = (r.tJ > 0.0) ? r.alphaMax / r.tJ : 0.0;
+  r.t0 = millis();
+  r.active = true;
+}
+
+// Starts the release ease -- only from a STEADY jog (ramp already at
+// vp, or no profile picked at all). A release mid ramp-up falls back
+// to the ordinary hard MoveVelocity(0): mirroring a ramp that never
+// reached vp needs solving from wherever it currently sits, which is
+// exactly the closed-loop problem Theta lets the ramp-up side skip.
+// Returns false when the caller should do that hard stop itself.
+bool releaseJogRamp(JogRamp &r) {
+  bool wasSteady = jogRampWanted() && !r.active && r.vp > 1e-9;
+  r.active = false;
+  if (!wasSteady) { r.releasing = false; return false; }
+  r.t0 = millis();
+  r.releasing = true;
+  return true;
+}
+
+// Velocity command for one mid-ease axis this pass, or a sentinel
+// meaning "nothing to send" -- the caller decides whether that means
+// leave the motor alone (steady jog) or that a safety stop already
+// zeroed it this same pass.
+bool jogRampTick(JogRamp &r, int liveDir, int32_t &pulsesOut) {
+  if (!r.active && !r.releasing) return false;
+  if (r.active && liveDir == 0) { r.active = false; return false; }  // safety stop won this tick
+
+  double t = (millis() - r.t0) / 1000.0;
+  double T = 2.0 * r.tJ + r.tA;
+  double v = r.active ? jogRampV(r, t) : jogRampV(r, T - t);
+  pulsesOut = (int32_t)lround(r.dir * v);
+
+  if (r.active    && t >= T) r.active    = false;   // now steady at vp
+  if (r.releasing && t >= T) r.releasing = false;    // now at rest
+  return true;
+}
+
+// Every loop() pass. Drives only the axes mid-ease; a steady jog
+// (ramp finished, or no profile picked) is untouched here and stays on
+// applyJogVelocities()'s ordinary output. Repeated per axis, like the
+// rest of the jog service functions above.
+void serviceJogRamps() {
+  int32_t p;
+  if (jogRampTick(jogRampRot, rotDir, p)) MOTOR_ROT.MoveVelocity(p * (INVERT_ROT  ? -1 : 1));
+  if (jogRampTick(jogRampA1,  a1Dir,  p)) MOTOR_A1.MoveVelocity(p * (INVERT_ARM1 ? -1 : 1));
+  if (jogRampTick(jogRampA2,  a2Dir,  p)) MOTOR_A2.MoveVelocity(p * (INVERT_ARM2 ? -1 : 1));
+  if (jogRampTick(jogRampZ,   jzDir,  p)) MOTOR_Z.MoveVelocity(p * (INVERT_Z    ? -1 : 1));
+}
+
 unsigned long lastJogReportTime = 0;
 
 bool isHoming = false;
@@ -634,10 +973,16 @@ IkResult solveIkFrogleg(int arm, double X, double Y, double Z) {
     return r;
   }
 
+  // TAUGHT BOUNDARIES NO LONGER GATE A P2P SOLVE. Asked for directly.
+  //
+  // What is left is the PHYSICAL stroke, which is not a setting and is not
+  // the operator's to widen: past D1_MAX_MM the carriage is driving into
+  // its own top stop. Losing the taught band was the request; losing the
+  // stroke would let a typed Z put the lift through the end of the rail.
   double d1 = Z - zOffsetForArm(arm);
-  if (axisEnforced("Z") && (d1 < limD1Min - 1e-6 || d1 > limD1Max + 1e-6)) {
+  if (d1 < D1_MIN_MM - 1e-6 || d1 > D1_MAX_MM + 1e-6) {
     r.error = "[ERROR] Z=" + String(d1, 2) + " from HOME is out of ZM travel "
-              "(allowed " + String(limD1Min, 1) + ".." + String(limD1Max, 1)
+              "(the stroke is " + String(D1_MIN_MM, 1) + ".." + String(D1_MAX_MM, 1)
             + " mm above HOME; Z is never negative). That would put arm "
             + String(arm) + "'s deck at an absolute " + String(Z, 2) + " mm";
     return r;
@@ -650,9 +995,13 @@ IkResult solveIkFrogleg(int arm, double X, double Y, double Z) {
     if (th2 < 0.0) th2 += 360.0;
   }
 
-  if (axisEnforced("ROT") && (th2 < limRotMin - 1e-6 || th2 > limRotMax + 1e-6)) {
-    r.error = "[ERROR] ROT=" + String(th2, 2) + " deg outside allowed ["
-            + String(limRotMin, 1) + ", " + String(limRotMax, 1) + "]";
+  // Physical travel, not the taught band. The 20 deg between 340 and 360 is
+  // the wedge the turntable cannot sweep through from either side, so a
+  // bearing in it has no solution however the boundaries are set.
+  if (th2 < ROT_MIN_DEG - 1e-6 || th2 > ROT_MAX_DEG + 1e-6) {
+    r.error = "[ERROR] ROT=" + String(th2, 2) + " deg is outside RM's travel ["
+            + String(ROT_MIN_DEG, 1) + ", " + String(ROT_MAX_DEG, 1) + "] - the "
+              "turntable cannot reach that bearing from either side";
     return r;
   }
 
@@ -664,20 +1013,11 @@ IkResult solveIkFrogleg(int arm, double X, double Y, double Z) {
     return r;
   }
 
-  const char *axisTok = (arm == 2) ? "A2" : "A1";
-  if (axisEnforced(axisTok)) {
-    double thMin, thMax;
-    armBand(arm, thMin, thMax);
-    double rMin, rMax;
-    reachBandFor(armFoldFromMotor(thMin) + FOLD_ANGLE_HOME_DEG,
-                 armFoldFromMotor(thMax) + FOLD_ANGLE_HOME_DEG, rMin, rMax);
-    if (R < rMin - 1e-6 || R > rMax + 1e-6) {
-      r.error = "[ERROR] R=" + String(R, 2) + " mm outside the band YOU taught for "
-              + String(axisTok) + " [" + String(rMin, 1) + ", " + String(rMax, 1)
-              + "] mm. Re-teach that boundary, or switch its enforcement off";
-      return r;
-    }
-  }
+  // THE TAUGHT REACH BAND IS GONE FROM HERE. It refused a radius outside
+  // the elbow boundary the operator taught; the arithmetic span checked
+  // just above is what remains, and that one is not negotiable -- outside
+  // it there is no elbow angle at all and acos would hand back a pose
+  // nobody asked for.
 
   r.ok  = true;
   r.d1  = d1;
@@ -844,24 +1184,24 @@ void decelStopAll(bool estop) {
 }
 
 
+// PHYSICAL TRAVEL ONLY. The taught boundaries used to be checked here too
+// and no longer are -- asked for directly, so a P2P point outside the band
+// the operator taught now LOADS and RUNS.
+//
+// The two that stay are not settings. ZM past D1_MAX_MM is the carriage
+// driving into its top stop, and RM past ROT_MAX_DEG is a bearing the
+// turntable cannot reach from either side. The elbows keep no check at all
+// here: their travel is bounded by the frog-leg arithmetic in
+// solveIkFrogleg(), which is the only elbow limit that was ever structural.
 bool jointTargetIsLegal(float d1, float rot, float a1, float a2, String &why) {
-  if (axisEnforced("Z") && (d1 < limD1Min - 0.01 || d1 > limD1Max + 0.01)) {
-    why = "d1=" + String(d1, 2) + " outside [" + String(limD1Min, 1) + ", "
-        + String(limD1Max, 1) + "] mm"; return false;
+  (void)a1; (void)a2;
+  if (d1 < D1_MIN_MM - 0.01 || d1 > D1_MAX_MM + 0.01) {
+    why = "d1=" + String(d1, 2) + " outside ZM's travel [" + String(D1_MIN_MM, 1)
+        + ", " + String(D1_MAX_MM, 1) + "] mm"; return false;
   }
-  if (axisEnforced("ROT") && (rot < limRotMin - 0.01 || rot > limRotMax + 0.01)) {
-    why = "rot=" + String(rot, 2) + " outside [" + String(limRotMin, 1) + ", "
-        + String(limRotMax, 1) + "] deg"; return false;
-  }
-  double b1Lo, b1Hi; armBand(1, b1Lo, b1Hi);
-  if (axisEnforced("A1") && (a1 < b1Lo - 0.01 || a1 > b1Hi + 0.01)) {
-    why = "A1M th3=" + String(a1, 2) + " outside [" + String(b1Lo, 1)
-        + ", " + String(b1Hi, 1) + "] deg"; return false;
-  }
-  double b2Lo, b2Hi; armBand(2, b2Lo, b2Hi);
-  if (axisEnforced("A2") && (a2 < b2Lo - 0.01 || a2 > b2Hi + 0.01)) {
-    why = "A2M th3=" + String(a2, 2) + " outside [" + String(b2Lo, 1)
-        + ", " + String(b2Hi, 1) + "] deg"; return false;
+  if (rot < ROT_MIN_DEG - 0.01 || rot > ROT_MAX_DEG + 0.01) {
+    why = "rot=" + String(rot, 2) + " outside RM's travel [" + String(ROT_MIN_DEG, 1)
+        + ", " + String(ROT_MAX_DEG, 1) + "] deg"; return false;
   }
   return true;
 }
@@ -995,6 +1335,14 @@ void reportLimits() {
 // ══════════════════════════════════════════════════════════════
 void cancelJog() {
   rotDir = a1Dir = a2Dir = jzDir = 0;
+  // Unlike a voluntary *_STOP, this must win over an in-progress ease --
+  // ESTOP/STOP/mode-switch route here and cannot wait out a release
+  // ramp. Clearing both flags stops serviceJogRamps() re-issuing a
+  // nonzero velocity next pass on top of the MoveVelocity(0) below.
+  jogRampRot.active = jogRampRot.releasing = false;
+  jogRampA1.active  = jogRampA1.releasing  = false;
+  jogRampA2.active  = jogRampA2.releasing  = false;
+  jogRampZ.active   = jogRampZ.releasing   = false;
   MOTOR_ROT.MoveVelocity(0);
   MOTOR_A1.MoveVelocity(0);
   MOTOR_A2.MoveVelocity(0);
@@ -1004,6 +1352,9 @@ void cancelJog() {
 void cancelRun() {
   isMoving = false;
   runPhase = PHASE_NONE;
+  // The interpolator has to stop with it. Left armed, the next leg would
+  // resume walking a setpoint planned for a move that was abandoned.
+  runProfileActive = false;
 }
 
 // HOME drives the motors itself now, so cancelling has to STOP them. When
@@ -1109,7 +1460,7 @@ void handleMoveXyz(const String &payload) {
   runStartD1 = currentD1(); runStartRot = currentRot();
   runStartA1 = currentA1(); runStartA2 = currentA2();
   runTargetD1 = d1; runTargetRot = rot; runTargetA1 = a1; runTargetA2 = a2;
-  moveJointsAbsolute(d1, rot, a1, a2);
+  commandRunLeg();
   isMoving = true;
   runPhase = PHASE_DUAL;
   lastRunReportTime = millis();
@@ -1214,7 +1565,7 @@ void beginRun() {
     sendFeedback("[WARN] Jog that axis off its limit, then RUN again.");
     return;
   }
-  moveJointsAbsolute(runTargetD1, runTargetRot, runTargetA1, runTargetA2);
+  commandRunLeg();
   isMoving = true;
   lastRunReportTime = millis();
 }
@@ -1235,7 +1586,7 @@ void beginRunLeg(RunPhase phase, float d1, float rot, float a1, float a2,
   runStartD1 = currentD1(); runStartRot = currentRot();
   runStartA1 = currentA1(); runStartA2 = currentA2();
   runTargetD1 = d1; runTargetRot = rot; runTargetA1 = a1; runTargetA2 = a2;
-  moveJointsAbsolute(runTargetD1, runTargetRot, runTargetA1, runTargetA2);
+  commandRunLeg();
 }
 
 void beginResetPosition() {
@@ -1277,6 +1628,30 @@ void serviceRun() {
     lastRunReportTime = now;
     reportRunPosition(runProgressPercent());
   }
+
+  // ---- walking the profile ------------------------------------------
+  //
+  // BEFORE the settled test, not after. The setpoint is only ever a little
+  // ahead of the axes, so they ARE momentarily settled between updates;
+  // testing first would end the leg on its first pass.
+  if (runProfileActive) {
+    double t = (now - runProfileT0) / 1000.0;
+    if (t < runPlan.T) {
+      double u = profileAt(runPlan, t) / runPlan.Theta;
+      moveJointsAbsolute(
+        runStartD1  + (float)(u * (runTargetD1  - runStartD1)),
+        runStartRot + (float)(u * (runTargetRot - runStartRot)),
+        runStartA1  + (float)(u * (runTargetA1  - runStartA1)),
+        runStartA2  + (float)(u * (runTargetA2  - runStartA2)));
+      return;
+    }
+    // Time is up. Command the EXACT target once -- the interpolation is
+    // float arithmetic on a millisecond clock and would otherwise leave
+    // the leg a fraction short of the number the operator typed.
+    runProfileActive = false;
+    moveJointsAbsolute(runTargetD1, runTargetRot, runTargetA1, runTargetA2);
+  }
+
   if (!allMotorsSettled()) return;
 
   if (runPhase == PHASE_TO_HOME_FIRST) {
@@ -1308,29 +1683,25 @@ void serviceRun() {
 }
 
 
-// ══════════════════════════════════════════════════════════════
-// JOG
-// ══════════════════════════════════════════════════════════════
-// Homing drives the axes onto their own switches at a QUARTER jog speed.
-// The switch state arrives over Ethernet, polled every PLC_POLL_HOMING_MS,
-// so the axis keeps moving for up to one poll after the switch closes —
-// at speed, momentum carries it past the switch before MoveVelocity(0)
-// actually brakes it. Slow speed shrinks both the poll-latency overshoot
-// and the stopping distance itself; it is not a comfort setting.
+// Homing drives each axis onto its own switch at a QUARTER jog speed.
+// Switch state arrives over Ethernet every PLC_POLL_HOMING_MS, so the
+// axis keeps moving up to one poll after the switch closes, and at speed
+// momentum carries it past before MoveVelocity(0) brakes. Slow shrinks
+// both the poll latency and the stopping distance. Not a comfort setting.
 const float HOME_SPEED_SCALE = 0.25f;
 
 // WHICH WAY HOME DRIVES, per axis. Deliberately NOT PLC_LIMIT_END_*.
 //
-// Those two look like one fact and are not: PLC_LIMIT_END_* says which
-// direction a covered switch REFUSES, this says which direction HOME
-// travels to go and find it. They agreed until the device mapping turned
-// out to be wrong, and sharing one constant meant a wrong end sent HOME the
-// wrong way with no separate place to correct it. Both must still point at
-// the SAME physical switch, so HOME_DIR_* == PLC_LIMIT_END_* here, axis by
-// axis: ZM down and A2M retract are negative, but RM is mounted inverted
-// (see PLC_LIMIT_END_ROT) and its switch sits at the +1/CW end, not -1.
+// Two different facts: PLC_LIMIT_END_* says which direction a covered
+// switch REFUSES, this says which direction HOME travels to find it.
+// They agreed until the device mapping turned out wrong, and one shared
+// constant meant a wrong end sent HOME the wrong way with nowhere
+// separate to fix it. Both still point at the SAME physical switch, so
+// HOME_DIR_* == PLC_LIMIT_END_* axis by axis, and all three are negative:
+// ZM down, A2M retract, RM counter-clockwise onto the switch its own zero
+// is then set at.
 const int HOME_DIR_Z   = -1;
-const int HOME_DIR_ROT = +1;
+const int HOME_DIR_ROT = -1;
 const int HOME_DIR_A2  = -1;
 
 int homeDirFor(int i) {
@@ -1346,6 +1717,13 @@ float scanRotScale() {
   return s > 1.0f ? 1.0f : s;      // never faster than the axis is configured for
 }
 
+// Any axis currently mid-ease is left alone here -- serviceJogRamps()
+// owns it until the ease finishes, and this function would otherwise
+// stomp it with an instant full-speed (or instant zero) command on
+// every OTHER call site that also happens to call this. Axes not
+// wanting a profile (PROFILE_NONE/TRAPEZOIDAL) are never mid-ease --
+// armJogRamp() leaves their active/releasing false -- so this is
+// exactly the old unconditional behaviour for them.
 void applyJogVelocities() {
   float scale = isHoming ? HOME_SPEED_SCALE
               : (scanPhase != SCAN_OFF ? SCAN_SPEED_SCALE : 1.0f);
@@ -1354,10 +1732,38 @@ void applyJogVelocities() {
   int32_t armV = (int32_t)(armVelPulses * boostMultiplier * scale);
   int32_t zV   = (int32_t)(zVelPulses   * boostMultiplier * scale);
 
-  MOTOR_ROT.MoveVelocity(rotDir * rotV * (INVERT_ROT ? -1 : 1));
-  MOTOR_A1.MoveVelocity(a1Dir * armV * (INVERT_ARM1 ? -1 : 1));
-  MOTOR_A2.MoveVelocity(a2Dir * armV * (INVERT_ARM2 ? -1 : 1));
-  MOTOR_Z.MoveVelocity(jzDir * zV * (INVERT_Z ? -1 : 1));
+  if (!jogRampRot.active && !jogRampRot.releasing && !scanOwnsRot())
+    MOTOR_ROT.MoveVelocity(rotDir * rotV * (INVERT_ROT ? -1 : 1));
+  if (!jogRampA1.active && !jogRampA1.releasing)
+    MOTOR_A1.MoveVelocity(a1Dir * armV * (INVERT_ARM1 ? -1 : 1));
+  if (!jogRampA2.active && !jogRampA2.releasing)
+    MOTOR_A2.MoveVelocity(a2Dir * armV * (INVERT_ARM2 ? -1 : 1));
+  if (!jogRampZ.active && !jogRampZ.releasing && !scanOwnsZ())
+    MOTOR_Z.MoveVelocity(jzDir * zV * (INVERT_Z ? -1 : 1));
+}
+
+// Arms axisId's ramp for a fresh key-down, at the same scaled
+// speed/accel applyJogVelocities() would otherwise have commanded flat.
+// Call BEFORE applyJogVelocities() so the freshly-armed axis is already
+// active and gets skipped by it this same pass.
+void armJogAxisRamp(JogAxisId axisId, int dir) {
+  float scale = isHoming ? HOME_SPEED_SCALE
+              : (scanPhase != SCAN_OFF ? SCAN_SPEED_SCALE : 1.0f);
+  float rotScale = (!isHoming && scanPhase != SCAN_OFF) ? scanRotScale() : scale;
+  switch (axisId) {
+    case JOG_AXIS_ROT:
+      armJogRamp(jogRampRot, dir, rotVelPulses * boostMultiplier * rotScale, rotAccelPulses);
+      break;
+    case JOG_AXIS_A1:
+      armJogRamp(jogRampA1, dir, armVelPulses * boostMultiplier * scale, armAccelPulses);
+      break;
+    case JOG_AXIS_A2:
+      armJogRamp(jogRampA2, dir, armVelPulses * boostMultiplier * scale, armAccelPulses);
+      break;
+    case JOG_AXIS_Z:
+      armJogRamp(jogRampZ, dir, zVelPulses * boostMultiplier * scale, zAccelPulses);
+      break;
+  }
 }
 
 bool anyJogActive() { return rotDir || a1Dir || a2Dir || jzDir; }
@@ -1369,15 +1775,15 @@ bool axisLimited(const String &axis) {
   return softLimitsActive() && axisEnforced(axis);
 }
 
-// HOME is the minimum of every axis, so a FACTORY-DEFAULT floor sits at 0.
-// Without a reference the counter reads 0 wherever the board powered up,
-// not at the bottom of travel, so the axis sits exactly ON that floor and
-// every inward jog is refused - pinned, with nothing to escape from. The
-// far end cannot collide with the counter origin, so it still applies.
+// HOME is the minimum of every axis, so a FACTORY-DEFAULT floor sits at
+// 0. Without a reference the counter reads 0 wherever the board powered
+// up, not at the bottom of travel, so the axis sits ON that floor and
+// every inward jog is refused -- pinned, nothing to escape from. The far
+// end cannot collide with the counter origin, so it still applies.
 //
 // Only an UNTOUCHED default is relaxed. A taught floor applies with or
-// without a reference: it was captured against the same counters it is
-// compared with. Mirrors _axis_bounds() in the GUI; the two must agree.
+// without a reference: it was captured against these same counters.
+// Mirrors _axis_bounds() in the GUI; the two must agree.
 bool axisFloorIsDefault(const String &axis) {
   if (axis == "Z")   return limD1Min  == D1_MIN_MM;
   if (axis == "ROT") return limRotMin == ROT_MIN_DEG;
@@ -1460,16 +1866,14 @@ void serviceJogReporting() {
 void serviceJogWatchdog() {
 #if ENABLE_JOG_WATCHDOG
   if (!anyJogActive()) return;
-  // HOME drives the same direction variables a jog does, but it is NOT a
-  // jog: no host is holding a button, so no keep-alive arrives and this
-  // watchdog cancelled the move 700 ms in. That is why HOME looked like it
-  // did nothing at all. HOME has its own timeout and its own stop
-  // condition (each axis's switch), so leave it alone.
+  // HOME drives the same direction variables a jog does but is NOT a jog:
+  // no host holds a button, so no keep-alive arrives and this watchdog
+  // cancelled the move 700 ms in -- HOME looked like it did nothing. HOME
+  // has its own timeout and stop condition (each axis's switch).
   if (isHoming) return;
-  // SCAN drives rotDir the same way, but no host jog client is holding a
-  // key -- it stops itself, on the switch or the sweep count or SCAN_STOP.
-  // Un-exempted, every scan died here at 700 ms and looked like a PLC
-  // switch fault.
+  // SCAN drives rotDir the same way, and also stops itself -- on the
+  // switch, the sweep count or SCAN_STOP. Un-exempted, every scan died here
+  // at 700 ms and looked like a PLC switch fault.
   if (scanPhase != SCAN_OFF) return;
   if (millis() - lastJogKeepAlive < JOG_WATCHDOG_MS) return;
   cancelJog();
@@ -1478,12 +1882,13 @@ void serviceJogWatchdog() {
 #endif
 }
 
-void startJog(int &axisDir, int dir) {
+void startJog(int &axisDir, int dir, JogAxisId axisId) {
   if (isMoving)  { cancelRun();    sendFeedback("[WARN] RUN canceled by jog command."); }
   if (isHoming)  { cancelHoming();
                    sendFeedback("[WARN] Homing canceled by jog command."); }
   axisDir = dir;
   lastJogKeepAlive = millis();
+  armJogAxisRamp(axisId, dir);
   applyJogVelocities();
 }
 
@@ -1494,21 +1899,26 @@ void startArmJogLinked(int dir) {
   a1Dir = dir;
   a2Dir = dir;
   lastJogKeepAlive = millis();
+  armJogAxisRamp(JOG_AXIS_A1, dir);
+  armJogAxisRamp(JOG_AXIS_A2, dir);
   applyJogVelocities();
 }
 
+// A voluntary release. Eases down when the axis was on a steady
+// profiled jog; otherwise (no profile picked, or released mid ramp-up)
+// releaseJogRamp() says so and this falls back to the old hard stop.
 void stopArmJog(bool arm1, bool arm2) {
-  if (arm1) { a1Dir = 0; MOTOR_A1.MoveVelocity(0); }
-  if (arm2) { a2Dir = 0; MOTOR_A2.MoveVelocity(0); }
+  if (arm1) { a1Dir = 0; if (!releaseJogRamp(jogRampA1)) MOTOR_A1.MoveVelocity(0); }
+  if (arm2) { a2Dir = 0; if (!releaseJogRamp(jogRampA2)) MOTOR_A2.MoveVelocity(0); }
 }
 
 
 // PLC TRANSPORT — MC PROTOCOL 3E  [notes §44]
 
 // ---- Polled state, shared by every mode ----
-// Three words, M0..M47. One word was enough while every device lived in
-// M0..M15; the limit bits are M30..M32, which straddle the second and
-// third word, so the poll has to cover all three or they are invisible.
+// Three words, M0..M47. One was enough while every device lived in
+// M0..M15; the limit bits M30..M32 straddle words two and three, so the
+// poll must cover all three or they are invisible.
 const int PLC_STATUS_WORDS = 3;
 uint16_t      plcStatusWords[PLC_STATUS_WORDS] = {0, 0, 0};
 uint16_t      plcStatusWord   = 0;   // M0..M15, kept for the existing readouts
@@ -1530,11 +1940,10 @@ String plcStatusSummary() {
   String s = "limit Z/R/A2=" + String(plcBit(PLC_M_LIMIT_Z) ? 1 : 0)
      + String(plcBit(PLC_M_LIMIT_ROT) ? 1 : 0)
      + String(plcBit(PLC_M_LIMIT_A2) ? 1 : 0);
-  // Per-sensor boundary switch — SET_PLC_SENSOR_ENFORCE. A 0 here means
-  // that bit above is cosmetic: it no longer stops the axis or counts
-  // toward HOME.
-  // Which end each switch is refusing right now. Fixed for ZM and RM;
-  // A2M's follows the latch, and the GUI cannot work it out on its own.
+  // Per-sensor boundary switch -- SET_PLC_SENSOR_ENFORCE. A 0 makes the bit
+  // above cosmetic: no longer stops the axis, no longer counts toward HOME.
+  // Which end each switch refuses right now. Fixed for ZM and RM; A2M's
+  // follows the latch, which the GUI cannot work out on its own.
   s += " end Z/R/A2=";
   for (int i = 0; i < 3; i++) s += (plcLimitEndFor(i) > 0) ? "+" : "-";
   s += " enforce Z/R/A2=" + String(plcLimitSensorEnabled[0] ? 1 : 0)
@@ -1987,12 +2396,11 @@ unsigned long plcLimitLedLastBlink = 0;
 bool plcLimitWarned[3] = {false, false, false};
 
 // Per-sensor boundary switch, index order Z/ROT/A2 throughout this file.
-// For ONE broken switch: a stuck or noisy sensor should not have to take
-// HOME and the other two axes' protection down with it. Separate from
-// plcLinkEnabled, which stops the whole PLC socket. Disabled -> the axis
-// is never stopped by that switch, AND it stops counting toward the
-// M30+M31+M32 HOME condition in plcHomeStateActive() below — otherwise a
-// broken switch blocks HOME forever with no way to say "trust the rest".
+// For ONE broken switch: a stuck sensor should not take HOME and the
+// other two axes' protection down with it. Separate from plcLinkEnabled,
+// which stops the whole socket. Disabled -> that switch never stops the
+// axis AND stops counting toward the M30+M31+M32 home condition,
+// otherwise a broken switch blocks HOME forever.
 bool plcLimitSensorEnabled[3] = {true, true, true};
 
 // Rising-edge detection and the end a both-ends switch caught. 0 = nothing
@@ -2024,25 +2432,20 @@ int plcLimitEndFor(int i) {
 
 // WHICH WAY THE AXIS WAS GOING, REMEMBERED.
 //
-// The latch needs the travel direction at the instant the switch closed,
-// but it only finds out the switch closed when a poll lands — up to one
-// poll interval later. Anything that stops the axis in between erases the
-// only evidence of which end was hit, and the latch then falls back to the
-// home end and reports the WRONG one.
+// Latch needs travel direction at the instant the switch closed, but only
+// learns of it one poll later. Anything stopping the axis in between
+// erases the evidence, and the latch then reports the home end -- wrong.
 //
-// That is not a rare race. The taught SOFT limit for a fully extended arm
-// sits at essentially the same place as the physical far switch, and
-// serviceJogSoftLimits() runs every loop pass while the PLC bit arrives
-// every 20 ms — so the soft limit zeroes a2Dir first, every single time,
-// and a far-end trip was reported as COVERED MIN. A far end mislabelled as
-// the home end is not cosmetic: plcLimitSensorSatisfied() then accepts a
-// fully EXTENDED arm as the home reference and zeroes the counters at the
-// wrong end of the travel.
+// Not rare: a fully extended arm's taught SOFT limit sits essentially at
+// the far switch, serviceJogSoftLimits() runs every loop pass while the
+// bit arrives every 20 ms, so the soft limit zeroed a2Dir first every
+// time and a far-end trip reported as COVERED MIN. Not cosmetic --
+// plcLimitSensorSatisfied() then takes a fully EXTENDED arm as the home
+// reference and zeroes the counters at the wrong end of travel.
 //
-// So the direction is sampled every loop pass and kept for a short while
-// after the axis stops. Bounded, because a direction from minutes ago is
-// not evidence about anything: past PLC_TRAVEL_DIR_MEMORY_MS the latch goes
-// back to assuming the home end, which is the old behaviour.
+// So: sample direction every loop pass, keep it briefly after the axis
+// stops. Bounded -- past PLC_TRAVEL_DIR_MEMORY_MS a direction is not
+// evidence, and the latch goes back to assuming the home end.
 const unsigned long PLC_TRAVEL_DIR_MEMORY_MS = 1000;
 int           plcLastTravelDir[3] = {0, 0, 0};
 unsigned long plcLastTravelAt[3]  = {0, 0, 0};
@@ -2285,15 +2688,13 @@ void plcNetworkInit() {
 
 // HOME IS DRIVEN BY THIS BOARD, NOT REQUESTED FROM THE PLC.  [notes §61]
 //
-// It used to assert IO-0 into the PLC's X0 and wait for the PLC's own home
-// sequence to finish. Nothing on the PLC side ever ran, so HOME sat there
-// and timed out. The board already knows where every switch is (M30..M32)
-// and already owns the motors, so it drives each axis onto its own switch
-// itself. No device is written and no request line is raised.
+// It used to assert IO-0 into the PLC's X0 and wait. Nothing on the PLC
+// side ever ran that sequence, so HOME sat there and timed out. This
+// board already reads M30..M32 and owns the motors, so it drives each
+// axis onto its own switch. No device written, no request line.
 //
-// All three move AT ONCE, each stopping independently the moment its own
-// bit reads covered. A1M has no switch fitted and is therefore never moved
-// by HOME — if it is extended, it stays extended while RM turns.
+// All three move at once, each stopping on its own bit. A1M has no
+// switch and is never moved by HOME -- if extended, it stays extended.
 void beginHoming() {
   cancelJog();
   cancelRun();
@@ -2321,15 +2722,13 @@ void beginHoming() {
   const char *names[3] = {"ZM", "RM", "A2M"};
   String moving, already;
   for (int i = 0; i < 3; i++) {
-    // Already sitting on its switch: nothing to do, and driving further in
-    // is the one direction that must never be commanded. A DISABLED switch
-    // (SET_PLC_SENSOR_ENFORCE:<axis>,0 — broken sensor) is treated the
-    // same way: never driven, since there would be nothing to stop it
-    // arriving at its mechanical end blind.
-    // Reads the LATCH directly rather than the effective-end helper: the
-    // question here is "do we KNOW this is the far switch", and a bit with
-    // nothing latched must answer no, or HOME would drive an axis that is
-    // already sitting on its reference.
+    // Already on its switch: nothing to do, and driving further in is the one
+    // direction that must never be commanded. A DISABLED switch (broken
+    // sensor) is treated the same -- never driven, since nothing would stop
+    // it arriving at its mechanical end blind.
+    // Reads the LATCH directly, not the effective-end helper: the question is
+    // "do we KNOW this is the far switch", and a bit with nothing latched
+    // must answer no, or HOME would drive an axis already on its reference.
     bool tripped = plcBit(plcLimitBitFor(i));
     bool atFarEnd = tripped && plcLimitBothEndsFor(i)
                  && plcLimitLatchedEnd[i] != 0
@@ -2481,11 +2880,10 @@ void serviceLimitSensors() {
 // 340 DEGREE SCAN
 // ══════════════════════════════════════════════════════════════
 
-// One distance reading, in mm. Returns a NEGATIVE number when the sensor
-// did not answer -- never 0, because 0 mm is a legitimate reading and
-// "nothing came back" is not. The scan reports the miss as a hole in the
-// layer rather than dropping the point, so a dead sensor looks like a dead
-// sensor and not like a small object.
+// One distance reading in mm. NEGATIVE when the sensor did not answer --
+// never 0, because 0 mm is a legitimate reading and "nothing came back"
+// is not. A miss is reported as a hole in the layer rather than dropped,
+// so a dead sensor looks like a dead sensor and not like a small object.
 double scanReadDistanceMm() {
   if (scanSensorKind == SCAN_SENSOR_ANALOG) {
     if (scanAnalogMmPerCount == 0.0) return -1.0;   // never calibrated
@@ -2506,12 +2904,227 @@ const char *scanSensorName() {
   return scanSensorKind == SCAN_SENSOR_ANALOG ? "ANALOG" : "ULTRASONIC";
 }
 
-// Is RM sitting on its travel switch right now? The scan's whole frame
-// hangs off this one bit: it is the only position on the turntable the
-// board can identify without a reference, so it is where every layer
-// starts and where every other layer ends.
+// Is RM on its travel switch? The scan's whole frame hangs off this bit:
+// it is the only turntable position the board can identify without a
+// reference, so every layer starts there and every other layer ends there.
 bool scanRotSwitchOn() {
   return plcStatusValid && plcLimitSensorEnabled[1] && plcBit(PLC_M_LIMIT_ROT);
+}
+
+// ── the scan's own PROFILED moves ─────────────────────────────────────
+//
+// A scan leg has a length. That is the whole difference from a jog, and it
+// is what lets the scan have the WHOLE profile rather than the ease-up
+// half: a sweep is scanSweepDeg degrees and a lift is scanZStepMm
+// millimetres, both known before the axis moves. With Theta in hand the
+// deceleration can be PLANNED, so the axis arrives at the target already
+// at rest instead of being stopped there -- which is exactly the thing a
+// jog cannot do, and why jog only ever gets the first half.
+//
+// STILL VELOCITY-DRIVEN, not position-driven. A run leg is interpolated as
+// a moving position setpoint; a scan must not be, because every soft
+// limit, every PLC travel switch and the E-STOP path stop this machine by
+// zeroing a jog direction and calling MoveVelocity(0). A position setpoint
+// would be re-commanded on the very next service pass and drive straight
+// back through the stop. So the profile is applied as a velocity SHAPE
+// over the same rotDir/jzDir the jog primitives use, and every one of
+// those stops keeps working untouched -- scanMoveTick() gives up the
+// instant it sees the direction has been zeroed under it.
+//
+// THE CREEP is the honest part. An open-loop velocity plan run on a clock
+// does not land exactly: a blocking sensor read stretches a service pass,
+// the step generator lags the commanded velocity by a fraction of one, and
+// the leg ends a little short. Rather than pretend otherwise, the plan
+// hands over to a slow creep at its tail and the leg ends on the condition
+// that actually matters -- the sweep angle, or the RM switch. The creep is
+// bounded; past the allowance something is wrong and the scan says so
+// instead of grinding on.
+const double SCAN_CREEP_FRACTION = 0.08;   // of the leg's own top speed
+const double SCAN_CREEP_MAX_DEG  = 6.0;
+const double SCAN_CREEP_MAX_MM   = 3.0;
+
+struct ScanMove {
+  bool   active   = false;    // following the plan
+  bool   creeping = false;    // plan spent, closing the last of the gap
+  int    dir      = 0;
+  double creepV   = 0.0;      // pulses/s
+  unsigned long t0 = 0;
+  ProfilePlan plan;
+};
+
+ScanMove scanRotMove, scanZMove;
+
+bool scanOwnsRot() { return scanRotMove.active || scanRotMove.creeping; }
+bool scanOwnsZ()   { return scanZMove.active   || scanZMove.creeping; }
+
+// Velocity at time t, the derivative of profileAt(). Same phase walk, so
+// the two can never disagree about which phase t is in.
+double profileVelAt(const ProfilePlan &p, double t) {
+  if (t <= 0.0 || t >= p.T) return 0.0;
+
+  if (!p.sCurve) {
+    if (t <= p.ta) return p.alphaMax * t;
+    if (t <= p.ta + p.tv) return p.vp;
+    return p.vp - p.alphaMax * (t - (p.ta + p.tv));
+  }
+
+  int k = 6;
+  double tEnd = 0.0;
+  for (int i = 0; i < 7; i++) {
+    tEnd += p.dur[i];
+    if (t <= tEnd + 1e-12 && p.dur[i] > 1e-14) { k = i; break; }
+  }
+  double tau = t - p.tStart[k];
+  if (tau < 0.0) tau = 0.0;
+  if (tau > p.dur[k]) tau = p.dur[k];
+  return p.v0[k] + p.a0[k] * tau + 0.5 * p.jrk[k] * tau * tau;
+}
+
+// Plans one leg. Theta, vmax and accel are all in PULSES, so the velocity
+// that comes back out is already what MoveVelocity() wants and no unit
+// survives long enough to be converted twice.
+//
+// Returns false for PROFILE_NONE, or for a leg too short to shape, and the
+// caller falls back to the flat MoveVelocity() a scan always used.
+bool scanPlanMove(ScanMove &m, int dir, double thetaPulses,
+                  double vmaxPulses, double accelPulses) {
+  m.active = m.creeping = false;
+  m.dir = dir;
+  m.creepV = vmaxPulses * SCAN_CREEP_FRACTION;
+  if (m.creepV < 1.0) m.creepV = 1.0;
+
+  if (motionProfile == PROFILE_NONE) return false;
+  if (thetaPulses <= 1.0 || vmaxPulses <= 1e-9 || accelPulses <= 1e-9) return false;
+
+  switch (motionProfile) {
+    case PROFILE_TRAPEZOID:
+      planTrapezoid(m.plan, thetaPulses, vmaxPulses, accelPulses);
+      break;
+    case PROFILE_SCURVE:
+      planSCurve(m.plan, thetaPulses, vmaxPulses, accelPulses, SCURVE_RATIO);
+      break;
+    case PROFILE_PURE_SCURVE:
+      planSCurve(m.plan, thetaPulses, vmaxPulses, accelPulses, 1.0);
+      break;
+    default:
+      return false;
+  }
+  m.t0 = millis();
+  m.active = true;
+  return true;
+}
+
+bool scanMoveTick(ScanMove &m, int liveDir, int32_t &pulsesOut) {
+  if (!m.active && !m.creeping) return false;
+  // A soft limit, a PLC switch or a cancel zeroed the direction under us.
+  // Give the axis up rather than re-commanding it; whoever zeroed it has
+  // already sent MoveVelocity(0).
+  if (liveDir == 0) { m.active = m.creeping = false; return false; }
+
+  double v;
+  if (m.active) {
+    double t = (millis() - m.t0) / 1000.0;
+    if (t >= m.plan.T) {
+      m.active = false;
+      m.creeping = true;
+      v = m.creepV;
+    } else {
+      v = profileVelAt(m.plan, t);
+      // Hand over to the creep smoothly at the END of the ramp-down, so the
+      // axis approaches its target slowly instead of stopping dead just
+      // short of it and starting again. Guarded to the second half so it
+      // cannot flatten the ease-UP, which is the same shape mirrored.
+      if (v < m.creepV && t > 0.5 * m.plan.T) v = m.creepV;
+    }
+  } else {
+    v = m.creepV;
+  }
+
+  pulsesOut = (int32_t)lround(m.dir * v);
+  return true;
+}
+
+void serviceScanMoves() {
+  int32_t p;
+  if (scanMoveTick(scanRotMove, rotDir, p)) MOTOR_ROT.MoveVelocity(p * (INVERT_ROT ? -1 : 1));
+  if (scanMoveTick(scanZMove,   jzDir,  p)) MOTOR_Z.MoveVelocity(p * (INVERT_Z   ? -1 : 1));
+}
+
+// How far this leg has been allowed to creep past its plan, in the axis's
+// own units. Past it the plan and the machine disagree by more than
+// open-loop slop explains.
+bool scanCreepOverrun(const ScanMove &m, double travelled, double planned,
+                      double allowance) {
+  return m.creeping && travelled > planned + allowance;
+}
+
+// ── how a scan starts and stops an axis ───────────────────────────────
+//
+// A scan drives itself through the jog primitives, so it inherits the
+// motion profile with them -- but only the EASE-UP half.
+//
+// Easing INTO a move costs the scan nothing: samples are taken by
+// POSITION, not by clock, so a slow start puts them at exactly the same
+// angles with more time each. What it buys is the thing the profile
+// exists for -- no velocity step into an open-loop drive at the start of
+// every layer and every lift, on the one operation nobody is watching.
+//
+// Easing OUT is refused, and every scan stop below is HARD. Two reasons,
+// either sufficient on its own:
+//
+//   * a return leg ends ON the RM switch, and coasting further into a
+//     covered switch is the one direction that must never be commanded;
+//   * a lift ends at the height the NEXT layer is measured from, so an
+//     ease-down overshoot would show up as layer spacing that grows down
+//     the file -- a scan that is wrong in a way the data cannot reveal.
+//
+// PROFILE_NONE and TRAPEZOIDAL are untouched by all of this: armJogRamp()
+// leaves their ramps inactive, so the axis gets the same flat
+// MoveVelocity() a scan always had.
+// SEEK only. Its length is not known -- it is looking for a switch -- so
+// it gets the ease-up half and nothing else, for the same reason a jog
+// does: you cannot plan a move whose end you have not found yet.
+void scanSeekRotMove(int dir) {
+  rotDir = dir;
+  armJogAxisRamp(JOG_AXIS_ROT, dir);   // before apply, so apply skips it
+  applyJogVelocities();
+}
+
+// A sweep: Theta is the sweep angle, so the whole profile applies.
+void scanStartRotMove(int dir, double thetaDeg) {
+  rotDir = dir;
+  float rotScale = scanRotScale();
+  if (!scanPlanMove(scanRotMove, dir, thetaDeg * pulsesPerDegRot(),
+                    rotVelPulses * boostMultiplier * rotScale, rotAccelPulses))
+    applyJogVelocities();              // PROFILE_NONE: flat, exactly as before
+}
+
+// A lift: Theta is the Z step.
+void scanStartZMove(int dir, double thetaMm) {
+  jzDir = dir;
+  if (!scanPlanMove(scanZMove, dir, thetaMm * pulsesPerMmZ(),
+                    zVelPulses * boostMultiplier * SCAN_SPEED_SCALE, zAccelPulses))
+    applyJogVelocities();
+}
+
+// Hard, and EXPLICIT -- never "set the direction to 0 and call
+// applyJogVelocities()". That function deliberately SKIPS an axis that is
+// mid-ease, because serviceJogRamps() owns it, so clearing the direction
+// and calling it would leave a half-ramped axis running with nothing left
+// to command it to zero. Clearing the ramp state here is what makes the
+// stop unconditional.
+void scanStopRot() {
+  rotDir = 0;
+  jogRampRot.active = jogRampRot.releasing = false;
+  scanRotMove.active = scanRotMove.creeping = false;
+  MOTOR_ROT.MoveVelocity(0);
+}
+
+void scanStopZ() {
+  jzDir = 0;
+  jogRampZ.active = jogRampZ.releasing = false;
+  scanZMove.active = scanZMove.creeping = false;
+  MOTOR_Z.MoveVelocity(0);
 }
 
 void cancelScan(const String &why) {
@@ -2519,21 +3132,19 @@ void cancelScan(const String &why) {
   scanPhase = SCAN_OFF;
   // Clear, or a SCAN_START that asks for no speed inherits this one.
   scanRotDegS = 0.0;
-  rotDir = jzDir = 0;
-  applyJogVelocities();
+  scanStopRot();
+  scanStopZ();
   sendFeedback("[SCAN_ABORT] " + why);
 }
 
-// Samples are stamped with the angle read just BEFORE the sensor fires, not
-// after. An ultrasonic read blocks for the whole 30 ms timeout when nothing
-// comes back, and stamping afterwards would file every miss at an angle the
-// arm had already left.
+// Angle is read BEFORE the sensor fires. An ultrasonic read blocks the
+// full 30 ms timeout on a miss, and stamping afterwards would file every
+// miss at an angle the arm had already left.
 void scanEmitPoint() {
   double deg = currentRot();
-  // INVERT_ROT makes currentRot() hand back NEGATIVE zero at the reference,
-  // so a sample there would be stamped "-0.00". Harmless arithmetically,
-  // ugly in a CSV, and it makes the first column look signed when it is
-  // not. -0.0 == 0.0 is true, so this replaces it.
+  // INVERT_ROT hands back NEGATIVE zero at the reference, so a sample there
+  // stamps "-0.00" -- harmless, but ugly in a CSV and it makes the first
+  // column look signed. -0.0 == 0.0, so this replaces it.
   if (deg == 0.0) deg = 0.0;
   double mm  = scanReadDistanceMm();
   scanPointsSent++;
@@ -2541,18 +3152,15 @@ void scanEmitPoint() {
              + "," + String(mm, 2));
 }
 
-// Layers ALTERNATE direction: the first sweeps away from the switch, the
-// next comes back to it, and so on.
+// Layers ALTERNATE direction: first sweeps away from the switch, next
+// comes back, and so on.
 //
-// The earlier version rewound between layers so that every layer was
-// sampled travelling the same way, which keeps the drivetrain backlash on
-// one side. This is the operator's call and it buys two things that are
-// worth more here: the return leg collects a layer instead of being dead
-// travel, so a scan takes half as long, and every layer that ends on the
-// switch RE-REFERENCES the turntable, so angle error cannot accumulate
-// over a tall scan. What it costs is a fixed backlash offset between odd
-// and even layers -- a constant, and one that can be measured and removed
-// afterwards, unlike drift.
+// The earlier version rewound between layers, keeping backlash on one
+// side. This buys two things worth more: the return leg collects a layer
+// instead of dead travel, halving scan time, and every layer ending on
+// the switch RE-REFERENCES the turntable, so angle error cannot
+// accumulate up a tall scan. Cost is a fixed backlash offset between odd
+// and even layers -- a constant, measurable and removable, unlike drift.
 void scanBeginLayer(int dir) {
   scanSweepDir = dir;
   scanSweepFrom = currentRot();
@@ -2562,9 +3170,8 @@ void scanBeginLayer(int dir) {
              + " z=" + String(currentD1(), 2) + " mm"
              + " dir=" + String(dir > 0 ? "+" : "-")
              + " from=" + String(scanSweepFrom, 2));
-  rotDir = dir;
-  jzDir = 0;
-  applyJogVelocities();
+  scanStopZ();              // the lift has finished; make sure it is stopped
+  scanStartRotMove(dir, scanSweepDeg);
 }
 
 // True once the axis has reached the next angle a sample is due at. The
@@ -2589,17 +3196,15 @@ void serviceScan() {
       // plcServiceLimitStops() has already stopped the axis -- driving
       // into a covered switch is the one direction it refuses, which is
       // exactly the behaviour being used here rather than worked around.
-      rotDir = 0;
-      applyJogVelocities();
+      scanStopRot();
       scanStartRot = currentRot();
       sendFeedback("[SCAN_REF] RM on its switch at " + String(scanStartRot, 2)
                  + " deg - sweeping from here");
       scanLayer = 1;
       scanBeginLayer(-PLC_LIMIT_END_ROT);   // away from the switch
-      // Deliberately NO return: falling through into the sweep below takes
-      // the sample at the reference angle now, rather than a service tick
-      // later when the axis has already moved off it. That first point is
-      // the one every other layer is aligned against.
+      // Deliberately NO return: falling through into the sweep takes the sample
+      // at the reference angle NOW, not a tick later when the axis has moved
+      // off it. That first point is what every other layer is aligned against.
     } else if (rotDir == 0) {
       cancelScan("RM stopped before reaching its switch - a soft limit is in "
                  "the way, or the switch is not wired");
@@ -2614,12 +3219,12 @@ void serviceScan() {
   }
 
   // The jog soft-limit and PLC-switch services can zero rotDir/jzDir under
-  // us -- that is the whole reason the scan drives through them rather than
-  // commanding the motors itself. Being stopped mid-sweep means the layer
-  // is short, and saying so beats reporting it as complete.
+  // us -- the whole reason the scan drives through them instead of
+  // commanding the motors. Stopped mid-sweep means the layer is short, and
+  // saying so beats reporting it complete.
   //
-  // A sweep heading BACK toward the switch is the exception: being stopped
-  // there is arrival, not a fault, and it is handled below.
+  // Exception: a sweep heading BACK to the switch, where being stopped is
+  // arrival. Handled below.
   if (scanPhase == SCAN_SWEEP && rotDir == 0 && !scanRotSwitchOn()) {
     cancelScan("RM was stopped mid-sweep by a soft limit or a PLC switch");
     return;
@@ -2639,8 +3244,7 @@ void serviceScan() {
     bool backAtSwitch = (scanSweepDir == PLC_LIMIT_END_ROT) && scanRotSwitchOn();
     if (!backAtSwitch && scanTravelled() < scanSweepDeg - SCAN_ANGLE_EPS_DEG) return;
 
-    rotDir = 0;
-    applyJogVelocities();
+    scanStopRot();
     if (backAtSwitch) {
       // Every arrival at the switch is a fresh reference. Without this the
       // start angle drifts by whatever the last sweep overshot, layer after
@@ -2658,16 +3262,14 @@ void serviceScan() {
     }
     scanLayerTargetZ = scanStartZ + scanZStepMm * (double)scanLayer;
     scanPhase = SCAN_LIFT;
-    jzDir = 1;
-    applyJogVelocities();
+    scanStartZMove(1, scanZStepMm);
     return;
   }
 
   // ---- lifting between layers --------------------------------------
   if (scanPhase == SCAN_LIFT) {
     if (currentD1() < scanLayerTargetZ - SCAN_Z_EPS_MM) return;
-    jzDir = 0;
-    applyJogVelocities();
+    scanStopZ();
     scanLayer++;
     scanBeginLayer(-scanSweepDir);       // back the way it came
   }
@@ -2746,8 +3348,8 @@ void handleScanStart(const String &payload) {
   }
   // The scan is referenced to the RM switch, so without it there is no
   // frame to sweep in. Refused rather than started from wherever the
-  // turntable happens to be sitting: two scans taken on different days
-  // would then have angle columns that mean different things.
+  // turntable sits: two scans on different days would then have angle
+  // columns meaning different things.
   if (!plcStatusValid) {
     sendFeedback("[ERROR] SCAN refused - no PLC device data, so the RM switch "
                  "cannot be seen. Check the link with PLC_TEST.");
@@ -2799,8 +3401,7 @@ void handleScanStart(const String &payload) {
   }
   sendFeedback("[SCAN_SEEK] turning RM to its switch to reference the sweep...");
   scanPhase = SCAN_SEEK;
-  rotDir = PLC_LIMIT_END_ROT;
-  applyJogVelocities();
+  scanSeekRotMove(PLC_LIMIT_END_ROT);
 }
 
 void sendScanStatus() {
@@ -3035,6 +3636,41 @@ void handleCommand(String cmd) {
   }
 
   if (upper == "JOG_HB") { lastJogKeepAlive = millis(); return; }
+
+  if (upper.startsWith("SET_MOTION_PROFILE:")) {
+    String kind = upper.substring(19);
+    kind.trim();
+    MotionProfileKind want;
+    if      (kind == "NONE")        want = PROFILE_NONE;
+    else if (kind == "TRAPEZOIDAL") want = PROFILE_TRAPEZOID;
+    else if (kind == "SCURVE")      want = PROFILE_SCURVE;
+    else if (kind == "PURE_SCURVE") want = PROFILE_PURE_SCURVE;
+    else {
+      sendFeedback("[ERROR] SET_MOTION_PROFILE takes NONE, TRAPEZOIDAL, "
+                   "SCURVE or PURE_SCURVE, got " + kind);
+      return;
+    }
+    // Refused mid-move rather than applied: the leg in flight was planned
+    // under the old shape, and swapping the plan under a running
+    // interpolation is a discontinuity in the setpoint -- the exact bang
+    // this whole feature exists to remove.
+    if (isMoving || isHoming) {
+      sendFeedback("[ERROR] SET_MOTION_PROFILE refused - the machine is moving.");
+      return;
+    }
+    motionProfile = want;
+    sendFeedback("[MOTION_PROFILE] " + String(motionProfileName())
+               + (want == PROFILE_NONE
+                  ? " - run legs use the step generator's own trapezoid."
+                  : " - run legs are interpolated to this shape."));
+    return;
+  }
+
+  if (upper == "MOTION_PROFILE") {
+    sendFeedback("[MOTION_PROFILE] " + String(motionProfileName())
+               + " (not persisted; the host re-sends it on connect)");
+    return;
+  }
 
   if (upper == "STATUS") {
     sendFeedback("[STATUS] fw=v9.1 indep-arms=yes watchdog="
@@ -3365,11 +4001,9 @@ void handleCommand(String cmd) {
   if (upper == "PLC_STATUS") {
 #if PLC_LINK_MODE == PLC_LINK_ETHERNET
     if (!plcLinkEnabled) {
-      // A raw socket/data dump here would show the leftover state from
-      // before SET_PLC_LINK:0, which reads as a fault (NO REPLY,
-      // UNREACHABLE) rather than "off on purpose". "limit Z/R/A2=???"
-      // reuses the existing unknown-sensor path on the GUI side — no
-      // separate handling needed there to mark the sensors unknown too.
+      // A raw dump here would show leftover state from before SET_PLC_LINK:0,
+      // reading as a fault (NO REPLY, UNREACHABLE) rather than "off on
+      // purpose". "limit Z/R/A2=???" reuses the GUI's unknown-sensor path.
       sendFeedback("[PLC_STATE] link=DISABLED socket=CLOSED data=NONE conn=0/0 "
                    "word=---- timeouts=0 | LINK DISABLED — SET_PLC_LINK:1 to "
                    "re-enable | limit Z/R/A2=???");
@@ -3400,11 +4034,11 @@ void handleCommand(String cmd) {
                + " word=" + (plcStatusValid ? plcHex(plcStatusWord, 4) : String("----"))
                + " timeouts=" + String((unsigned long)plcTxnTimeouts)
                + " | " + plcStatusSummary());
-    // Name the layer that is actually failing. A socket that has NEVER
-    // opened cannot be an MC-protocol problem: no frame has left the board,
-    // so the encoding and the port's protocol setting have not been tested
-    // at all. Saying "or MC protocol is misconfigured" here sent someone
-    // to the GX Works3 screens while the fault was below TCP.
+    // Name the layer that is actually failing. A socket that has NEVER opened
+    // cannot be an MC-protocol problem -- no frame has left the board, so the
+    // encoding and the port setting are untested. Saying "or MC protocol is
+    // misconfigured" here sent someone to GX Works3 while the fault was
+    // below TCP.
     if (!plcStatusValid) {
       if (plcConnectsOk == 0) {
         sendFeedback("[PLC] TCP connect has NEVER succeeded ("
@@ -3531,24 +4165,32 @@ void handleCommand(String cmd) {
 
 
   // ---- jog ----
-  if (upper == "ROT_CW")   { startJog(rotDir,  1); return; }
-  if (upper == "ROT_CCW")  { startJog(rotDir, -1); return; }
-  if (upper == "ROT_STOP") { rotDir = 0; MOTOR_ROT.MoveVelocity(0); return; }
+  if (upper == "ROT_CW")   { startJog(rotDir,  1, JOG_AXIS_ROT); return; }
+  if (upper == "ROT_CCW")  { startJog(rotDir, -1, JOG_AXIS_ROT); return; }
+  if (upper == "ROT_STOP") {
+    rotDir = 0;
+    if (!releaseJogRamp(jogRampRot)) MOTOR_ROT.MoveVelocity(0);
+    return;
+  }
 
-  if (upper == "A1_FWD")  { startJog(a1Dir,  1); return; }
-  if (upper == "A1_BACK") { startJog(a1Dir, -1); return; }
+  if (upper == "A1_FWD")  { startJog(a1Dir,  1, JOG_AXIS_A1); return; }
+  if (upper == "A1_BACK") { startJog(a1Dir, -1, JOG_AXIS_A1); return; }
   if (upper == "A1_STOP") { stopArmJog(true, false); return; }
-  if (upper == "A2_FWD")  { startJog(a2Dir,  1); return; }
-  if (upper == "A2_BACK") { startJog(a2Dir, -1); return; }
+  if (upper == "A2_FWD")  { startJog(a2Dir,  1, JOG_AXIS_A2); return; }
+  if (upper == "A2_BACK") { startJog(a2Dir, -1, JOG_AXIS_A2); return; }
   if (upper == "A2_STOP") { stopArmJog(false, true); return; }
 
   if (upper == "ARM_FWD")  { startArmJogLinked( 1); return; }
   if (upper == "ARM_BACK") { startArmJogLinked(-1); return; }
   if (upper == "ARM_STOP") { stopArmJog(true, true); return; }
 
-  if (upper == "Z_UP")     { startJog(jzDir,  1); return; }
-  if (upper == "Z_DOWN")   { startJog(jzDir, -1); return; }
-  if (upper == "Z_STOP")   { jzDir = 0; MOTOR_Z.MoveVelocity(0); return; }
+  if (upper == "Z_UP")     { startJog(jzDir,  1, JOG_AXIS_Z); return; }
+  if (upper == "Z_DOWN")   { startJog(jzDir, -1, JOG_AXIS_Z); return; }
+  if (upper == "Z_STOP")   {
+    jzDir = 0;
+    if (!releaseJogRamp(jogRampZ)) MOTOR_Z.MoveVelocity(0);
+    return;
+  }
 
   if (upper.startsWith("MOVE_A1:") || upper.startsWith("MOVE_A2:")) {
     bool isA1 = upper.startsWith("MOVE_A1:");
@@ -3665,14 +4307,20 @@ void setup() {
   reportMotionProfile();
   sendFeedback("[PID] " + pidSummary() + " (stored only — this board runs OPEN LOOP)");
   sendFeedback("[BOOT] Elbow convention: A1M/A2M report MOTOR degrees from home. "
-               "HOME IS 0 — 0 motor deg = 0 fold deg = fully retracted, R = "
+               "HOME IS 0 — 0 motor deg = 0 fold deg = base -30 deg = fully retracted, R = "
              + String(reachFromFoldAngle(FOLD_ANGLE_HOME_DEG), 1) + " mm. "
              + String(armMotorFromFold(FOLD_ANGLE_MAX_DEG), 0)
              + " motor deg = fold " + String(FOLD_ANGLE_MAX_DEG, 0)
-             + " deg = straight, R = "
+             + " deg = base +90 = straight, R = "
              + String(reachFromFoldAngle(FOLD_ANGLE_MAX_DEG), 1) + " mm.");
-  sendFeedback("[BOOT] The 60 deg you may remember was th3_cad, the CAD frame's label "
-               "for the SAME retracted pose. It is not reported anywhere any more. "
+  sendFeedback("[BOOT] HOME = base -30 deg, R "
+             + String(reachFromFoldAngle(FOLD_ANGLE_HOME_DEG), 1)
+             + " mm | MAX = base +60 deg, R "
+             + String(reachFromFoldAngle(FOLD_ANGLE_SPEC_MAX_DEG), 1)
+             + " mm (" + String(armMotorFromFold(FOLD_ANGLE_SPEC_MAX_DEG), 0)
+             + " motor deg). THE MAX IS A NOTE, NOT A LIMIT — nothing refuses a target "
+               "past it; the taught elbow band is what stops the arm.");
+  sendFeedback("[BOOT] The base angle is the GUI's display frame: base = fold - 30. "
                "RE-HOME after flashing from v8.");
   sendFeedback("[BOOT] ==========================================");
 }
@@ -3692,6 +4340,8 @@ void loop() {
 #endif
   serviceJogWatchdog();
   serviceJogSoftLimits();
+  serviceJogRamps();
+  serviceScanMoves();
   serviceJogReporting();
   serviceRun();
   servicePlc();

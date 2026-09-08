@@ -7,7 +7,7 @@ gesture, tested on real hardware.
 
 import tkinter as tk
 
-from ..config import JOG_STOP_COMMAND
+from ..config import JOG_STOP_COMMAND, arm_home_note
 from ..theme import (
     FONT_CAPTION,
     FONT_HINT,
@@ -228,6 +228,12 @@ class JogPanelMixin:
                  font=FONT_MONO).pack(side="left", padx=(4, 18))
         tk.Label(reach_row, textvariable=self.a2_reach_v, bg=PANEL_BG, fg=ARM2_COLOR,
                  font=FONT_MONO).pack(side="left")
+
+        # HOME only, not the P2P pair: the cards above read a base angle and
+        # this is where that scale starts. The working maximum is a question
+        # about a TARGET, which jogging does not have.
+        tk.Label(parent, text=arm_home_note(), bg=PANEL_BG, fg=TEXT_MUTED,
+                 justify="left", font=FONT_HINT).pack(anchor="w", pady=(2, 0))
 
     def _build_jog_status(self, parent):
         row = tk.Frame(parent, bg=PANEL_BG)

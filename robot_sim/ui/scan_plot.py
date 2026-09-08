@@ -33,7 +33,10 @@ class ScanPolarPlot:
 
     @property
     def _radius_px(self):
-        return self.size / 2.0 - 28.0
+        # The margin holds the degree labels that ring the plot, so it has to
+        # grow with the plot. A fixed 28 px was right at 360 and crowded them
+        # against the edge at 560.
+        return self.size / 2.0 - self.size * 0.078
 
     def _to_xy(self, deg, mm):
         """Polar to canvas. Screen Y grows down, so negate the sine — else

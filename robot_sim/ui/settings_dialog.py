@@ -58,6 +58,17 @@ from ..config import (
     LIMIT_PRESETS_FILE,
     MASTER_ACC_RPM_S,
     MASTER_RPM,
+    MOTION_PREVIEW_ANGLE_DEG,
+    MOTION_PREVIEW_SAMPLES,
+    MOTION_PROFILES,
+    MOTION_PROFILE_KEY,
+    MOTION_PROFILE_KEYS,
+    MOTION_PROFILE_NONE,
+    DEFAULT_MOTION_PROFILE,
+    DEFAULT_ROT_ACC_PCT,
+    DEFAULT_ROT_PCT,
+    rot_accel_deg_s2,
+    rot_speed_deg_s,
     N_FILTER_MAX,
     N_FILTER_MIN,
     PID_FIELDS,
@@ -80,10 +91,12 @@ from ..config import (
     ACCEL_KEYS,
     ACCEL_PREVIEW_BY_KEY,
 )
+from ..kinematics import base_angle_from_motor_deg, motor_deg_from_base_angle
 from .. import keybinds
 from ..hidpi import px
 from ..palettes import DEFAULT_PALETTE, PALETTES, save_active_name
 from ..theme import (
+    BORDER_SOFT,
     FONT_READOUT,
     FONT_BUTTON,
     FONT_CAPTION,
@@ -119,6 +132,7 @@ from ..widgets import (
     set_entry_border,
 )
 from .scrolling import touchpad_scroll, wheel_scroll
+from ..motion_profile import generate
 
 SPEED_HELP = (
     "One fixed reference speed. Each motor runs at its own percentage of it.\n"
@@ -134,10 +148,16 @@ LIMIT_HELP = (
     "(HOME or RESET COORDINATES); before that, joint positions mean nothing.\n"
     "\n"
     "The two ELBOW rows are SET HERE only, and they take WHATEVER A1M_POS /\n"
-    "A2M_POS reads — no range is enforced, so a four-figure angle is fine.\n"
-    "The board's elbow angle rides on a gear ratio that has never been\n"
-    "measured, so any envelope written here would be a guess, and a guess\n"
-    "that rejects a pose you are physically standing at is worse than none.\n"
+    "A2M_POS reads — no range is enforced, so any angle is accepted.\n"
+    "They are shown as the BASE angle, the frame the rest of the panel\n"
+    "reads: -30 deg at HOME, +60 deg at the working maximum. What is\n"
+    "STORED and sent to the board is still the raw MOTOR count, so\n"
+    "re-calibrating the arm gear ratio never invalidates a boundary you\n"
+    "have already taught.\n"
+    "No envelope is enforced because the elbow zero is wherever the board\n"
+    "powered up, so any ceiling would be a ceiling on an unknown offset —\n"
+    "and a guess that rejects a pose you are physically standing at is\n"
+    "worse than none.\n"
     "The two rows are also interchangeable: teach either end first, and\n"
     "whichever is lower is used as the lower limit.\n"
     "\n"
@@ -170,6 +190,37 @@ APPEARANCE_HELP = (
     "lightness so they stay readable with red-green colour blindness."
 )
 
+# Canvas size for the profile preview. Wide and short on purpose: the
+# thing being read is the SHAPE of two curves against one time axis, and
+# height past this only stretches an answer already legible.
+MOTION_PLOT_W = 560
+MOTION_PLOT_H = 210
+
+MOTION_HELP = (
+    "Ported from Compare_Angular_Motion_Profiles.m — same three profiles,\n"
+    "same maths, so the curve here and the figure in the report agree.\n"
+    "\n"
+    "Speed and accel on the Speed tab say how fast and how hard. This says\n"
+    "what acceleration does BETWEEN them. Trapezoidal steps between three\n"
+    "values, so jerk at each corner is infinite — that is the bang an\n"
+    "open-loop stepper hears, and where steps get lost with no encoder to\n"
+    "notice. The S-curves ease the acceleration in and out instead.\n"
+    "\n"
+    "Smoothness costs time: bounded jerk cannot reach the same average\n"
+    "acceleration, so the same angle takes longer. The line above the graph\n"
+    "gives the total for each, at YOUR current RM settings.\n"
+    "\n"
+    "WHERE IT APPLIES: P2P RUN LEGS, and RESET POSITION. The board cannot be\n"
+    "ASKED for an S-curve — VelMax and AccelMax are its only knobs — so a\n"
+    "profiled leg is INTERPOLATED: one time base for all four axes, each\n"
+    "chasing a setpoint that already moves this shape. That also means the\n"
+    "axes start and finish together, which the unprofiled path did not do.\n"
+    "\n"
+    "JOG STILL RAMPS LINEARLY. A profile has to know how far it is going,\n"
+    "and a held key has not decided yet. Jerk-limiting the jog ramps is a\n"
+    "separate mechanism."
+)
+
 SCAN_HELP = (
     "The scan panel asks for a sample rate, points per slice, slices and\n"
     "slice spacing, and derives the angular step and the sweep SPEED from\n"
@@ -193,20 +244,40 @@ PID_HELP = (
 )
 
 
-# RM boundary fields show 0..-340 instead of 0..340 — operator's requested
-# convention for the two RM entries only. Cosmetic at this boundary alone:
-# self.settings, the wire protocol, presets, and the live jog frame all
-# stay native 0..340 (RM's zero is its CCW stop, counting up — unchanged).
+# TWO BOUNDARY FIELDS ARE SHOWN IN A FRAME THEY ARE NOT STORED IN, and this
+# pair of functions is the ONLY place either translation happens. Everything
+# past them — self.settings, the wire protocol, presets, the live jog frame —
+# is native, so nothing downstream has to know a display convention exists.
+#
+# RM: shown 0..-340 instead of 0..340, the operator's requested convention
+# for those two entries only. RM's zero is still its CCW stop, counting up.
 # A stored 0 (home) displays as -340; a stored 340 displays as 0.
+#
+# The ELBOWS: shown as the BASE angle the operator reads everywhere else —
+# −30° at HOME, +60° at the working maximum — while STAYING STORED IN MOTOR
+# DEGREES. That storage frame is not a detail to tidy away: a taught
+# boundary is a raw count, so re-calibrating ARM_GEAR_RATIO (SET_ARM_RATIO,
+# no re-flash) must never move a boundary somebody taught. Convert at the
+# entry box and nowhere else. The default band 0..926 motor° therefore
+# reads −30.00..88.72 base°.
 _ROT_LIMIT_KEYS = ("lim_rot_min", "lim_rot_max")
+_ARM_LIMIT_KEYS = ("lim_a1_min", "lim_a1_max", "lim_a2_min", "lim_a2_max")
 
 
-def _rot_limit_to_display(key, value):
-    return value - ROT_MAX_DEG if key in _ROT_LIMIT_KEYS else value
+def _limit_to_display(key, value):
+    if key in _ROT_LIMIT_KEYS:
+        return value - ROT_MAX_DEG
+    if key in _ARM_LIMIT_KEYS:
+        return base_angle_from_motor_deg(value)
+    return value
 
 
-def _rot_limit_from_display(key, value):
-    return value + ROT_MAX_DEG if key in _ROT_LIMIT_KEYS else value
+def _limit_from_display(key, value):
+    if key in _ROT_LIMIT_KEYS:
+        return value + ROT_MAX_DEG
+    if key in _ARM_LIMIT_KEYS:
+        return motor_deg_from_base_angle(value)
+    return value
 
 
 class SettingsDialogMixin:
@@ -347,18 +418,28 @@ class SettingsDialogMixin:
             on = 1 if s.get(enforce_key, True) else 0
             self.send(f"SET_PLC_SENSOR_ENFORCE:{axis},{on}", log_tx=False)
 
+    def _send_motion_profile(self):
+        kind = self.settings.get(MOTION_PROFILE_KEY, DEFAULT_MOTION_PROFILE)
+        if kind not in MOTION_PROFILE_KEYS:
+            kind = DEFAULT_MOTION_PROFILE
+        self.send(f"SET_MOTION_PROFILE:{kind}", log_tx=False)
+
     def _push_settings_to_board(self, reason=""):
-        """Sends speed, PID, every travel limit.
+        """Sends speed, PID, every travel limit, and the motion profile.
 
         Board keeps all this in RAM, must be re-sent after any board reset
         — else on-screen limits and actually-enforced limits drift apart,
-        worst possible failure mode for a limit.
+        worst possible failure mode for a limit. The profile is in the same
+        boat: a board that rebooted mid-session would otherwise go back to
+        its own trapezoid while the panel still showed an S-curve.
         """
         self._send_speed()
         self._send_pid()
         self._send_limits()
+        self._send_motion_profile()
         if reason:
-            self.log(f"Synced speed, PID and travel limits to the board ({reason}).")
+            self.log(f"Synced speed, PID, travel limits and the motion "
+                     f"profile to the board ({reason}).")
 
     # Named limit presets — save / load / delete
     def _read_limit_presets(self):
@@ -457,7 +538,7 @@ class SettingsDialogMixin:
             messagebox.showerror("Error", f"No limit set named “{name}”.")
             return
         for key, value in presets[name].items():
-            self._limit_vars[key].set(f"{_rot_limit_to_display(key, value):g}")
+            self._limit_vars[key].set(f"{_limit_to_display(key, value):g}")
         self.log(f"Loaded limit set “{name}” into the form — press APPLY to "
                  f"write it to the board.")
 
@@ -502,6 +583,7 @@ class SettingsDialogMixin:
         # Measured, then the geometry is widened if the strip needs it. The
         # dialog is never narrower than its own tab row by construction.
         tabs = (("speed", "Speed", self._build_speed_tab),
+                ("motion", "Motion", self._build_motion_tab),
                 ("limits", "Boundaries", self._build_limits_tab),
                 ("scan", "Scan", self._build_scan_tab),
                 ("controls", "Controls", self._build_controls_tab),
@@ -593,10 +675,17 @@ class SettingsDialogMixin:
                            for _k, _lab, lock in PID_FIELDS}
         self._speed_vars = {k: tk.StringVar(value=f"{s[k]:g}") for k in SPEED_FIELDS}
         self._accel_vars = {k: tk.StringVar(value=f"{s[k]:g}") for k in ACCEL_FIELDS}
-        self._limit_vars = {k: tk.StringVar(value=f"{_rot_limit_to_display(k, s[k]):g}")
+        self._limit_vars = {k: tk.StringVar(value=f"{_limit_to_display(k, s[k]):g}")
                             for k in LIMIT_FIELDS}
         self._scan_vars = {k: tk.StringVar(value=f"{float(s.get(k, spec[2])):g}")
                            for k, spec in SCAN_SETTING_FIELDS.items()}
+        # An unknown stored value falls back to NONE rather than to the
+        # first profile: a settings file from a newer build naming a shape
+        # this one cannot draw must not silently select a different one.
+        _stored_profile = s.get(MOTION_PROFILE_KEY, DEFAULT_MOTION_PROFILE)
+        self._motion_var = tk.StringVar(
+            value=_stored_profile if _stored_profile in MOTION_PROFILE_KEYS
+            else DEFAULT_MOTION_PROFILE)
         self._speed_preview_vars = {}
         self._speed_entry_wraps = {}
         self._accel_preview_vars = {}
@@ -607,10 +696,15 @@ class SettingsDialogMixin:
         # Live readout of what each percentage actually means. Traced, not
         # recomputed on APPLY — whole point of one fixed reference speed is
         # seeing effect while typing.
+        # The profile graph is drawn against RM's OWN speed and accel, so it
+        # follows the Speed tab as it is typed — otherwise the two tabs
+        # would disagree about what the machine is set to do.
         for var in self._speed_vars.values():
             var.trace_add("write", lambda *_a: self._refresh_speed_preview())
+            var.trace_add("write", lambda *_a: self._refresh_motion_preview())
         for var in self._accel_vars.values():
             var.trace_add("write", lambda *_a: self._refresh_speed_preview())
+            var.trace_add("write", lambda *_a: self._refresh_motion_preview())
 
     def _tab_body(self, page):
         """Scrollable content area for one tab.
@@ -742,6 +836,194 @@ class SettingsDialogMixin:
                  anchor="w", font=FONT_LABEL).grid(
             row=row, column=2, sticky="w", padx=(8, 0))
         return wrap, entry
+
+    # TAB — MOTION PROFILE
+    #
+    # Its own tab rather than a row on Speed. Speed says how fast and how
+    # hard; this says what acceleration does BETWEEN those numbers, it
+    # needs a graph to mean anything, and a graph does not fit beside four
+    # entry boxes.
+    def _build_motion_tab(self, page, dlg):
+        self._tab_buttons(page, self._apply_motion, self._default_motion,
+                          "the motion profile")
+        body = self._tab_body(page)
+
+        tk.Label(body, text="RAMP SHAPE", bg=PANEL_BG, fg=TEXT_MUTED,
+                 font=FONT_CAPTION).pack(anchor="w")
+        tk.Label(body, text="How acceleration behaves between the speed and "
+                            "accel figures on the Speed tab.",
+                 bg=PANEL_BG, fg=TEXT_DIM, font=FONT_HINT,
+                 justify="left").pack(anchor="w", pady=(0, px(8)))
+
+        # ONE choice, four states. Radiobuttons rather than four toggles:
+        # the states are mutually exclusive and a set of toggles can be put
+        # into "two profiles at once", which has no meaning.
+        self._motion_buttons = {}
+        for key, label, blurb in MOTION_PROFILES:
+            row = tk.Frame(body, bg=PANEL_BG)
+            row.pack(fill="x", pady=(0, px(6)))
+            rb = tk.Radiobutton(
+                row, text=label, value=key, variable=self._motion_var,
+                command=self._refresh_motion_preview,
+                bg=PANEL_BG, fg=TEXT_LIGHT, selectcolor=LED_BG,
+                activebackground=PANEL_BG, activeforeground=ACCENT_MINT,
+                highlightthickness=0, bd=0, anchor="w", font=FONT_LABEL)
+            rb.pack(anchor="w")
+            self._motion_buttons[key] = rb
+            tk.Label(row, text=blurb, bg=PANEL_BG, fg=TEXT_DIM,
+                     font=FONT_HINT, justify="left",
+                     wraplength=px(560), anchor="w").pack(anchor="w",
+                                                          padx=(px(24), 0))
+
+        self._motion_summary_v = tk.StringVar(value="")
+        tk.Label(body, textvariable=self._motion_summary_v, bg=PANEL_BG,
+                 fg=ACCENT_MINT, font=FONT_MONO, justify="left",
+                 anchor="w").pack(anchor="w", pady=(px(10), px(4)))
+
+        self._motion_canvas = tk.Canvas(
+            body, width=px(MOTION_PLOT_W), height=px(MOTION_PLOT_H),
+            bg=LED_BG, highlightthickness=1,
+            highlightbackground=BORDER_SOFT, bd=0)
+        self._motion_canvas.pack(anchor="w")
+        self._motion_caption_v = tk.StringVar(value="")
+        tk.Label(body, textvariable=self._motion_caption_v, bg=PANEL_BG,
+                 fg=TEXT_DIM, font=FONT_HINT, justify="left",
+                 anchor="w").pack(anchor="w", pady=(px(4), 0))
+
+        self._help_block(body, MOTION_HELP)
+        self._refresh_motion_preview()
+
+    def _motion_preview_limits(self):
+        """RM's OWN velocity and acceleration, from the Speed tab as typed.
+
+        Not the .m's textbook 60 / 120: a curve drawn against numbers this
+        machine does not use answers a question nobody asked. Falls back to
+        the stored settings while a field is half-typed, and never raises —
+        this runs on every keystroke over there.
+        """
+        def _live(var_map, key, stored):
+            try:
+                return float(var_map[key].get())
+            except (KeyError, AttributeError, TypeError, ValueError):
+                return stored
+        pct = _live(getattr(self, "_speed_vars", {}), "rot_pct",
+                    self.settings.get("rot_pct", DEFAULT_ROT_PCT))
+        acc = _live(getattr(self, "_accel_vars", {}), "rot_acc_pct",
+                    self.settings.get("rot_acc_pct", DEFAULT_ROT_ACC_PCT))
+        omega = rot_speed_deg_s(MASTER_RPM, pct)
+        alpha = rot_accel_deg_s2(MASTER_ACC_RPM_S, acc)
+        return omega, alpha
+
+    def _refresh_motion_preview(self):
+        canvas = getattr(self, "_motion_canvas", None)
+        if canvas is None:
+            return
+        canvas.delete("all")
+        kind = self._motion_var.get()
+        omega, alpha = self._motion_preview_limits()
+
+        if kind == MOTION_PROFILE_NONE:
+            self._motion_summary_v.set("No profile — the board's own ramp.")
+            self._motion_caption_v.set(
+                "Pick a profile to see its angular velocity and acceleration.")
+            canvas.create_text(
+                px(MOTION_PLOT_W) // 2, px(MOTION_PLOT_H) // 2,
+                text="no profile selected", fill=TEXT_DIM, font=FONT_HINT)
+            return
+
+        try:
+            prof = generate(kind, MOTION_PREVIEW_ANGLE_DEG, omega, alpha,
+                            samples=MOTION_PREVIEW_SAMPLES)
+        except ValueError as e:
+            # Half-typed speeds reach here as 0 or negative. Say so rather
+            # than leaving the last profile's curve on screen looking live.
+            self._motion_summary_v.set("—")
+            self._motion_caption_v.set(f"Cannot draw this profile: {e}")
+            return
+
+        peak_j = prof.peak_jerk
+        jerk_txt = "infinite at the corners" if peak_j is None else f"{peak_j:.0f}°/s³"
+        self._motion_summary_v.set(
+            f"{prof.T:.2f} s for {MOTION_PREVIEW_ANGLE_DEG:g}°   ·   "
+            f"peak ω {prof.Vp:.1f}°/s   ·   peak α {prof.peak_accel:.0f}°/s²   ·   "
+            f"peak jerk {jerk_txt}")
+        self._motion_caption_v.set(
+            f"RM turning {MOTION_PREVIEW_ANGLE_DEG:g}° at its current settings "
+            f"— {omega:.1f}°/s, {alpha:.0f}°/s². "
+            f"ω solid, α dashed. Change the Speed tab and this follows.")
+        self._draw_motion_curves(canvas, prof)
+
+    def _draw_motion_curves(self, canvas, prof):
+        """Velocity and acceleration on ONE pair of axes, shared time base.
+
+        Two separate plots would be the honest way to show two units, and
+        this is not that — the point here is comparing the SHAPES, and the
+        shapes are only comparable stacked on one time axis. So each series
+        is scaled to its own peak and the numbers live in the line above.
+        """
+        w, h = px(MOTION_PLOT_W), px(MOTION_PLOT_H)
+        pad_l, pad_r, pad_t, pad_b = px(38), px(12), px(14), px(24)
+        x0, x1 = pad_l, w - pad_r
+        y0, y1 = pad_t, h - pad_b
+        mid = (y0 + y1) / 2.0
+
+        total = prof.T or 1.0
+        v_peak = max((abs(x) for x in prof.v), default=1.0) or 1.0
+        a_peak = max((abs(x) for x in prof.a), default=1.0) or 1.0
+
+        # Zero line, and the frame. Acceleration goes negative, so zero has
+        # to sit in the middle rather than on the floor.
+        canvas.create_line(x0, mid, x1, mid, fill=TEXT_DIM)
+        canvas.create_line(x0, y0, x0, y1, fill=BORDER_SOFT)
+        canvas.create_text(x0 - px(6), mid, text="0", anchor="e",
+                           fill=TEXT_DIM, font=FONT_HINT)
+        canvas.create_text(x0 - px(6), y0, text="+", anchor="e",
+                           fill=TEXT_DIM, font=FONT_HINT)
+        canvas.create_text(x0 - px(6), y1, text="−", anchor="e",
+                           fill=TEXT_DIM, font=FONT_HINT)
+        canvas.create_text(x1, y1 + px(12), text=f"{total:.2f} s", anchor="e",
+                           fill=TEXT_DIM, font=FONT_HINT)
+
+        def series(values, peak, colour, dash):
+            pts = []
+            for t, val in zip(prof.t, values):
+                px_x = x0 + (t / total) * (x1 - x0)
+                px_y = mid - (val / peak) * (mid - y0)
+                pts.extend((px_x, px_y))
+            if len(pts) >= 4:
+                canvas.create_line(*pts, fill=colour, width=2, dash=dash)
+
+        series(prof.a, a_peak, ACCENT_ORANGE, (4, 3))
+        series(prof.v, v_peak, ACCENT_MINT, None)
+
+        canvas.create_text(x0 + px(8), y0 + px(2), text="ω  angular velocity",
+                           anchor="nw", fill=ACCENT_MINT, font=FONT_HINT)
+        canvas.create_text(x0 + px(8), y0 + px(16),
+                           text="α  angular acceleration", anchor="nw",
+                           fill=ACCENT_ORANGE, font=FONT_HINT)
+
+    def _apply_motion(self):
+        kind = self._motion_var.get()
+        if kind not in MOTION_PROFILE_KEYS:
+            messagebox.showerror("Error", f"Unknown motion profile {kind!r}.")
+            return
+        self.settings[MOTION_PROFILE_KEY] = kind
+        self._save_settings_file()
+        self._send_motion_profile()
+        label = dict((k, l) for k, l, _d in MOTION_PROFILES)[kind]
+        if kind == MOTION_PROFILE_NONE:
+            self.log("Motion profile NONE — run legs use the step generator's "
+                     "own trapezoid, as before.")
+        else:
+            # The board REFUSES this while it is moving, so say where it
+            # lands rather than implying it took effect on a running leg.
+            self.log(f"Motion profile {label} — sent to the board. Run legs "
+                     f"are interpolated to this shape from the next leg on. "
+                     f"Jog still ramps linearly.")
+
+    def _default_motion(self):
+        self._motion_var.set(DEFAULT_MOTION_PROFILE)
+        self._refresh_motion_preview()
 
     # TAB 1 — SPEED
     def _build_speed_tab(self, page, dlg):
@@ -1217,9 +1499,13 @@ class SettingsDialogMixin:
         if source is None:
             return
         value = getattr(self, source)
-        self._limit_vars[key].set(f"{_rot_limit_to_display(key, value):.{decimals}f}")
+        shown = _limit_to_display(key, value)
+        self._limit_vars[key].set(f"{shown:.{decimals}f}")
+        # The LOG quotes what the box now reads, not the stored figure. An
+        # elbow is captured in motor degrees and shown as a base angle; a
+        # log line in the other frame reads as the capture having missed.
         self.log(f"Captured current position as {axis} {LIMIT_FIELDS[key][0]}: "
-                 f"{value:.{decimals}f} {unit}. Press APPLY to write it to the board.")
+                 f"{shown:.{decimals}f} {unit}. Press APPLY to write it to the board.")
         if key in LIMIT_CAPTURE_ONLY:
             self.log("   The two elbow limits are interchangeable — teach "
                      "either end first; the lower of the two is used as the "
@@ -1248,18 +1534,27 @@ class SettingsDialogMixin:
         # longer exist.
         self._refresh_workspace_hint()
         self._save_settings_file()
+        # Elbows are quoted as the BASE angle the tab shows, with the motor
+        # degrees that were actually stored beside them — the wire, the
+        # presets and the board all speak the second number.
+        a1 = (limits['lim_a1_min'], limits['lim_a1_max'])
+        a2 = (limits['lim_a2_min'], limits['lim_a2_max'])
         self.log(f"Boundaries applied — "
                  f"ZM {limits['lim_z_min']:g}..{limits['lim_z_max']:g} mm · "
                  f"RM {limits['lim_rot_min']:g}..{limits['lim_rot_max']:g}° · "
-                 f"A1M {limits['lim_a1_min']:g}..{limits['lim_a1_max']:g}° · "
-                 f"A2M {limits['lim_a2_min']:g}..{limits['lim_a2_max']:g}°")
+                 f"A1M {base_angle_from_motor_deg(a1[0]):g}.."
+                 f"{base_angle_from_motor_deg(a1[1]):g} base° "
+                 f"({a1[0]:g}..{a1[1]:g} motor°) · "
+                 f"A2M {base_angle_from_motor_deg(a2[0]):g}.."
+                 f"{base_angle_from_motor_deg(a2[1]):g} base° "
+                 f"({a2[0]:g}..{a2[1]:g} motor°)")
         if not self._hardware_live():
             self.log("No board confirmed yet — limits will be re-sent as soon as "
                      "the handshake succeeds.", tag="warn")
 
     def _default_limits(self):
         for key, spec in LIMIT_FIELDS.items():
-            self._limit_vars[key].set(f"{_rot_limit_to_display(key, spec[6]):g}")
+            self._limit_vars[key].set(f"{_limit_to_display(key, spec[6]):g}")
         self.log("Boundaries reset to the mechanical envelope — press APPLY "
                  "to send them.")
 
@@ -1279,8 +1574,8 @@ class SettingsDialogMixin:
             # (0..-340) — the units the operator actually typed — then
             # converted back to native 0..340 for storage below, so
             # everything past this point never sees the display convention.
-            disp_floor = None if floor_v is None else _rot_limit_to_display(key, floor_v)
-            disp_ceil = None if ceil_v is None else _rot_limit_to_display(key, ceil_v)
+            disp_floor = None if floor_v is None else _limit_to_display(key, floor_v)
+            disp_ceil = None if ceil_v is None else _limit_to_display(key, ceil_v)
             if disp_floor is not None and disp_floor > disp_ceil:
                 disp_floor, disp_ceil = disp_ceil, disp_floor
             if disp_floor is not None and not (disp_floor - 1e-6 <= value <= disp_ceil + 1e-6):
@@ -1289,7 +1584,7 @@ class SettingsDialogMixin:
                     f"envelope [{disp_floor:g}, {disp_ceil:g}]{unit}.\n\n"
                     f"That is the structure's own limit — no setting can allow "
                     f"the machine past it.")
-            out[key] = _rot_limit_from_display(key, value)
+            out[key] = _limit_from_display(key, value)
 
         for heading, min_key, max_key, span in LIMIT_GROUPS:
             lo, hi = out[min_key], out[max_key]

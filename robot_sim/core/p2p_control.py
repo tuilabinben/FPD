@@ -223,23 +223,28 @@ class P2PControlMixin:
             self.log(f"IK error: {e}", tag="error")
             return
 
-        # solve_ik only knows machine's PHYSICAL envelope. operator's own
-        # working limits are narrower, point outside them must be refused
-        # here rather than sent, half-executed, stopped part-way through
-        # by board's limit check.
+        # A TAUGHT BOUNDARY NO LONGER REFUSES A LOAD. Asked for directly,
+        # and the BOARD was changed to match in the same breath -- see
+        # jointTargetIsLegal() and solveIkFrogleg() in the .ino, which used
+        # to reject the same point a second time.
+        #
+        # Both had to go together. Removing only this one left the GUI
+        # believing a program was loaded while the board had refused to
+        # store it: RUN then did nothing, and the only clue was an [ERROR]
+        # in the log. A half-removed limit is worse than either end of it.
+        #
+        # So a point outside the taught band now genuinely RUNS. It is still
+        # said, in the log rather than a dialog, because the operator set
+        # that boundary for a reason and the machine is about to ignore it.
+        # Warned, not refused.
         targets = ([(d1, rot, a1, a2)] if self.arm_config == "BOTH"
                    else [(d1a, rota, a1a, a2a), (d1b, rotb, a1b, a2b)])
         for label, (td1, trot, ta1, ta2) in zip(("A", "B"), targets):
             violation = self._limit_violation(td1, trot, ta1, ta2)
             if violation:
-                self._invalidate_loaded_program()
-                messagebox.showerror(
-                    "Outside the working envelope",
-                    f"Point {label} is outside the limits you set:\n\n{violation}\n\n"
-                    f"Adjust the coordinates, or widen the limits in "
-                    f"Settings → Boundaries.")
-                self.log(f"Point {label} rejected: {violation}", tag="error")
-                return
+                self.log(f"Point {label} is outside the limits you set "
+                         f"({violation}) — running it anyway. Taught "
+                         f"boundaries no longer stop a P2P move.", tag="warn")
 
             # PLC sensors enforced for P2P (jog only warns). checked after
             # taught limits because sensor is physical fact, its message
@@ -348,10 +353,10 @@ class P2PControlMixin:
         """Returns human description of first working-limit breach, or
         None when pose inside every limit operator set.
 
-        THIS is the reach envelope now. solve_ik no longer carries a
-        structural one — refuses only radii geometry can't solve at all —
-        so working limit is operator's taught elbow band and nothing
-        else. One system of record.
+        DESCRIBES, does not decide. LOAD used to refuse on this; it warns
+        now (see p2p_load_parameters) and the BOARD is what stops the leg.
+        Kept because the board reports a bare [LIMIT] with no idea which
+        typed number caused it, and this is the only place that knows.
 
         Two things it has to get right, both learned elsewhere in
         codebase:

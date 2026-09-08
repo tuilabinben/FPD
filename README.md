@@ -80,11 +80,11 @@ Four axes. **HOME is the minimum of all four**, and it is the origin for everyth
 
 Reach of the wafer centre from the turntable axis:
 
-| Pose | Reach |
-| :--- | ---: |
-| HOME, arm folded | **240 mm** |
-| Rated working reach | **575 mm** |
-| Arm straight (singularity) | **605 mm** |
+| Pose | Base angle | Reach |
+| :--- | ---: | ---: |
+| **HOME**, arm folded | **−30°** | **133.2 mm** |
+| **Working maximum** — a note, not a limit | **+60°** | **570.3 mm** |
+| Arm straight (singularity) | +90° | 613.2 mm |
 
 Cartesian **X, Y** are measured from the turntable axis and are signed; **Z** is height above
 HOME. `X 0, Y 0` is the centre of rotation — a reference point, not a reachable target.
@@ -172,21 +172,30 @@ axis motor RPM = 150 × (axis % / 100) × AXIS_SCALE
 
 Three numbers describe the same elbow. Knowing which one you are looking at matters.
 
-| Frame | HOME | Rated reach | Straight | Where it appears |
+| Frame | HOME | Working max | Straight | Where it appears |
 | :--- | ---: | ---: | ---: | :--- |
-| **Base angle** | 0° | 90° | 110.4° | the panels — what the operator reads |
-| **Frog-leg (fold)** | 0° | 146.68° | 180° | the `fold …° · R = … mm` line |
-| **Motor degrees** | 0° | 1144° | 1404° | the wire, and every taught elbow boundary |
+| **Base angle** | **−30°** | **+60°** | +90° | the panels — what the operator reads |
+| **Frog-leg (fold)** | 0° | 90° | 120° | the `fold …° · R = … mm` line |
+| **Motor degrees** | 0° | 702° | 936° | the wire, and every taught elbow boundary |
+| **Reach** | 133.2 mm | 570.3 mm | 613.2 mm | beside the fold angle |
+
+The base angle is **1:1 with the arm**, offset 90° from the CAD frame
+(`base = th3_cad − 90 = fold − 30`) — one base degree is one arm degree,
+everywhere across the travel.
 
 `ARM_GEAR_RATIO = 7.80` motor degrees per frog-leg degree. The board counts step pulses and
 nothing else, so **motor degrees are the only figure it knows exactly** — the other two are
 derived. That is why taught elbow limits are stored in motor degrees: re-calibrating the ratio
 must never invalidate a boundary somebody walked the machine to.
 
-> **Pending change.** The base angle is being re-zeroed to read **−30° at HOME and +60° at full
-> extension** — the same 90° of travel, measured from a different zero, matching the MATLAB
-> model. It is blocked on one bench measurement (reach at full extension). Until then the panels
-> read 0 – 90°.
+> **The working maximum is a NOTE, not a limit.** P2P and the board's boot banner state
+> `HOME = base −30° · R 133.2 mm | MAX = base +60° · R 570.3 mm`; JOYSTICK states the HOME
+> half alone, because jogging has no target. Nothing enforces the maximum: a target past it solves, and the arm can go on to base +90° where
+> it is straight. What stops the arm is your own taught elbow band, as always.
+
+> **A radius shorter than HOME still solves**, to a base angle below −30°. The arithmetic span
+> is `293.2 ± 320` = −26.8 … 613.2 mm, which is wider than the travel; the taught band is what
+> refuses a pose behind HOME, not the geometry.
 
 Settings files carry a `_schema` (currently **4**). When a stored value changes *meaning*, the
 schema bumps and the affected keys are **dropped with a warning** rather than silently
