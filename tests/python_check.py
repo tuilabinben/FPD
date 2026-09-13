@@ -2098,9 +2098,22 @@ check(any("not blocked" in m for m, _t in sf.logged),
 sw = Sensed(covered=("M30",))
 sw._read_plc_limit_ends("limit Z/R/A2=001 end Z/R/A2=-++ enforce Z/R/A2=111")
 check(sw.plc_sensor_end_for("M30") == +1
-      and sw.plc_sensor_end_for("M31") == +1
       and sw.plc_sensor_end_for("M32") == -1,
       "the board's end field is read positionally as M32/M31/M30, like the bits")
+check(sw.plc_sensor_end_for("M31") == -1,
+      "  ...but a single-ended switch keeps its fixed end: an un-flashed board's "
+      "R=+ must not move M31 to RM's MAX")
+# The exact line an un-flashed board sent on the machine. RM sat on M31 at
+# 0.02 deg and every point with rot > 0 was refused as "further in".
+sr = Sensed(covered=("M32", "M31", "M30"))
+sr._read_plc_limit_ends("[PLC_STATE] link=UP socket=OPEN data=OK conn=1/10 "
+                        "word=00E0 timeouts=0 | limit Z/R/A2=111 end Z/R/A2=-+- "
+                        "enforce Z/R/A2=111")
+sr.current_joints = [0.0, 0.02, 0.0, 0.0]
+check(sr._sensor_violation(0.0, 7.13, 0.0, 0.0) is None,
+      "RM on M31 at home: a P2P point at rot 7.13 turns AWAY from the switch")
+check(sr._sensor_violation(0.0, -5.0, 0.0, 0.0) is not None,
+      "  ...while a point further CCW is still refused")
 sw._read_plc_limit_ends("NO DEVICE DATA | limit Z/R/A2=??? end Z/R/A2=???")
 check(sw.plc_sensor_end_for("M30") == +1,
       "  ...and '?' leaves the last known end alone rather than inventing one")

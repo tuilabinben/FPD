@@ -420,6 +420,12 @@ class ProtocolMixin:
         for bit, ch in zip(("M32", "M31", "M30"), m.group(1)):
             if bit not in ends or ch == "?":
                 continue
+            # Only a both-ends switch has an end to learn. ZM and RM are
+            # single-ended and fixed in PLC_SENSOR_PANEL; a board flashed
+            # before M31 moved to the minimum still reports R=+, and adopting
+            # it refused every P2P point with rot > 0 as "further into" M31.
+            if bit not in PLC_SENSOR_BOTH_ENDS:
+                continue
             ends[bit] = 1 if ch == "+" else -1
 
     def _mark_plc_sensors_seen(self):
