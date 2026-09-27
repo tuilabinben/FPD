@@ -50,8 +50,6 @@ check(C.cmd_scan_start(2.5, 0.5, 4, 180.0) == "SCAN_START:2.500,0.500,4,180.00",
       "  ...and a shorter sweep goes in the fourth field")
 check(C.cmd_sensor("ANALOG") == "SET_SCAN_SENSOR:ANALOG",
       "the sensor kind is sent by name, not by an index nobody can read")
-check(C.cmd_cal(0.5, 10.0) == "SET_SCAN_CAL:0.500000,10.000",
-      "the analog calibration is mm-per-count then offset")
 check(C.DEG_STEP_MAX == 90.0 and C.Z_STROKE_MM == 285.0,
       "the GUI's limits mirror the board's, so a bad number is caught here first")
 
@@ -213,9 +211,9 @@ check(app.store.layer_z == {1: 0.0, 2: 4.0, 3: 8.0},
 _l1 = [d for d, _r in app.store.layer_points(1)]
 _l2 = [d for d, _r in app.store.layer_points(2)]
 _l3 = [d for d, _r in app.store.layer_points(3)]
-check(_l1[0] > _l1[-1], "layer 1 sweeps AWAY from the switch, so its angle counts down")
-check(_l2[0] < _l2[-1], "layer 2 comes BACK to it, counting up")
-check(_l3[0] > _l3[-1], "  ...and layer 3 turns round again")
+check(_l1[0] < _l1[-1], "layer 1 sweeps AWAY from the switch at 0, so its angle counts up")
+check(_l2[0] > _l2[-1], "layer 2 comes BACK to it, counting down")
+check(_l3[0] < _l3[-1], "  ...and layer 3 turns round again")
 # From the RAW points, not the hit-filtered ones. layer_points() drops
 # misses, and the simulator loses about 1.5% of readings at random -- so a
 # miss landing on the FIRST sample of either layer made this compare the
@@ -559,14 +557,14 @@ check(any(l.startswith("[SCAN_SEEK]") for l in seen),
       "  ...then goes to find the RM switch, like the board does")
 check(any(l.startswith("[SCAN_REF]") for l in seen),
       "  ...and announces the switch as the reference")
-check(any(l.startswith("[SCAN_LAYER] 1/2") and "dir=-" in l for l in seen),
+check(any(l.startswith("[SCAN_LAYER] 1/2") and "dir=+" in l for l in seen),
       "  ...before sweeping AWAY from it")
 for _ in range(200):
     sim.poll()
     if not sim.running:
         break
 check(any(l.startswith("[SCAN_PT]") for l in seen), "it emits points")
-check(any(l.startswith("[SCAN_LAYER] 2/2") and "dir=+" in l for l in seen),
+check(any(l.startswith("[SCAN_LAYER] 2/2") and "dir=-" in l for l in seen),
       "the next layer turns back the other way")
 check(sum(1 for l in seen if l.startswith("[SCAN_REF]")) == 2,
       "  ...and re-references when it arrives back on the switch")

@@ -187,10 +187,9 @@ class JogPanelMixin:
         self._jog_pad(grid, 2, 0, "▼", "Z DOWN", "Z_DOWN", JZ_COLOR, HI_ROT)
 
     def _jog_pad(self, parent, row, col, glyph, label, start_cmd, base, hi):
-        # Keycap looked up from JOG_KEYCAPS, not passed in — rebinding can
-        # never leave pad showing old letter.
-        from .. import keybinds
-        keycap = keybinds.to_keycaps(keybinds.active_map()).get(start_cmd, "?")
+        # Keycap looked up live, not passed in — rebinding can never leave
+        # the pad showing the old letter.
+        keycap = self._caps().get(start_cmd, "?")
         stop_cmd = JOG_STOP_COMMAND[start_cmd]
         pad = JogPad(parent, 78, 78, glyph, label, keycap, base, hi,
                      on_press=lambda: self.jog_start(start_cmd),

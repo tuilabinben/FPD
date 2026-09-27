@@ -41,39 +41,20 @@ DEFAULT_KD = PID_PRESET["kd"]
 DEFAULT_N_FILTER = PID_PRESET["n"]
 N_FILTER_MIN, N_FILTER_MAX = 1.0, 200.0
 
-DEFAULT_PID_ENABLED = True
-
 # SPEED: one universal RPM, one percentage per motor.
 #   axisMotorRpm = master_rpm * (axis_pct / 100) * AXIS_RPM_SCALE
 #
-# AXIS_RPM_SCALE = calibration, not user setting. 3 axes geared differently, raw pct of one
-# shared RPM meaningless:
-#   RM 28.4375:1 -> 140 motor RPM = 29.5°/s   scale 1.000
-#   ZM 20mm/rev  -> 105 motor RPM = 35.0mm/s  scale 0.750
-#   AM ratio UNMEASURED -> runs at master RPM  scale 1.000
-#
-# AM's scale was 0.030 (from "25°/s = 4.17 motor RPM"), only valid if ARM_GEAR_RATIO were 1.0.
-# On machine 100°/s still visibly slow -> proof elbow has real reduction, motor throttled to
-# ~17 RPM while other axes ran 100+. Scale now 1.0: arm pct maps straight to master motor RPM
-# like RM does, old 100°/s ceiling gone.
-#
-# RM/ZM still clamped to real engineering ceiling (gearing known). Arm bounded in MOTOR RPM
-# instead — only unit on that axis that means anything, guards real hazard: open-loop stepper
-# skipping steps at high RPM, no encoder to notice.
+# The per-axis scale is a calibration, not a user setting. RM/ZM are clamped to a real
+# engineering ceiling; the arm is bounded in MOTOR RPM, the only unit on that axis that guards
+# the real hazard: an open-loop stepper skipping steps at high RPM, with no encoder to notice.
 MASTER_RPM_NOMINAL = 140.0
 
 ROT_RPM_SCALE = 140.0 / MASTER_RPM_NOMINAL
 Z_RPM_SCALE = 105.0 / MASTER_RPM_NOMINAL
 ARM_RPM_SCALE = 1.0
 
-AXIS_RPM_SCALES = {
-    "rot_pct": ROT_RPM_SCALE,
-    "arm_pct": ARM_RPM_SCALE,
-    "z_pct": Z_RPM_SCALE,
-}
-
-MASTER_RPM = 150.0                     
-MASTER_ACC_RPM_S = 375.0               
+MASTER_RPM = 150.0
+MASTER_ACC_RPM_S = 300.0
 
 # SET ON THE MACHINE. This combination is the one that ran stably; it is a
 # bench result, not a calculation, so do not re-derive it from anything.
@@ -89,8 +70,6 @@ SPEED_FIELDS = {
     "z_pct":   ("ZM — lift", "%", DEFAULT_Z_PCT, AXIS_PCT_MIN, None),
 }
 SPEED_KEYS = ("rot_pct", "arm_pct", "z_pct")
-
-SPEED_WIRE_KEYS = ("rot_pct", "arm_pct", "z_pct")
 
 # ------------------------------------------------------------------
 # ACCELERATION — independent per-axis percentage of masterAccRpmS.
@@ -120,8 +99,6 @@ ACCEL_FIELDS = {
     "z_acc_pct":   ("ZM — lift accel", "%", DEFAULT_Z_ACC_PCT, AXIS_PCT_MIN, None),
 }
 ACCEL_KEYS = ("rot_acc_pct", "arm_acc_pct", "z_acc_pct")
-
-ACCEL_WIRE_KEYS = ("rot_acc_pct", "arm_acc_pct", "z_acc_pct")
 
 # ------------------------------------------------------------------
 # ANGULAR MOTION PROFILE — the SHAPE of the ramp, not its size.
@@ -171,6 +148,25 @@ MOTION_PROFILES = (
 MOTION_PROFILE_KEYS = tuple(k for k, _l, _d in MOTION_PROFILES)
 
 DEFAULT_MOTION_PROFILE = MOTION_PROFILE_NONE
+# MOTION TEST (Settings -> Motion, TEST). One motor goes to a TARGET and
+# back, on the board, with the profile in the dropdown. Targets are
+# ABSOLUTE positions in the frame the operator reads: turntable degrees,
+# the arm's BASE angle (-30 at HOME, +60 the working max), mm above HOME.
+# Speed is the MOTOR's RPM with NO upper limit, on request; past the axis's
+# engineering ceiling the panel warns instead.
+#   (menu label, wire token)
+MOTION_TEST_MOTORS = (("RM", "ROT"), ("A1M", "A1"), ("A2M", "A2"), ("ZM", "Z"))
+#   wire token -> (choices, field label)
+MOTION_TEST_TARGETS = {
+    "ROT": ((45, 90, 180, 270), "Target (turntable °)"),
+    "A1":  ((0, 30, 45, 60), "Target (base °)"),
+    "A2":  ((0, 30, 45, 60), "Target (base °)"),
+    "Z":   ((20, 50, 100, 150), "Target (mm above HOME)"),
+}
+DEFAULT_MOTION_TEST_RPM = 60.0
+DEFAULT_MOTION_TEST_ACC_RPM_S = 120.0    # the TEST's typed accel, motor RPM/s
+# The "Compare with" dropdown's extra choice: run the main profile only.
+COMPARE_OFF = "Off"
 
 # What the preview graph draws. A profile has no shape until it is given an
 # angle and two limits, so the panel picks a representative RM move and
@@ -254,9 +250,6 @@ I_RM_TOTAL = 1 * 6.5
 # geometry there is right, the drive ratio is not in it.
 ARM_GEAR_RATIO = 7.80
 
-
-I_ARM_TOTAL = ARM_GEAR_RATIO
-
 # ZM LEAD — carriage travel per motor rev. CONFIRMED ON THE MACHINE: commanded mm are real
 # mm, so 20 stands. It was carried as an assumption for a long time and is not one any more.
 #
@@ -287,21 +280,11 @@ def arm_motor_speed_deg_s(master_rpm, pct):
     return master_rpm * (pct / 100.0) * ARM_RPM_SCALE * 360.0 / 60.0
 
 
-def arm_speed_deg_s(master_rpm, pct):
-    """FROG-LEG speed (°/s) — the motor speed divided by ARM_GEAR_RATIO.
-
-    Only as good as ARM_GEAR_RATIO, which is derived from the Simscape
-    model rather than measured, so quote it with the ratio beside it.
-    arm_motor_speed_deg_s() and arm_motor_rpm() are the exact figures.
-    """
-    return arm_motor_speed_deg_s(master_rpm, pct) / ARM_GEAR_RATIO
-
-
 def arm_motor_rpm(master_rpm, pct):
     """What the elbow motors are actually asked to turn at.
 
-    Unlike arm_speed_deg_s() this does not depend on the gear ratio at
-    all, so it is true whatever the ratio turns out to be.
+    Does not depend on the gear ratio at all, so it is true whatever the
+    ratio turns out to be.
     """
     return master_rpm * (pct / 100.0) * ARM_RPM_SCALE
 
@@ -309,11 +292,6 @@ def arm_motor_rpm(master_rpm, pct):
 def z_speed_mm_s(master_rpm, pct):
     """Lift speed (mm/s) for a master RPM and ZM's percentage."""
     return master_rpm * (pct / 100.0) * Z_RPM_SCALE * Z_MM_PER_MOTOR_REV / 60.0
-
-
-def axis_motor_rpm(master_rpm, pct, scale):
-    """The RPM that motor is actually asked to turn at."""
-    return master_rpm * (pct / 100.0) * scale
 
 
 SPEED_PREVIEW = (
@@ -336,8 +314,8 @@ ACCEL_PREVIEW = (
 )
 ACCEL_PREVIEW_BY_KEY = {p[1]: p for p in ACCEL_PREVIEW}
 
-ARM_LINK_SUM_MM = A4_MM + A5_MM            
-ARM_RADIAL_OFFSET_MM = A3_MM + A6_MM       
+ARM_LINK_SUM_MM = A4_MM + A5_MM
+ARM_RADIAL_OFFSET_MM = A3_MM + A6_MM
 
 # THE ANGLE FRAME. Three names for one physical pose, and only the first is stored anywhere:
 #
@@ -398,24 +376,17 @@ def arm_frame_note():
     where you are, and a target ceiling is a P2P question."""
     return f"{arm_home_note()}   |   {arm_max_note()}"
 
-ARM_LINK_MM = ARM_LINK_SUM_MM / 2.0
-
 Z_STROKE_MM = 285.0
 D1_MIN_MM, D1_MAX_MM = 0.0, Z_STROKE_MM
 
-Z_INPUT_MIN_MM = D1_MIN_MM                     
-Z_INPUT_MAX_MM = D1_MAX_MM                     
-Z_HOME_ABS_MM = Z_OFFSET_ARM1_MM               
-
-Z_MIN_MM = Z_OFFSET_ARM1_MM                    
-Z_MAX_MM = Z_OFFSET_ARM1_MM + Z_STROKE_MM      
+Z_INPUT_MIN_MM = D1_MIN_MM
+Z_INPUT_MAX_MM = D1_MAX_MM
+Z_HOME_ABS_MM = Z_OFFSET_ARM1_MM
 
 ROT_MIN_DEG, ROT_MAX_DEG = 0.0, 340.0
 
-ROT_SIM_MIN_DEG, ROT_SIM_MAX_DEG = ROT_MIN_DEG, ROT_MAX_DEG
-Z_SIM_MIN_MM, Z_SIM_MAX_MM = D1_MIN_MM, D1_MAX_MM
-ARM_MOTOR_MIN_DEG = FOLD_ANGLE_MIN_DEG * ARM_GEAR_RATIO    
-ARM_MOTOR_MAX_DEG = FOLD_ANGLE_MAX_DEG * ARM_GEAR_RATIO    
+ARM_MOTOR_MIN_DEG = FOLD_ANGLE_MIN_DEG * ARM_GEAR_RATIO
+ARM_MOTOR_MAX_DEG = FOLD_ANGLE_MAX_DEG * ARM_GEAR_RATIO
 ARM_SIM_MIN_DEG, ARM_SIM_MAX_DEG = ARM_MOTOR_MIN_DEG, ARM_MOTOR_MAX_DEG
 
 # OPERATOR-DEFINED WORKING LIMITS. Everything above = FACTORY envelope (what structure allows).
@@ -429,13 +400,7 @@ ARM_SIM_MIN_DEG, ARM_SIM_MAX_DEG = ARM_MOTOR_MIN_DEG, ARM_MOTOR_MAX_DEG
 # Board holds these in RAM only; GUI is system of record, writes to JSON, re-sends every connect.
 #
 #   key -> (label, firmware axis, end, unit, factory floor, factory ceil, default, decimals)
-# How far a TAUGHT elbow boundary may sit. Deliberately far wider than CAD envelope: board's
-# reported elbow number scaled by unmeasured ARM_GEAR_RATIO, so captured position can land well
-# outside 60-180deg. Narrowing would reject the teaching it exists to support.
-# Kept only so older saved files/firmware constant names resolve. Nothing validates against
-# these anymore — see LIMIT_FIELDS.
-ARM_LIMIT_FLOOR_DEG = None
-ARM_LIMIT_CEIL_DEG = None
+# Elbow rows have no floor/ceil (None): a taught elbow boundary may sit anywhere.
 
 # DEFAULT BOUNDARIES SIT INSIDE FACTORY ENVELOPE. Defaults used to BE factory envelope, meaning
 # untaught machine would drive axis to mechanical end stop — soft limit == hard stop, protected
@@ -446,9 +411,9 @@ ARM_LIMIT_CEIL_DEG = None
 #
 # Widen by teaching (SET HERE) once real stops known — that's the workflow these exist for.
 LIMIT_SAFETY_MARGIN = {
-    "Z": 5.0,      
-    "ROT": 5.0,    
-    "A1": 10.0,    
+    "Z": 5.0,
+    "ROT": 5.0,
+    "A1": 10.0,
     "A2": 10.0,
 }
 
@@ -534,7 +499,7 @@ LIMIT_LIVE_SOURCE = {
     "Z": "sim_z", "ROT": "sim_rot", "A1": "sim_a1", "A2": "sim_a2",
 }
 
-# PLC LINK — MELSEC MC Protocol 3E, ASCII, TCP. Mirrors firmware's PLC section; nothing here
+# PLC LINK — MELSEC MC Protocol 3E, BINARY, TCP. Mirrors firmware's PLC section; nothing here
 # opens a socket — GUI talks ClearCore over serial, ClearCore is the MC protocol client.
 # Constants exist so console can SAY what board talks to, wrong address visible in one place
 # not buried in a .ino nobody has open.
@@ -543,24 +508,6 @@ LIMIT_LIVE_SOURCE = {
 # Two copies on purpose (board must work from bare terminal, no GUI) but must not disagree.
 PLC_IP = "192.168.3.101"
 PLC_PORT = 1025
-PLC_CLEARCORE_IP = "192.168.3.200"
-PLC_POLL_IDLE_MS = 20
-PLC_POLL_HOMING_MS = 10
-PLC_POLL_MS = PLC_POLL_IDLE_MS
-
-PLC_DEVICE_MAP = (
-    ("X0",  "HOME request (wired from ClearCore IO-0)", "wire"),
-    ("M0",  "RUN",           "plc"),
-    ("M2",  "rHOME",         "plc"),
-    ("M3",  "STOP",          "plc"),
-    ("M4",  "rJOG",          "plc"),
-    ("M30", "ZM travel limit",  "read"),
-    ("M31", "RM travel limit",  "read"),
-    ("M32", "A2M travel limit", "read"),
-    ("M20", "AUTO",          "plc"),
-    ("M21", "HOME",          "plc"),
-    ("M23", "sHOME",         "plc"),
-)
 
 
 # M30..M32 TRAVEL LIMITS — the ONLY PLC devices read, shown in BOTH motion modes.
@@ -622,13 +569,9 @@ PLC_SENSOR_UNKNOWN_TEXT = "NO DATA"
 
 PLC_SENSOR_STALE_MS = 15000
 
-PLC_SENSOR_BROKEN_TEXT = "NO SENSOR"
-
 # HOME STATE = all three limits true. Same condition the board homes on.
 PLC_HOME_STATE_ON_BITS = ("M30", "M31", "M32")
 PLC_HOME_STATE_CLEAR_BITS = ()
-
-PLC_STATUS_POLL_MS = HEARTBEAT_INTERVAL_MS
 
 PLC_LED_STATES = {
     "unknown":     ("NO LINK",     "TEXT_MUTED"),
@@ -637,11 +580,6 @@ PLC_LED_STATES = {
     "unreachable": ("UNREACHABLE", "ACCENT_RED"),
     "disabled":    ("DISABLED",    "TEXT_MUTED"),
 }
-
-PLC_HOME_REQUEST_DEVICE = "X0"
-PLC_HOME_REQUEST_SOURCE = "ClearCore IO-0 (hard-wired)"
-PLC_HOME_DONE_DEVICE = "M1"
-PLC_LINK_IS_READ_ONLY = True
 
 import os
 
@@ -661,8 +599,8 @@ ROT_FRAME_V4_RESET_KEYS = ("lim_rot_min", "lim_rot_max")
 LIMIT_PRESETS_FILE = os.path.join(_HERE, "limit_presets.json")
 LIMIT_PRESET_NAME_MAX = 40
 
-ROT_HOME_DEG = 0.0         
-ARM_HOME_DEG = FOLD_ANGLE_HOME_DEG * ARM_GEAR_RATIO    
+ROT_HOME_DEG = 0.0
+ARM_HOME_DEG = FOLD_ANGLE_HOME_DEG * ARM_GEAR_RATIO
 Z_HOME_MM = D1_MIN_MM
 
 # X0 IS THE HOME REACH, not a round number near it: the panel opens on the pose the arm is
@@ -672,7 +610,6 @@ DEFAULT_POINT_A = (ARM_MIN_REACH_MM, 0.0, 45.0)
 DEFAULT_POINT_B = (250.0, 250.0, 135.0)
 
 ARM_CONFIGS = ("A1M", "A2M", "BOTH")
-ELBOW_CONFIGS = ARM_CONFIGS
 
 # Jog command vocabulary, single source of truth — previously 3 copies in app class, drifted
 # apart. A1M/A2M separate motors on separate frog-leg linkages, each own jog axis. ARM_FWD/
@@ -712,14 +649,8 @@ LIMIT_OPPOSITE = {
     "Z_DOWN": "Z_UP",
 }
 
-# Keyboard bindings no longer hard-coded — live in keybinds.py, editable Settings->Controls,
-# persist to keybinds.json. Names below kept since rest of app reads them, but DERIVED — needs
-# live layout after rebind must call keybinds.active_map(), not capture these at import.
-from . import keybinds as _kb
-
-JOG_KEYMAP = _kb.to_tk_keymap(_kb.active_map())
-JOG_KEYCAPS = _kb.to_keycaps(_kb.active_map())
-JOG_KEY_HINT = _kb.to_hint(_kb.active_map())
+# Keyboard bindings live in keybinds.py (Settings -> Controls, keybinds.json); anything
+# showing a key reads keybinds.active_map() live, so a rebind is never shown stale.
 
 LOG_MAX_LINES = 800
 
@@ -828,16 +759,6 @@ def cmd_scan_sensor(kind):
     return f"SET_SCAN_SENSOR:{kind}"
 
 
-def cmd_scan_cal(mm_per_count, offset_mm):
-    return f"SET_SCAN_CAL:{mm_per_count:.6f},{offset_mm:.3f}"
-
-
-SCAN_TAG_POINT = "[SCAN_PT]"
-SCAN_TAG_BEGIN = "[SCAN_BEGIN]"
-SCAN_TAG_LAYER = "[SCAN_LAYER]"
 SCAN_TAG_DONE = "[SCAN_DONE]"
 SCAN_TAG_ABORT = "[SCAN_ABORT]"
 SCAN_TAG_SEEK = "[SCAN_SEEK]"
-SCAN_TAG_REF = "[SCAN_REF]"
-SCAN_TAG_READ = "[SCAN_READ]"
-SCAN_TAG_STATUS = "[SCAN_STATUS]"

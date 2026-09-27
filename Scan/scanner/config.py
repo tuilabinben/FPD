@@ -53,7 +53,6 @@ CMD_PING = "PING"
 CMD_BYE = "BYE"
 CMD_ESTOP = "ESTOP"
 CMD_SCAN_STOP = "SCAN_STOP"
-CMD_SCAN_STATUS = "SCAN_STATUS"
 CMD_SCAN_READ = "SCAN_READ"
 CMD_PLC_STATUS = "PLC_STATUS"
 CMD_HOME = "HOME"
@@ -61,9 +60,8 @@ CMD_HOME = "HOME"
 # The board PUSHES [PLC_STATE] whenever the status word changes, so this is
 # a backstop, not the mechanism: it covers the first reply after connecting
 # and the case where nothing has changed for a long time and the operator
-# wants to know the link is still alive. Slow on purpose -- the board's own
-# idle poll of the PLC is 5 s, so asking faster than that cannot learn
-# anything new.
+# wants to know the link is still alive. Slow on purpose: the board pushes
+# every change, so asking often cannot learn anything new.
 PLC_POLL_MS = 5000
 
 
@@ -76,22 +74,13 @@ def cmd_sensor(kind):
     return f"SET_SCAN_SENSOR:{kind}"
 
 
-def cmd_cal(mm_per_count, offset_mm):
-    return f"SET_SCAN_CAL:{mm_per_count:.6f},{offset_mm:.3f}"
-
-
 # ---------------------------------------------------------------------
 # Replies in
 # ---------------------------------------------------------------------
-TAG_POINT = "[SCAN_PT]"
-TAG_BEGIN = "[SCAN_BEGIN]"
-TAG_LAYER = "[SCAN_LAYER]"
 TAG_DONE = "[SCAN_DONE]"
 TAG_ABORT = "[SCAN_ABORT]"
 TAG_SEEK = "[SCAN_SEEK]"
 TAG_REF = "[SCAN_REF]"
-TAG_READ = "[SCAN_READ]"
-TAG_SENSOR = "[SCAN_SENSOR]"
 TAG_PLC_STATE = "[PLC_STATE]"
 TAG_HOME = "[HOME]"
 TAG_PLC_HOME = "[PLC_HOME]"
@@ -102,7 +91,6 @@ TAG_COORD_RESET = "[COORD_RESET]"
 # tag and only these two mean it is over.
 HOME_DONE_TEXT = "HOMING COMPLETE"
 HOME_FAILED_TEXT = "FAILED"
-TAG_STATUS = "[SCAN_STATUS]"
 TAG_ERROR = "[ERROR]"
 TAG_WARN = "[WARN]"
 
@@ -166,7 +154,6 @@ RM_STATE_LABELS = {
     "disabled": ("RM SWITCH: OFF", BAD),
 }
 
-FONT = ("Segoe UI", 10)
 FONT_BOLD = ("Segoe UI", 10, "bold")
 FONT_BIG = ("Segoe UI", 22, "bold")
 FONT_MONO = ("Consolas", 10)

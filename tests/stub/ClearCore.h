@@ -117,7 +117,10 @@ struct MotorConn{
   // assertion pass while nothing was ever actually commanded in between.
   int32_t lastVelocityCmd = 0;
   int     velocityCalls = 0;
-  void VelMax(int32_t){} void AccelMax(int32_t){} void EnableRequest(bool){}
+  // VelMax() records too: TEST_MOVE raises it and must put it back.
+  int32_t lastVelMax = 0;
+  int32_t lastAccelMax = 0;
+  void VelMax(int32_t v){ lastVelMax = v; } void AccelMax(int32_t a){ lastAccelMax = a; } void EnableRequest(bool){}
   void Move(int32_t t,int){ lastMoveTarget = t; moveCalls++; }
   bool StepsComplete(){return true;}
   void MoveStopDecel(int32_t){}

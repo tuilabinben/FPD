@@ -55,16 +55,8 @@ void setZ(double mm) {
 }
 
 // Builds the reply a real PLC sends to a 1-word batch read: header, then a
-// data length (end code + one word), end code 0000, then the word. Tracks
-// PLC_MC_ASCII so every OTHER test in this file — HOME sequencing, sensor
-// decode, all of it — can call plcPoll()/plcReply() without caring which
-// wire format the board is compiled for.
+// data length (end code + one word), end code 0000, then the word.
 std::string readReply(uint16_t word) {
-#if PLC_MC_ASCII
-  char buf[64];
-  snprintf(buf, sizeof buf, "D00000FF03FF0000080000%04X", word);
-  return buf;
-#else
   std::string out;
   auto pushB   = [&](uint8_t b)  { out.push_back((char)b); };
   auto pushU16 = [&](uint16_t v) { pushB(v & 0xFF); pushB((v >> 8) & 0xFF); };
@@ -77,16 +69,10 @@ std::string readReply(uint16_t word) {
   pushU16(0);                         // end code 0
   pushU16(word);
   return out;
-#endif
 }
 // Builds the reply a PLC sends when it REFUSES a read: header + end code,
 // no device data — a real error reply carries none.
 std::string errorReply(uint16_t endCode) {
-#if PLC_MC_ASCII
-  char buf[32];
-  snprintf(buf, sizeof buf, "D00000FF03FF0000" "0004" "%04X", (unsigned)endCode);
-  return buf;
-#else
   std::string out;
   auto pushB   = [&](uint8_t b)  { out.push_back((char)b); };
   auto pushU16 = [&](uint16_t v) { pushB(v & 0xFF); pushB((v >> 8) & 0xFF); };
@@ -98,7 +84,6 @@ std::string errorReply(uint16_t endCode) {
   pushU16(2);                         // data length: end code only
   pushU16(endCode);
   return out;
-#endif
 }
 // No writeReply(): the board never writes a PLC device any more. The HOME
 // request is a wire on IO-0, so there is no write to answer.
@@ -117,18 +102,13 @@ void plcReply(const std::string &frame) {
 // be reading a stale status word.
 void plcPoll(uint16_t word) {
   if (plcTxnActive) plcReply(readReply(0));
-  advance(PLC_POLL_MS + 1);
+  advance(plcPollIdleMs + 1);
   servicePlc();              // sends the read request
   plcReply(readReply(word));  // answers it
 }
 // A three-word reply, so the M30..M32 limit bits can be exercised. Same
 // shape as readReply() but carrying M0..M47 instead of just M0..M15.
 std::string readReply3(uint16_t w0, uint16_t w1, uint16_t w2) {
-#if PLC_MC_ASCII
-  char buf[80];
-  snprintf(buf, sizeof buf, "D00000FF03FF0000100000%04X%04X%04X", w0, w1, w2);
-  return buf;
-#else
   std::string out;
   auto pushB   = [&](uint8_t b)  { out.push_back((char)b); };
   auto pushU16 = [&](uint16_t v) { pushB(v & 0xFF); pushB((v >> 8) & 0xFF); };
@@ -141,12 +121,11 @@ std::string readReply3(uint16_t w0, uint16_t w1, uint16_t w2) {
   pushU16(0);
   pushU16(w0); pushU16(w1); pushU16(w2);
   return out;
-#endif
 }
 
 void plcPoll3(uint16_t w0, uint16_t w1, uint16_t w2) {
   if (plcTxnActive) plcReply(readReply3(0, 0, 0));
-  advance(PLC_POLL_MS + 1);
+  advance(plcPollIdleMs + 1);
   servicePlc();
   plcReply(readReply3(w0, w1, w2));
 }
@@ -178,15 +157,15 @@ int main() {
   check(fabs(rotVelDegS - (75.0 * 6.0 / rotGearRatio)) < 0.02,
         "RM deg/s follows the configured i_RM");
   check(fabs(zVelMmS - 75.0) < 0.05, "ZM -> 75 mm/s (20 mm/rev, spec)");
-  run("SET_SPEED:150,375,75,125,50,75,125,50");
+  run("SET_SPEED:150,300,75,125,50,75,125,50");
   check(saw("[MOTION_OK]"), "the GUI's exact wire message is accepted (8 fields)");
-  run("SET_SPEED:150,375,900,900,900,900,900,900");
+  run("SET_SPEED:150,300,900,900,900,900,900,900");
   check(!saw("[ERROR]"), "no percentage cap, including the new accel fields");
 
   printf("\n  -- acceleration %% is independent of speed %% --\n");
-  run("SET_SPEED:150,375,75,125,50,75,125,50");   // accel% == speed%, today's default shape
+  run("SET_SPEED:150,300,75,125,50,75,125,50");   // accel% == speed%, today's default shape
   float velAtAcc75 = rotVelDegS, accAtAcc75 = rotAccDegS2;
-  run("SET_SPEED:150,375,75,125,50,10,10,10");    // same speeds, accel% dropped
+  run("SET_SPEED:150,300,75,125,50,10,10,10");    // same speeds, accel% dropped
   check(fabs(rotVelDegS - velAtAcc75) < 1e-3,
         "RM velocity is unchanged by the new accel field");
   check(rotAccDegS2 < accAtAcc75 - 1e-3,
@@ -195,9 +174,9 @@ int main() {
   check(fabs(rotPct - 75.0) < 0.01, "  ...rotPct itself is untouched");
 
   printf("\n  -- a stale 5-arg SET_SPEED is refused, not misread --\n");
-  run("SET_SPEED:150,375,75,125,50");
+  run("SET_SPEED:150,300,75,125,50");
   check(saw("[ERROR] SET_SPEED needs"), "the old GUI's 5-field form is now refused");
-  run("SET_SPEED:150,375,75,125,50,75,125,50");   // restore for anything after this
+  run("SET_SPEED:150,300,75,125,50,75,125,50");   // restore for anything after this
 
   printf("\n=== B. HOME IS BASE -30, THE WORKING MAX IS BASE +60 ===\n");
   check(fabs(FOLD_ANGLE_HOME_DEG - 0.0) < 1e-9, "home is 0 fold deg (base -30)");
@@ -521,29 +500,10 @@ int main() {
   check(saw("(from HOME)"),
         "FK answers in the same frame IK accepts, with Zabs alongside");
 
-  printf("\n=== G. PLC link: MC protocol 3E %s frames ===\n",
-         PLC_MC_ASCII ? "ASCII" : "BINARY");
-  check(PLC_LINK_MODE == PLC_LINK_ETHERNET, "the Ethernet link is the compiled default");
+  printf("\n=== G. PLC link: MC protocol 3E BINARY frames ===\n");
   check(PLC_PORT == 1025, "port 1025, from the PLC configuration screen");
-  check(PLC_MC_ASCII == 0,
-        "BINARY, not ASCII — read directly off the PLC's own Ethernet "
-        "Configuration screen (Own Node Settings -> Communication Data Code "
-        "= Binary). A mismatch here is not a partial failure: the PLC "
-        "silently drops every frame in the wrong format, which is exactly "
-        "what the machine did before this was corrected.");
 
   printf("\n  -- frame construction --\n");
-#if PLC_MC_ASCII
-  { String f = plcFrameReadWords("M*", 0, false, 1);
-    check(std::string(f.c_str()) == "5000" "00" "FF" "03FF" "00"
-                                   "0018" "0002" "0401" "0000" "M*000000" "0001",
-          "batch read of M0, 1 word, is byte-for-byte the 3E ASCII frame");
-    // The length field is the character count from the monitoring timer
-    // on. Hand-counting it is how these frames get silently rejected.
-    long declared = plcParseHex(f, PLC_MC_RES_HEADER_UNITS, 4);
-    check(declared == f.length() - 18,
-          "  ...and its declared length matches the real payload length"); }
-#else
   { // Verified independently against a byte-level probe script sent from a
     // PC on the same subnet, not just derived from the spec by hand.
     plcBuildPollFrame();
@@ -571,7 +531,6 @@ int main() {
     // truncated on the wire while the stub's std::string-backed String
     // happily carries it — which is why this asserts the byte buffer.
     check(plcTxCount == 21, "  ...and the whole 21-byte frame survives the NULs"); }
-#endif
   // There is deliberately no write-frame test, because there is no write
   // frame — the code would not compile if one were called. HOME does not
   // write anything to the PLC at all any more: it drives the axes itself
@@ -589,7 +548,7 @@ int main() {
 
   printf("\n  -- a PLC error end code is reported, not swallowed --\n");
   OUT.clear(); clearTx(); ETH_RX.clear();
-  advance(PLC_POLL_MS + 1); servicePlc();
+  advance(plcPollIdleMs + 1); servicePlc();
   plcReply(errorReply(0x2401));
   check(saw("end code 2401"), "end code 2401 is logged verbatim");
 
@@ -652,8 +611,8 @@ int main() {
   // said not to revert it again — do not "fix" this back down. If the link
   // genuinely cannot sustain it, that is SET_PLC_POLL on the live machine,
   // not a silent change to the shipped default.
-  check(PLC_POLL_IDLE_MS == 20, "idle polling defaults to the operator's 20 ms");
-  check(PLC_POLL_HOMING_MS < PLC_POLL_IDLE_MS,
+  check(PLC_POLL_IDLE_DEF_MS == 20, "idle polling defaults to the operator's 20 ms");
+  check(PLC_POLL_HOMING_MS < PLC_POLL_IDLE_DEF_MS,
         "  ...but homing polls even faster, and that is a correctness requirement");
   OUT.clear(); clearTx(); ETH_RX.clear();
   isHomed = false;
@@ -669,7 +628,7 @@ int main() {
   finishHoming(false, "test cleanup");
   { // Idle again: the same short interval must now buy nothing.
     if (plcTxnActive) plcReply(readReply(0));
-    advance(PLC_POLL_IDLE_MS + 1); servicePlc(); plcReply(readReply(0));
+    advance(PLC_POLL_IDLE_DEF_MS + 1); servicePlc(); plcReply(readReply(0));
     clearTx();
     advance(PLC_POLL_HOMING_MS + 1);
     servicePlc();
@@ -1065,8 +1024,8 @@ int main() {
   // polling is 5 s now, so advancing only past PLC_RECONNECT_MS left the
   // board with nothing to do and the assertion read a silence it had
   // caused itself.
-  advance((PLC_RECONNECT_MS > PLC_POLL_IDLE_MS ? PLC_RECONNECT_MS
-                                               : PLC_POLL_IDLE_MS) + 1);
+  advance((PLC_RECONNECT_MS > PLC_POLL_IDLE_DEF_MS ? PLC_RECONNECT_MS
+                                               : PLC_POLL_IDLE_DEF_MS) + 1);
   servicePlc();
   check(saw("[ERROR] PLC unreachable"), "an unreachable PLC is reported once");
   OUT.clear();
@@ -1081,8 +1040,8 @@ int main() {
   // rather than leaving it to whatever the next poll's advance() happens
   // to add up to. Both throttles have to clear: the reconnect rate limit
   // AND the poll interval, because the connect only happens inside a poll.
-  advance((PLC_RECONNECT_MS > PLC_POLL_IDLE_MS ? PLC_RECONNECT_MS
-                                               : PLC_POLL_IDLE_MS) + 1);
+  advance((PLC_RECONNECT_MS > PLC_POLL_IDLE_DEF_MS ? PLC_RECONNECT_MS
+                                               : PLC_POLL_IDLE_DEF_MS) + 1);
   servicePlc();
   check(plcClient.connected(), "the link is back before the next section relies on it");
 
@@ -1093,7 +1052,7 @@ int main() {
         "i_RM default tracks I_RM_TOTAL");
   // 20 mm/rev per spec sheet; the earlier 4x-travel bug was the Z driver's
   // microstep DIP switches (4, not 16 like ROT/ARM), not the lead itself.
-  check(fabs(Z_MM_PER_MOTOR_REV - 20.0) < 1e-9, "ZM 20 mm/rev (spec)");
+  check(fabs(Z_MM_PER_REV_DEF - 20.0) < 1e-9, "ZM 20 mm/rev (spec)");
 
   printf("\n=== K. RM gear ratio has a runtime calibration escape hatch ===\n");
   // The stub's MotorConn does not persist PositionRefSet (always reads back
@@ -1196,7 +1155,7 @@ int main() {
     // checks are about the sequencing, the reference and the sensor --
     // the safety is tested above and applies here unchanged.
     //
-    // M31 is RM's travel switch and sits at the +1 (CW) end. It is the
+    // M31 is RM's travel switch and sits at the -1 (CCW) end. It is the
     // scan's reference: every layer starts from it and every other layer
     // ends back on it.
     OUT.clear(); clearTx(); ETH_RX.clear();
@@ -1930,6 +1889,152 @@ int main() {
     rotDir = jzDir = 0;
     setRot(0.0); setZ(0.0);
     plcPoll3(0, 0, 0);
+  }
+
+  printf("\n=== U. audit regressions ===\n");
+  {
+    auto count = [](const char *n) {
+      int c = 0; for (auto &l : OUT) if (l.find(n) != std::string::npos) c++; return c;
+    };
+    run("SET_MOTION_PROFILE:NONE");
+    rotDir = a1Dir = a2Dir = jzDir = 0; isMoving = false; isHoming = false;
+    setRot(0.0); setZ(0.0);
+
+    // LOAD_XYZ_BOTH solved in FOLD degrees and stored them as MOTOR targets.
+    run("LOAD_XYZ_BOTH:400,0,50,400,0,50");
+    double fold = foldAngleFromReach(400.0);
+    check(fabs(loadedDualA1 - armMotorFromFold(fold)) < 0.01
+          && fabs(loadedDualA2 - armMotorFromFold(fold)) < 0.01,
+          "LOAD_XYZ_BOTH stores MOTOR degrees, like every other load");
+
+    // The singularity warning compared MOTOR degrees with a FOLD threshold,
+    // so any elbow past 110 motor deg (fold 14) warned.
+    run("LOAD:0,0,200,0,0,0,200,0");
+    check(!saw("[SINGULARITY]"), "a fold-26 elbow is not called near-singular");
+    run("LOAD:0,0,900,0,0,0,0,0");
+    check(saw("[SINGULARITY]"), "  ...a fold-115 one still is");
+
+    // A jog or a RUN during a scan left the scan zeroing RM mid-move.
+    plcPoll3(0, BIT(15), 0);
+    run("SCAN_START:10,90,2");
+    check(scanPhase != SCAN_OFF, "a scan is running");
+    run("ROT_CW");
+    check(scanPhase == SCAN_OFF && saw("[SCAN_ABORT]"), "a jog takes over and ends the scan");
+    run("ROT_STOP");
+    plcPoll3(0, BIT(15), 0);
+    run("SCAN_START:10,90,2");
+    run("LOAD:0,0,0,0,0,0,0,0"); run("RUN");
+    check(scanPhase == SCAN_OFF, "  ...and so does RUN");
+    cancelRun(); cancelJog();
+
+    // One warning per entry into the home state, not one per 20 ms poll.
+    a1Dir = 1;
+    plcPoll3(0, 0, 0);
+    OUT.clear();
+    for (int i = 0; i < 5; i++) plcPoll3(0, BIT(14) | BIT(15), BIT(0));
+    check(count("HOME state reached") == 1, "the still-moving home-state warning fires once");
+    a1Dir = 0;
+    plcPoll3(0, 0, 0);
+
+    // A 340 deg sweep against the default 335 deg soft limit aborted every
+    // layer 5 deg short. It is shortened to fit instead, and says so.
+    run("SET_LIMITS_ENABLED:1"); run("SET_LIMIT_ENFORCE:ROT,1");
+    run("SET_LIMIT:ROT,MAX,335");
+    setRot(0.0);
+    plcPoll3(0, BIT(15), 0);
+    run("SCAN_START:10,1,2");
+    check(saw("sweep shortened") && scanSweepDeg < 335.0 && scanSweepDeg > 334.0,
+          "a 340 deg sweep is fitted inside a 335 deg soft limit");
+    run("SCAN_STOP");
+    run("SET_LIMIT:ROT,MAX,340");
+    plcPoll3(0, 0, 0);
+  }
+
+  printf("\n=== V. TEST_MOVE: one motor, out and back, at a typed RPM ===\n");
+  {
+    run("SET_MOTION_PROFILE:NONE");
+    run("SET_LIMITS_ENABLED:1"); run("SET_LIMIT_ENFORCE:ROT,1");
+    run("SET_LIMIT:ROT,MAX,335");
+    rotDir = a1Dir = a2Dir = jzDir = 0; isMoving = false; isHoming = false;
+    setRot(0.0); setZ(0.0);
+    plcPoll3(0, 0, 0);
+
+    run("TEST_MOVE:ROT,180,1000,PURE_SCURVE");
+    check(saw("[TEST] ROT to 180.00 deg") && isMoving && runPhase == PHASE_TEST_OUT,
+          "TEST_MOVE starts the out leg");
+    check(ConnectorM1.lastVelMax == (int32_t)lround(1000.0 / 60.0 * PULSES_PER_MOTOR_REV),
+          "  ...lifting RM's VelMax to the typed 1000 RPM -- no ceiling, on request");
+    check(runProfileActive && motionProfile == PROFILE_NONE,
+          "  ...with the TEST's profile, leaving the applied one alone");
+    double outDeg = 180.0;
+    check(fabs(runTargetRot - outDeg) < 0.01,
+          "  ...to 180 TURNTABLE degrees -- an absolute target, not a distance");
+
+    advance((unsigned long)(runPlan.T * 1000) + 10);
+    setRot(outDeg);
+    serviceRun();                              // last setpoint
+    serviceRun();                              // arrives
+    check(runPhase == PHASE_TEST_BACK && fabs(runTargetRot) < 0.01,
+          "at the far point it comes BACK to where it started");
+    advance((unsigned long)(runPlan.T * 1000) + 10);
+    setRot(0.0);
+    OUT.clear(); serviceRun(); serviceRun();
+    check(saw("[TEST] DONE") && !isMoving && !testActive, "  ...and reports DONE");
+    check(ConnectorM1.lastVelMax == rotVelPulses, "  ...with RM's own VelMax put back");
+
+    // Refusals
+    run("TEST_MOVE:ROT,180,0,SCURVE");
+    check(saw("RPM must be above 0"), "a zero RPM is refused");
+    run("TEST_MOVE:ROT,338,100,SCURVE");
+    check(saw("outside ROT's taught band") && !isMoving,
+          "a target past a taught boundary is refused");
+    setRot(100.0);
+    run("TEST_MOVE:ROT,45,100,SCURVE");
+    check(runPhase == PHASE_TEST_OUT && fabs(runTargetRot - 45.0) < 0.01,
+          "  ...and a target BELOW where it stands goes down to it");
+    run("ESTOP");
+    setRot(0.0);
+    run("TEST_MOVE:A1,90,100,QUINTIC");
+    check(saw("profile must be"), "an unknown profile is refused");
+
+    // Cancelled mid-test: ESTOP puts the VelMax back too.
+    run("TEST_MOVE:Z,50,300,NONE");
+    check(testActive && ConnectorM0.lastVelMax != zVelPulses, "a ZM test is running");
+    run("ESTOP");
+    check(!testActive && ConnectorM0.lastVelMax == zVelPulses,
+          "  ...ESTOP ends it and restores ZM's VelMax");
+    run("SET_LIMIT:ROT,MAX,340");
+  }
+
+  printf("\n=== W. TEST_MOVE's typed acceleration ===\n");
+  {
+    rotDir = a1Dir = a2Dir = jzDir = 0; isMoving = false; isHoming = false;
+    setRot(0.0); setZ(0.0);
+    plcPoll3(0, 0, 0);
+    run("TEST_MOVE:ROT,180,60,TRAPEZOIDAL");
+    double v = 60.0 * 6.0 / rotGearRatio;
+    check(runProfileActive && fabs(runPlan.T - (180.0 / v + v / rotAccDegS2)) < 1e-6,
+          "with no accel given, the test ramps at the Speed tab's accel");
+    check(ConnectorM1.lastAccelMax == rotAccelPulses, "  ...and AccelMax stays the applied one");
+    run("ESTOP");
+    check(ConnectorM1.lastAccelMax == rotAccelPulses, "  ...and ESTOP puts it back");
+
+    setRot(0.0);
+    run("TEST_MOVE:ROT,180,60,TRAPEZOIDAL,30");
+    check(saw("30.0 RPM/s") && fabs(runPlan.T - (180.0 / v + 2.0)) < 1e-6,
+          "a TYPED 30 RPM/s is the accel: 60 RPM takes v/a = 2 s to reach");
+    check(ConnectorM1.lastAccelMax == (int32_t)lround(30.0 / 60.0 * PULSES_PER_MOTOR_REV),
+          "  ...and it is the AccelMax, below the Speed tab's too");
+    run("ESTOP");
+    setRot(0.0);
+    run("TEST_MOVE:ROT,180,60,NONE,30");
+    check(ConnectorM1.lastAccelMax == (int32_t)lround(30.0 / 60.0 * PULSES_PER_MOTOR_REV),
+          "NONE uses the typed accel too -- a comparison runs both at the same limits");
+    run("ESTOP");
+    setRot(0.0);
+    run("TEST_MOVE:ROT,180,60,SCURVE,0");
+    check(saw("accel must be above 0") && !isMoving, "a zero accel is refused");
+    run("SET_MOTION_PROFILE:NONE");
   }
 
   printf("\n%s  (%d passed, %d failed)\n",

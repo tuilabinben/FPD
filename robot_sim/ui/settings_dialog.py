@@ -1,8 +1,8 @@
-"""Settings window — Speed, Boundaries, Controls, PID, Appearance.
+"""Settings window — Speed, Motion, Boundaries, Controls, PID, Appearance.
 
 STRUCTURE
 ---------
-Five tabs, not one long scroll. Concerns unrelated: come here to change
+Six tabs, not one long scroll. Concerns unrelated: come here to change
 speed, set up boundaries, rebind a key, or look at gains. Tab not in isn't
 a tab scrolled past.
 
@@ -28,7 +28,9 @@ WHAT IT DELIBERATELY DOESN'T DO
 """
 
 import json
+import math
 import os
+import re
 import tkinter as tk
 from tkinter import font as tkfont, messagebox, ttk
 
@@ -50,7 +52,6 @@ from ..config import (
     ROT_MAX_DEG,
     LIMIT_GROUPS,
     LIMIT_ENFORCE_BY_AXIS,
-    LIMIT_ENFORCE_KEYS,
     LIMIT_KEYS,
     LIMIT_CAPTURE_ONLY,
     LIMIT_LIVE_SOURCE,
@@ -64,7 +65,19 @@ from ..config import (
     MOTION_PROFILE_KEY,
     MOTION_PROFILE_KEYS,
     MOTION_PROFILE_NONE,
+    MOTION_PROFILE_TRAPEZOIDAL,
     DEFAULT_MOTION_PROFILE,
+    MOTION_TEST_MOTORS,
+    MOTION_TEST_TARGETS,
+    DEFAULT_MOTION_TEST_RPM,
+    DEFAULT_MOTION_TEST_ACC_RPM_S,
+    COMPARE_OFF,
+    ARM_GEAR_RATIO,
+    ARM_MOTOR_RPM_MAX,
+    I_RM_TOTAL,
+    ROT_VEL_MAX_DEG_S,
+    Z_MM_PER_MOTOR_REV,
+    Z_VEL_MAX_MM_S,
     DEFAULT_ROT_ACC_PCT,
     DEFAULT_ROT_PCT,
     rot_accel_deg_s2,
@@ -72,7 +85,6 @@ from ..config import (
     N_FILTER_MAX,
     N_FILTER_MIN,
     PID_FIELDS,
-    PID_LOCK_KEYS,
     PID_PRESET,
     PID_PRESET_NAME,
     ARM_FRAME_V2_RESET_KEYS,
@@ -142,42 +154,31 @@ SPEED_HELP = (
 )
 
 LIMIT_HELP = (
-    "Your working envelope, narrower than the machine's mechanical one.\n"
-    "Jog to the position, then press SET HERE — no measuring, no arithmetic.\n"
-    "Boundaries only take effect once the machine has a reference\n"
-    "(HOME or RESET COORDINATES); before that, joint positions mean nothing.\n"
+    "Jog to a position and press SET HERE — no measuring, no typing.\n"
+    "A boundary applies the moment it is taught, reference or not.\n"
     "\n"
-    "The two ELBOW rows are SET HERE only, and they take WHATEVER A1M_POS /\n"
-    "A2M_POS reads — no range is enforced, so any angle is accepted.\n"
-    "They are shown as the BASE angle, the frame the rest of the panel\n"
-    "reads: -30 deg at HOME, +60 deg at the working maximum. What is\n"
-    "STORED and sent to the board is still the raw MOTOR count, so\n"
-    "re-calibrating the arm gear ratio never invalidates a boundary you\n"
-    "have already taught.\n"
-    "No envelope is enforced because the elbow zero is wherever the board\n"
-    "powered up, so any ceiling would be a ceiling on an unknown offset —\n"
-    "and a guess that rejects a pose you are physically standing at is\n"
-    "worse than none.\n"
-    "The two rows are also interchangeable: teach either end first, and\n"
-    "whichever is lower is used as the lower limit.\n"
+    "ELBOWS: SET HERE only, any angle accepted, either end first. Shown as\n"
+    "the base angle (−30° at HOME) but stored as motor degrees, so changing\n"
+    "the arm gear ratio never moves a boundary you taught.\n"
     "\n"
-    "The button beside each heading says whether THAT boundary is switched\n"
-    "on. ENFORCED = the axis stops there. NOT ENFORCED = the numbers are\n"
-    "kept and still shown, but nothing stops the axis — and only that axis\n"
-    "is affected. ENFORCEMENT at the bottom is the same switch for all\n"
-    "four at once; while it is off, an axis that is individually on reads\n"
-    "ON (MASTER OFF), because it is not protecting anything either.\n"
-    "Switching a boundary off never changes or erases its values, and a\n"
-    "switched-off boundary can still be edited and taught."
+    "The button beside each heading switches THAT axis. BOUNDARIES ENFORCED\n"
+    "switches all four; an axis left on while it is off reads ON (MASTER\n"
+    "OFF). Switching off never erases or locks the values."
 )
 
+# Built from keybinds' own tables: a hand-written list said H was HOME long
+# after HOME moved to BackSpace, and left ENTER out altogether.
 CONTROLS_HELP = (
     "Click a key box, then press the key you want. Escape cancels.\n"
     "If the key is already used, the two swap rather than leaving an axis\n"
-    "unbound. SPACE (e-stop), ESC (settings) and H (home) are reserved.\n"
-    "\n"
+    "unbound. Reserved, and cannot be rebound:\n"
+    + "".join(f"    {keybinds.display_key(k)}  —  {v}\n"
+              for k, v in keybinds.RESERVED_KEYS.items())
+    + "\n"
     "APPLY saves the layout to keybinds.json, so it is still here next time\n"
-    "you start the app. DEFAULTS goes back to A/D · I/K · O/L · W/S."
+    "you start the app. DEFAULTS goes back to "
+    + keybinds.to_hint(keybinds.DEFAULT_KEYMAP).split(" · " + keybinds.display_key(
+        keybinds.HOME_KEY))[0] + "."
 )
 
 APPEARANCE_HELP = (
@@ -193,55 +194,38 @@ APPEARANCE_HELP = (
 # Canvas size for the profile preview. Wide and short on purpose: the
 # thing being read is the SHAPE of two curves against one time axis, and
 # height past this only stretches an answer already legible.
-MOTION_PLOT_W = 560
+MOTION_PLOT_W = 430
 MOTION_PLOT_H = 210
-
-MOTION_HELP = (
-    "Ported from Compare_Angular_Motion_Profiles.m — same three profiles,\n"
-    "same maths, so the curve here and the figure in the report agree.\n"
-    "\n"
-    "Speed and accel on the Speed tab say how fast and how hard. This says\n"
-    "what acceleration does BETWEEN them. Trapezoidal steps between three\n"
-    "values, so jerk at each corner is infinite — that is the bang an\n"
-    "open-loop stepper hears, and where steps get lost with no encoder to\n"
-    "notice. The S-curves ease the acceleration in and out instead.\n"
-    "\n"
-    "Smoothness costs time: bounded jerk cannot reach the same average\n"
-    "acceleration, so the same angle takes longer. The line above the graph\n"
-    "gives the total for each, at YOUR current RM settings.\n"
-    "\n"
-    "WHERE IT APPLIES: P2P RUN LEGS, and RESET POSITION. The board cannot be\n"
-    "ASKED for an S-curve — VelMax and AccelMax are its only knobs — so a\n"
-    "profiled leg is INTERPOLATED: one time base for all four axes, each\n"
-    "chasing a setpoint that already moves this shape. That also means the\n"
-    "axes start and finish together, which the unprofiled path did not do.\n"
-    "\n"
-    "JOG STILL RAMPS LINEARLY. A profile has to know how far it is going,\n"
-    "and a held key has not decided yet. Jerk-limiting the jog ramps is a\n"
-    "separate mechanism."
-)
+# The TEST comparison table, beside the inputs.
+CMP_ROWS = ("main", "other", "diff")
+CMP_COLS = ("name", "pred", "out", "back")
+CMP_WRAP = 330
 
 SCAN_HELP = (
-    "The scan panel asks for a sample rate, points per slice, slices and\n"
-    "slice spacing, and derives the angular step and the sweep SPEED from\n"
-    "them: 50 points at 50 Hz is one second a slice, so a 330° sweep runs\n"
-    "at 330°/s. The board clamps a speed past what RM can do, and says so.\n"
-    "\n"
-    "The ceiling below is on the TOTAL lift one scan uses — spacing ×\n"
-    "(slices − 1), because the lift only moves BETWEEN slices. Past it the\n"
-    "panel warns and asks; it does not refuse. The machine's own 285 mm\n"
-    "stroke is the hard limit and lives on the board — this is your own\n"
-    "working ceiling, normally well inside it."
+    "SCAN: the ceiling is on the TOTAL lift one scan uses — spacing ×\n"
+    "(slices − 1). Past it the scan panel warns and asks; it does not\n"
+    "refuse. The 285 mm stroke is the hard limit, on the board."
 )
 
 PID_HELP = (
     "Source: Stepper MATLAB report, Table 2. Plant identified as\n"
     "G(s) = 12.5 / (s(s+12.5)) rad per pulse, pole placement at ζ = 0.7071.\n"
-    "THE BOARD RUNS OPEN LOOP — the encoder only monitors — so these gains are\n"
-    "stored and echoed, not used to close a loop. They exist so the controller\n"
+    "THE BOARD RUNS OPEN LOOP, so these gains are stored and echoed, not\n"
+    "used to close a loop. They exist so the controller\n"
     "configuration matches the documented Simulink model.\n"
     "Locking a term freezes just that one; the others keep being sent."
 )
+
+
+# What one MOTOR degree means at each axis's output, for the test's readout.
+#   wire token -> (output per motor deg, output unit, motor-RPM ceiling)
+_TEST_AXIS_FACTS = {
+    "ROT": (1.0 / I_RM_TOTAL, "°", ROT_VEL_MAX_DEG_S * I_RM_TOTAL / 6.0),
+    "A1":  (1.0 / ARM_GEAR_RATIO, "° base", ARM_MOTOR_RPM_MAX),
+    "A2":  (1.0 / ARM_GEAR_RATIO, "° base", ARM_MOTOR_RPM_MAX),
+    "Z":   (Z_MM_PER_MOTOR_REV / 360.0, " mm",
+            Z_VEL_MAX_MM_S / Z_MM_PER_MOTOR_REV * 60.0),
+}
 
 
 # TWO BOUNDARY FIELDS ARE SHOWN IN A FRAME THEY ARE NOT STORED IN, and this
@@ -345,24 +329,33 @@ class SettingsDialogMixin:
 
         # Only keys app knows about, only if they still parse. Stale file
         # from older version must not inject arbitrary value into settings.
+        # Each value takes the TYPE of its default. A list of boolean keys
+        # went stale -- the PLC switches were missing from it and came back
+        # as 1.0 -- and the motion profile, a string, failed float() and was
+        # dropped on every start, so a chosen S-curve reverted to NONE.
         applied = 0
         for key, value in saved.items():
             if key not in self.settings:
                 continue
-            # Booleans, not numbers: float(True) would store 1.0, then
-            # every later `is True` check quietly false.
-            if key in PID_LOCK_KEYS or key in LIMIT_ENFORCE_KEYS \
-                    or key == LIMITS_ENABLED_KEY:
-                self.settings[key] = bool(value)
-                applied += 1
-                continue
+            default = self.settings[key]
             try:
-                self.settings[key] = float(value)
-                applied += 1
+                if isinstance(default, bool):
+                    value = bool(value)
+                elif isinstance(default, str):
+                    if key == MOTION_PROFILE_KEY and value not in MOTION_PROFILE_KEYS:
+                        raise ValueError(value)
+                    value = str(value)
+                else:
+                    value = float(value)
+                    if not math.isfinite(value):
+                        raise ValueError(value)
             except (TypeError, ValueError):
                 self._pending_settings_notes.append(
                     (f"Ignoring invalid value in settings file: "
                      f"{key}={value!r}", "warn"))
+                continue
+            self.settings[key] = value
+            applied += 1
         if applied:
             self._pending_settings_notes.append(
                 (f"Loaded {applied} settings from "
@@ -585,7 +578,6 @@ class SettingsDialogMixin:
         tabs = (("speed", "Speed", self._build_speed_tab),
                 ("motion", "Motion", self._build_motion_tab),
                 ("limits", "Boundaries", self._build_limits_tab),
-                ("scan", "Scan", self._build_scan_tab),
                 ("controls", "Controls", self._build_controls_tab),
                 ("pid", "PID", self._build_pid_tab),
                 ("appearance", "Appearance", self._build_appearance_tab))
@@ -631,6 +623,7 @@ class SettingsDialogMixin:
 
         self._tab_buttons_bar = {}
         self._tab_pages = {}
+        self._tab_bodies = []
         for key, label, builder in tabs:
             btn = RoundedButton(strip, text=label, bg_color=SURFACE,
                                 fg_color=TEXT_MUTED, width=tab_w[key], height=34,
@@ -647,6 +640,17 @@ class SettingsDialogMixin:
                 handler = getattr(child, "_wheel_handler", None)
                 if handler:
                     self._bind_wheel_deep(child, handler)
+
+        # ...and never narrower than its widest TAB either. The strip alone
+        # used to decide, so dropping the Scan tab narrowed the window and
+        # cut the Motion tab's comparison table off. Capped at the screen.
+        dlg.update_idletasks()
+        need = max((b.winfo_reqwidth() for b in self._tab_bodies), default=0)
+        need += 2 * px(14) + 2 * px(18) + px(24)   # holder + body pads + scrollbar
+        if need > px(sw):
+            need = min(need, dlg.winfo_screenwidth())
+            dlg.geometry(f"{need}x{px(sh)}")
+            dlg.minsize(need, px(SETTINGS_MIN_SIZE[1]))
 
         self._active_tab = None
         self._show_tab("speed")
@@ -727,6 +731,7 @@ class SettingsDialogMixin:
 
         body = tk.Frame(canvas, bg=PANEL_BG)
         window = canvas.create_window((0, 0), window=body, anchor="nw")
+        self._tab_bodies.append(body)       # the window is sized to the widest
 
         def _sync(_event=None):
             canvas.configure(scrollregion=canvas.bbox("all"))
@@ -848,50 +853,416 @@ class SettingsDialogMixin:
                           "the motion profile")
         body = self._tab_body(page)
 
-        tk.Label(body, text="RAMP SHAPE", bg=PANEL_BG, fg=TEXT_MUTED,
-                 font=FONT_CAPTION).pack(anchor="w")
-        tk.Label(body, text="How acceleration behaves between the speed and "
-                            "accel figures on the Speed tab.",
-                 bg=PANEL_BG, fg=TEXT_DIM, font=FONT_HINT,
-                 justify="left").pack(anchor="w", pady=(0, px(8)))
-
-        # ONE choice, four states. Radiobuttons rather than four toggles:
-        # the states are mutually exclusive and a set of toggles can be put
-        # into "two profiles at once", which has no meaning.
-        self._motion_buttons = {}
-        for key, label, blurb in MOTION_PROFILES:
-            row = tk.Frame(body, bg=PANEL_BG)
-            row.pack(fill="x", pady=(0, px(6)))
-            rb = tk.Radiobutton(
-                row, text=label, value=key, variable=self._motion_var,
-                command=self._refresh_motion_preview,
-                bg=PANEL_BG, fg=TEXT_LIGHT, selectcolor=LED_BG,
-                activebackground=PANEL_BG, activeforeground=ACCENT_MINT,
-                highlightthickness=0, bd=0, anchor="w", font=FONT_LABEL)
-            rb.pack(anchor="w")
-            self._motion_buttons[key] = rb
-            tk.Label(row, text=blurb, bg=PANEL_BG, fg=TEXT_DIM,
-                     font=FONT_HINT, justify="left",
-                     wraplength=px(560), anchor="w").pack(anchor="w",
-                                                          padx=(px(24), 0))
+        # ONE choice, four states, as a dropdown: mutually exclusive by
+        # construction, and a single row instead of four paragraphs.
+        self._motion_label_of = {k: l for k, l, _d in MOTION_PROFILES}
+        self._motion_key_of = {l: k for k, l, _d in MOTION_PROFILES}
+        top = tk.Frame(body, bg=PANEL_BG)
+        top.pack(fill="x")
+        tk.Label(top, text="RAMP SHAPE", bg=PANEL_BG, fg=TEXT_MUTED,
+                 font=FONT_CAPTION).pack(side="left", padx=(0, px(12)))
+        self._motion_label_var = tk.StringVar(
+            value=self._motion_label_of[self._motion_var.get()])
+        self._motion_combo = ttk.Combobox(
+            top, textvariable=self._motion_label_var, state="readonly", width=16,
+            values=[l for _k, l, _d in MOTION_PROFILES], font=FONT_LABEL)
+        self._motion_combo.pack(side="left")
+        self._motion_combo.bind("<<ComboboxSelected>>", self._on_motion_pick)
+        # DEFAULTS and a reopened tab set the KEY; the dropdown follows it.
+        self._motion_var.trace_add("write", lambda *_a: self._sync_motion_combo())
 
         self._motion_summary_v = tk.StringVar(value="")
         tk.Label(body, textvariable=self._motion_summary_v, bg=PANEL_BG,
                  fg=ACCENT_MINT, font=FONT_MONO, justify="left",
                  anchor="w").pack(anchor="w", pady=(px(10), px(4)))
 
+        row = tk.Frame(body, bg=PANEL_BG)
+        row.pack(fill="x")
+        left = tk.Frame(row, bg=PANEL_BG)
+        left.pack(side="left", anchor="n")
         self._motion_canvas = tk.Canvas(
-            body, width=px(MOTION_PLOT_W), height=px(MOTION_PLOT_H),
+            left, width=px(MOTION_PLOT_W), height=px(MOTION_PLOT_H),
             bg=LED_BG, highlightthickness=1,
             highlightbackground=BORDER_SOFT, bd=0)
         self._motion_canvas.pack(anchor="w")
         self._motion_caption_v = tk.StringVar(value="")
-        tk.Label(body, textvariable=self._motion_caption_v, bg=PANEL_BG,
-                 fg=TEXT_DIM, font=FONT_HINT, justify="left",
-                 anchor="w").pack(anchor="w", pady=(px(4), 0))
+        tk.Label(left, textvariable=self._motion_caption_v, bg=PANEL_BG,
+                 fg=TEXT_DIM, font=FONT_HINT, justify="left", anchor="w",
+                 wraplength=px(MOTION_PLOT_W)).pack(anchor="w", pady=(px(4), 0))
 
-        self._help_block(body, MOTION_HELP)
+        self._build_motion_test(row)
         self._refresh_motion_preview()
+
+    def _build_motion_test(self, parent):
+        """TEST: one motor to a target and back, on the board, with the
+        dropdown's profile. Speed is typed with no upper limit; the target is
+        one of four, and WHICH four depends on the motor."""
+        col = tk.Frame(parent, bg=PANEL_BG)
+        col.pack(side="left", anchor="n", padx=(px(16), 0))
+        tk.Label(col, text="TEST", bg=PANEL_BG, fg=TEXT_MUTED,
+                 font=FONT_CAPTION).pack(anchor="w")
+
+        def labelled(text):
+            tk.Label(col, text=text, bg=PANEL_BG, fg=TEXT_LIGHT,
+                     font=FONT_LABEL, anchor="w").pack(anchor="w", pady=(px(8), px(2)))
+
+        self._test_motor_var = tk.StringVar(value=MOTION_TEST_MOTORS[0][0])
+        self._test_rpm_var = tk.StringVar(value=f"{DEFAULT_MOTION_TEST_RPM:g}")
+        self._test_acc_var = tk.StringVar(value=f"{DEFAULT_MOTION_TEST_ACC_RPM_S:g}")
+        self._test_target_var = tk.StringVar(value="")
+        self._test_target_label_v = tk.StringVar(value="")
+
+        labelled("Motor")
+        ttk.Combobox(col, textvariable=self._test_motor_var, state="readonly",
+                     width=10, font=FONT_LABEL,
+                     values=[m for m, _t in MOTION_TEST_MOTORS]).pack(anchor="w")
+        labelled("Speed (motor RPM)")
+        wrap, _entry = make_inset_entry(col, self._test_rpm_var, width=10,
+                                        font=FONT_ENTRY)
+        wrap.pack(anchor="w")
+        # Typed like the speed, no upper limit either. Both runs of a
+        # comparison use it, so only the SHAPE differs between them.
+        labelled("Accel (motor RPM/s)")
+        wrap, _entry = make_inset_entry(col, self._test_acc_var, width=10,
+                                        font=FONT_ENTRY)
+        wrap.pack(anchor="w")
+        tk.Label(col, textvariable=self._test_target_label_v, bg=PANEL_BG,
+                 fg=TEXT_LIGHT, font=FONT_LABEL,
+                 anchor="w").pack(anchor="w", pady=(px(8), px(2)))
+        self._test_target_combo = ttk.Combobox(
+            col, textvariable=self._test_target_var, state="readonly",
+            width=10, font=FONT_LABEL)
+        self._test_target_combo.pack(anchor="w")
+        # The target list is the MOTOR's: degrees for RM, base angle for
+        # the arms, millimetres for ZM. Refilled whenever the motor changes.
+        self._test_motor_var.trace_add("write", lambda *_a: self._refill_test_targets())
+        self._refill_test_targets()
+
+        # COMPARE: the second profile TEST runs, right after the main one.
+        # The main one is the ramp shape at the top -- the one APPLY applies.
+        labelled("Compare with")
+        self._compare_label_var = tk.StringVar(value=self._motion_label_of[MOTION_PROFILE_NONE])
+        ttk.Combobox(col, textvariable=self._compare_label_var, state="readonly",
+                     width=14, font=FONT_LABEL,
+                     values=[l for _k, l, _d in MOTION_PROFILES] + [COMPARE_OFF]
+                     ).pack(anchor="w")
+        self._compare_label_var.trace_add("write", lambda *_a: self._refresh_test_hint())
+        for var in (self._test_rpm_var, self._test_acc_var, self._test_target_var):
+            var.trace_add("write", lambda *_a: self._refresh_test_hint())
+
+        btns = tk.Frame(col, bg=PANEL_BG)
+        btns.pack(anchor="w", pady=(px(16), 0))
+        RoundedButton(btns, text="TEST", icon="▶", bg_color=ACCENT_MINT,
+                      fg_color=INK_DARK, width=96, height=34,
+                      command=self._run_motion_test).pack(side="left", padx=(0, px(6)))
+        # This window holds the grab, so the main window's E-STOP cannot be
+        # clicked while a test runs. SPACE still works; this is the button.
+        RoundedButton(btns, text="STOP", icon="■", bg_color=ACCENT_RED,
+                      fg_color=INK_DARK, width=96, height=34,
+                      command=self.emergency_stop_all).pack(side="left")
+        self._test_results = []
+        self._build_motion_compare(parent)
+        self._refresh_test_hint()
+
+    def _build_motion_compare(self, parent):
+        """The numbers beside the inputs, as a table: each profile's
+        predicted one-way time, what the board measured, and the difference."""
+        box = tk.Frame(parent, bg=PANEL_BG)
+        box.pack(side="left", anchor="n", fill="x", expand=True, padx=(px(28), 0))
+        tk.Label(box, text="COMPARISON", bg=PANEL_BG, fg=TEXT_MUTED,
+                 font=FONT_CAPTION).pack(anchor="w")
+        self._test_hint_v = tk.StringVar(value="")
+        tk.Label(box, textvariable=self._test_hint_v, bg=PANEL_BG, fg=TEXT_DIM,
+                 font=FONT_LABEL, justify="left", anchor="w",
+                 wraplength=px(CMP_WRAP)).pack(anchor="w", pady=(px(8), 0))
+
+        grid = tk.Frame(box, bg=PANEL_BG)
+        grid.pack(anchor="w", pady=(px(12), 0))
+        for c, text in enumerate(("", "Predicted\none way", "Measured\nout",
+                                  "Measured\nback")):
+            tk.Label(grid, text=text, bg=PANEL_BG, fg=TEXT_MUTED, font=FONT_SMALL,
+                     justify="right").grid(row=0, column=c, sticky="e" if c else "w",
+                                           padx=(0, px(20)))
+        self._cmp_cells = {}
+        for r, row in enumerate(CMP_ROWS, start=1):
+            for c, col in enumerate(CMP_COLS):
+                var = self._cmp_cells[row, col] = tk.StringVar(value="")
+                tk.Label(grid, textvariable=var, bg=PANEL_BG,
+                         fg=ACCENT_MINT if row == "diff" else TEXT_LIGHT,
+                         font=FONT_TITLE if c == 0 else FONT_ENTRY
+                         ).grid(row=r, column=c, sticky="e" if c else "w",
+                                padx=(0, px(20)), pady=(px(4), 0))
+
+        # The verdict in words: predicted, then what the board measured (or
+        # where a running comparison has got to).
+        self._test_time_v = tk.StringVar(value="")
+        self._test_result_v = tk.StringVar(value="")
+        for var, fg in ((self._test_time_v, ACCENT_MINT),
+                        (self._test_result_v, TEXT_LIGHT)):
+            tk.Label(box, textvariable=var, bg=PANEL_BG, fg=fg, font=FONT_LABEL,
+                     justify="left", anchor="w",
+                     wraplength=px(CMP_WRAP)).pack(anchor="w", pady=(px(8), 0))
+
+    def _refill_test_targets(self):
+        token = dict(MOTION_TEST_MOTORS).get(self._test_motor_var.get())
+        if token is None:
+            return
+        choices, label = MOTION_TEST_TARGETS[token]
+        self._test_target_label_v.set(label)
+        self._test_target_combo.configure(values=[str(c) for c in choices])
+        # Always back to the first choice: RM's 45 and an arm's 45 are
+        # different things, so carrying the number across would mislead.
+        self._test_target_var.set(str(choices[0]))
+
+    def _motion_test_request(self):
+        """(wire token, target as the operator reads it, rpm, accel rpm/s,
+        None) or (None, None, None, None, error). Never raises -- the hint
+        calls this on every keystroke."""
+        fail = (None, None, None, None)
+        token = dict(MOTION_TEST_MOTORS).get(self._test_motor_var.get())
+        if token is None:
+            return (*fail, "Pick a motor.")
+        rpm, error = self._read_number(self._test_rpm_var, "Speed (motor RPM)")
+        if error:
+            return (*fail, error)
+        if rpm <= 0:
+            return (*fail, "Speed must be above 0 RPM.")
+        acc, error = self._read_number(self._test_acc_var, "Accel (motor RPM/s)")
+        if error:
+            return (*fail, error)
+        if acc <= 0:
+            return (*fail, "Accel must be above 0 RPM/s.")
+        try:
+            target = int(self._test_target_var.get())
+        except ValueError:
+            target = None
+        if target not in MOTION_TEST_TARGETS[token][0]:
+            return (*fail, "Pick a target.")
+        return token, target, rpm, acc, None
+
+    def _refresh_test_hint(self):
+        if getattr(self, "_cmp_cells", None) is None:
+            return                              # still building the columns
+        token, target, rpm, acc, error = self._motion_test_request()
+        self._test_pred = {}
+        self._test_req_wire = None
+        if error:
+            self._test_hint_v.set(error)
+            self._test_time_v.set("")
+            self._render_compare()
+            return
+        self._test_req_wire = (self._test_wire_of(token, target, rpm), acc)
+        per, unit, ceiling = _TEST_AXIS_FACTS[token]
+        rate = "°/s" if unit.startswith("°") else " mm/s"
+        text = (f"to {target}{unit} and back to where it is now, "
+                f"at {rpm * 6.0 * per:.1f}{rate}, accel {acc * 6.0 * per:.1f}{rate}²")
+        if rpm > ceiling:
+            # Warned, not refused: no speed limit was asked for. But an
+            # open-loop stepper past what it can step stalls and loses its
+            # position with nothing to notice.
+            text += (f"\n⚠ above this axis's {ceiling:.0f} RPM ceiling — "
+                     f"it may stall and lose position")
+        self._test_hint_v.set(text)
+        try:
+            for kind in {self._motion_var.get(), self._compare_kind() or MOTION_PROFILE_NONE}:
+                self._test_pred[kind] = self._test_leg_time(token, target, rpm, acc, kind)
+        except (KeyError, ValueError):
+            self._test_pred = {}
+        self._test_time_v.set(self._test_time_text())
+        self._render_compare()
+
+    @staticmethod
+    def _test_wire_of(token, target, rpm):
+        # The board's frame, not the operator's: the arm's base angle goes
+        # out as MOTOR degrees, like every other arm figure on the wire.
+        wire = (motor_deg_from_base_angle(target) if token in ("A1", "A2")
+                else float(target))
+        return f"{token},{wire:.3f},{rpm:g}"
+
+    def _compare_rows(self):
+        """(main kind, second kind, whether the second one runs)."""
+        other = self._compare_kind()
+        return (self._motion_var.get(),
+                MOTION_PROFILE_NONE if other is None else other, other is not None)
+
+    def _render_compare(self):
+        """Fill the table from the prediction and, when they are for THIS
+        move, the board's measurements."""
+        cells = getattr(self, "_cmp_cells", None)
+        if cells is None:
+            return
+        main, other, runs = self._compare_rows()
+        measured = {}
+        if getattr(self, "_test_results_wire", None) == getattr(self, "_test_req_wire", ""):
+            measured = {k: t for k, t in self._test_results if t}
+        pred = getattr(self, "_test_pred", {})
+
+        def secs(v):
+            return "—" if v is None else f"{v:.2f} s"
+
+        def diff(a, b):
+            return "—" if a is None or b is None else f"{a - b:+.2f} s"
+
+        rows = {}
+        for row, kind in (("main", main), ("other", other)):
+            out, back = measured.get(kind, (None, None))
+            name = self._motion_label_of[kind]
+            if row == "other" and not runs:
+                name += " (not run)"
+            rows[row] = (pred.get(kind), out, back)
+            for col, val in zip(CMP_COLS, (name, secs(pred.get(kind)),
+                                           secs(out), secs(back))):
+                cells[row, col].set(val)
+        cells["diff", "name"].set("Difference")
+        for i, col in enumerate(CMP_COLS[1:]):
+            cells["diff", col].set(diff(rows["main"][i], rows["other"][i]))
+
+    def _compare_kind(self):
+        """The profile TEST runs second, or None when comparison is Off."""
+        var = getattr(self, "_compare_label_var", None)
+        return None if var is None else self._motion_key_of.get(var.get())
+
+    def _test_leg_time(self, token, target, rpm, acc, kind):
+        """Seconds for ONE leg of this test under `kind`, or None when the
+        axis is already at the target.
+
+        Mirrors the board: VelMax = the typed RPM, AccelMax = the typed
+        RPM/s. NO profile is the step generator's own ramp with those two
+        limits -- a trapezoid, so it is timed as one -- and a profile is
+        planned against the same two. Same distance, same limits: any
+        difference is the shape and nothing else.
+        """
+        here = getattr(self, LIMIT_LIVE_SOURCE[token], 0.0)
+        # Everything in the axis's own units, as on the board: turntable
+        # deg, mm, arm MOTOR deg.
+        goal = (motor_deg_from_base_angle(target) if token in ("A1", "A2")
+                else float(target))
+        dist = abs(goal - here)
+        if dist < 1e-6:
+            return None
+        per = {"ROT": 1.0 / I_RM_TOTAL, "Z": Z_MM_PER_MOTOR_REV / 360.0}.get(token, 1.0)
+        if kind == MOTION_PROFILE_NONE:
+            kind = MOTION_PROFILE_TRAPEZOIDAL
+        return generate(kind, dist, rpm * 6.0 * per, acc * 6.0 * per, samples=8).T
+
+    def _test_time_text(self):
+        # Off still says what the main profile costs against NO profile.
+        main, other, _runs = self._compare_rows()
+        if main not in self._test_pred:
+            return ""
+        t_main, t_other = self._test_pred[main], self._test_pred.get(other)
+        if t_main is None:
+            return "Already at that target — nothing to time."
+        if main == MOTION_PROFILE_NONE and other == MOTION_PROFILE_NONE:
+            return (f"No profile: {t_main:.2f} s each way. Pick a ramp shape "
+                    f"to compare.")
+        a, b = self._motion_label_of[main], self._motion_label_of[other]
+        diff = t_main - t_other
+        if abs(diff) < 0.005:
+            return (f"{a} {t_main:.2f} s vs {b} {t_other:.2f} s: the same "
+                    f"time — only the jerk differs.")
+        return (f"{a} {t_main:.2f} s vs {b} {t_other:.2f} s each way → "
+                f"{diff:+.2f} s ({2 * diff:+.2f} s there and back)")
+
+    def _run_motion_test(self):
+        token, target, rpm, acc, error = self._motion_test_request()
+        if error:
+            messagebox.showerror("Test", error)
+            return
+        if self.motion_locked:
+            self.log("TEST ignored — something is already moving.", tag="warn")
+            return
+        if not self._hardware_live():
+            messagebox.showinfo("Test", "No board is connected, so there is "
+                                        "nothing to test on.")
+            return
+        main, other = self._motion_var.get(), self._compare_kind()
+        self._test_wire = self._test_wire_of(token, target, rpm)
+        self._test_acc = acc
+        self._test_results_wire = (self._test_wire, acc)
+        self._test_queue = [] if other is None else [other]
+        self._test_results = []
+        self._render_compare()
+        self.motion_test_running = True
+        self._set_motion_locked(True)
+        unit = _TEST_AXIS_FACTS[token][1]
+        self.log(f"TEST — {self._test_motor_var.get()} to {target}{unit} and back at "
+                 f"{rpm:g} motor RPM, {acc:g} RPM/s: {self._motion_label_of[main]}"
+                 + ("" if other is None else
+                    f", then {self._motion_label_of[other]}")
+                 + ". Profiles are only tried, not applied.")
+        self._send_test(main)
+
+    def _send_test(self, kind):
+        # Checked again here: the comparison run is sent after a pause, and
+        # an E-STOP in that pause must not be followed by another move.
+        if not getattr(self, "motion_test_running", False):
+            return
+        self._test_current = kind
+        self._test_result_v.set(f"Running {self._motion_label_of[kind]}…")
+        self.send(f"TEST_MOVE:{self._test_wire},{kind},{self._test_acc:g}")
+
+    # Pause between the two runs, so they read as two moves on the machine.
+    TEST_COMPARE_PAUSE_MS = 800
+    _TEST_DONE_RE = re.compile(r"out\s+([\d.]+)\s*s,\s*back\s+([\d.]+)\s*s")
+
+    def motion_test_done(self, line):
+        """[TEST] DONE: record what the board measured, then either run the
+        comparison profile or finish."""
+        if not getattr(self, "motion_test_running", False):
+            return
+        m = self._TEST_DONE_RE.search(line)
+        times = (float(m.group(1)), float(m.group(2))) if m else None
+        self._test_results.append((self._test_current, times))
+        self._render_compare()
+        if self._test_queue:
+            nxt = self._test_queue.pop(0)
+            self._test_result_v.set(f"{self._motion_label_of[self._test_current]} "
+                                    f"done — {self._motion_label_of[nxt]} next…")
+            self.root.after(self.TEST_COMPARE_PAUSE_MS, lambda: self._send_test(nxt))
+            return
+        self.motion_test_running = False
+        self._set_motion_locked(False)
+        text = self._test_results_text()
+        # The table has the per-profile numbers; the line under it keeps
+        # the verdict. The log gets everything.
+        self._test_result_v.set(text.split("\n")[-1])
+        self.log("TEST result — " + text.replace("\n", " · "))
+
+    def _test_results_text(self):
+        lines = []
+        for kind, times in self._test_results:
+            label = self._motion_label_of[kind]
+            lines.append(f"{label}: out {times[0]:.2f} s, back {times[1]:.2f} s"
+                         if times else f"{label}: no timing reported")
+        if len(self._test_results) == 2 and all(t for _k, t in self._test_results):
+            (ka, ta), (kb, tb) = self._test_results
+            diff = sum(ta) - sum(tb)
+            lines.append(f"Measured: {self._motion_label_of[ka]} is {diff:+.2f} s "
+                         f"vs {self._motion_label_of[kb]}, there and back")
+        return "\n".join(lines)
+
+    def motion_test_ended(self):
+        """An [ERROR] or an E-STOP: drop any queued comparison, unlock."""
+        if getattr(self, "motion_test_running", False):
+            self.motion_test_running = False
+            self._test_queue = []
+            self._set_motion_locked(False)
+            var = getattr(self, "_test_result_v", None)
+            if var is not None:
+                var.set("Stopped before it finished.")
+
+    def _on_motion_pick(self, _event=None):
+        key = self._motion_key_of.get(self._motion_label_var.get())
+        if key is not None and key != self._motion_var.get():
+            self._motion_var.set(key)
+
+    def _sync_motion_combo(self):
+        label = getattr(self, "_motion_label_of", {}).get(self._motion_var.get())
+        if label is not None and getattr(self, "_motion_label_var", None) is not None:
+            self._motion_label_var.set(label)
+        self._refresh_motion_preview()
+        self._refresh_test_hint()          # the time comparison follows the shape
 
     def _motion_preview_limits(self):
         """RM's OWN velocity and acceleration, from the Speed tab as typed.
@@ -1017,15 +1388,16 @@ class SettingsDialogMixin:
         else:
             # The board REFUSES this while it is moving, so say where it
             # lands rather than implying it took effect on a running leg.
-            self.log(f"Motion profile {label} — sent to the board. Run legs "
-                     f"are interpolated to this shape from the next leg on. "
-                     f"Jog still ramps linearly.")
+            self.log(f"Motion profile {label} — sent to the board. P2P legs and "
+                     f"scan legs use the whole shape from the next leg on; jog "
+                     f"gets the ease-up/down half"
+                     + ("." if kind != "TRAPEZOIDAL" else
+                        " only for the S-curves, so jog is unchanged."))
 
     def _default_motion(self):
-        self._motion_var.set(DEFAULT_MOTION_PROFILE)
-        self._refresh_motion_preview()
+        self._motion_var.set(DEFAULT_MOTION_PROFILE)   # the trace repaints
 
-    # TAB 1 — SPEED
+    # TAB — SPEED
     def _build_speed_tab(self, page, dlg):
         self._tab_buttons(page, self._apply_speed, self._default_speed, "speed")
         body = self._tab_body(page)
@@ -1111,8 +1483,7 @@ class SettingsDialogMixin:
                 speed = fn(ref_rpm, pct)
 
                 if ceiling is None:
-                    # Arm's rate depends on gear ratio nobody has measured —
-                    # quoting it as fact would be lying with a decimal point.
+                    # The arm is bounded in MOTOR RPM, so that is the figure.
                     text = f"= {motor:.1f} RPM"
                     if motor > rpm_ceiling:
                         text += f"  ▸ capped {rpm_ceiling:g}"
@@ -1151,37 +1522,24 @@ class SettingsDialogMixin:
 
     def _collect_speed(self):
         out = {}
-        for key in SPEED_KEYS:
-            label, unit, _default, lo, hi = SPEED_FIELDS[key]
-            value, error = self._read_number(self._speed_vars[key], label)
-            if error:
-                return None, error
-            if value < lo:
-                return None, (f"“{label}” must be at least {lo:g}{unit}.\n\n"
-                              f"You entered {value:g}{unit}. 0% would freeze the "
-                              f"axis and a negative value would reverse it — "
-                              f"neither is a speed setting.")
-            if hi is not None and value > hi:
-                return None, (f"“{label}” must be between {lo:g} and {hi:g}{unit}.\n\n"
-                              f"You entered {value:g}{unit}.")
-            out[key] = value
-        for key in ACCEL_KEYS:
-            label, unit, _default, lo, hi = ACCEL_FIELDS[key]
-            value, error = self._read_number(self._accel_vars[key], label)
-            if error:
-                return None, error
-            if value < lo:
-                return None, (f"“{label}” must be at least {lo:g}{unit}.\n\n"
-                              f"You entered {value:g}{unit}. 0% would freeze the "
-                              f"axis's ramp and a negative value would reverse it — "
-                              f"neither is an acceleration setting.")
-            if hi is not None and value > hi:
-                return None, (f"“{label}” must be between {lo:g} and {hi:g}{unit}.\n\n"
-                              f"You entered {value:g}{unit}.")
-            out[key] = value
+        for fields, vars_ in ((SPEED_FIELDS, self._speed_vars),
+                              (ACCEL_FIELDS, self._accel_vars)):
+            for key, (label, unit, _default, lo, hi) in fields.items():
+                value, error = self._read_number(vars_[key], label)
+                if error:
+                    return None, error
+                if value < lo:
+                    return None, (f"“{label}” must be at least {lo:g}{unit}.\n\n"
+                                  f"You entered {value:g}{unit}. 0% would freeze "
+                                  f"the axis and a negative value would reverse "
+                                  f"it.")
+                if hi is not None and value > hi:
+                    return None, (f"“{label}” must be between {lo:g} and "
+                                  f"{hi:g}{unit}.\n\nYou entered {value:g}{unit}.")
+                out[key] = value
         return out, None
 
-    # TAB 2 — TRAVEL LIMITS
+    # TAB — BOUNDARIES
     def _build_limits_tab(self, page, dlg):
         self._tab_buttons(page, self._apply_limits, self._default_limits,
                           "boundaries")
@@ -1232,9 +1590,18 @@ class SettingsDialogMixin:
                               command=lambda k=key: self._capture_limit_here(k)).grid(
                     row=row, column=3, sticky="w", padx=(12, 0))
                 row += 1
+        # The scan's lift ceiling lives here too: it is a boundary on how far
+        # ZM travels, just one the scan panel warns about instead of the
+        # board enforcing. No SET HERE -- it is a distance, not a position.
+        head = tk.Frame(grid, bg=PANEL_BG)
+        head.grid(row=row, column=0, columnspan=4, sticky="ew", pady=(10, 2))
+        tk.Label(head, text="SCAN", bg=PANEL_BG, fg=ACCENT_MINT,
+                 font=FONT_BUTTON).pack(side="left")
+        row += 1
+        for key, (label, unit, _default, _lo, _hi) in SCAN_SETTING_FIELDS.items():
+            self._field_row(grid, row, "    " + label, self._scan_vars[key], unit)
+            row += 1
         self._refresh_limit_enforce()
-
-        self._build_preset_row(body)
 
         # master enforcement switch — deliberately NOT staged behind APPLY.
         # "Turn limits off" is needed while a move is being set up; a
@@ -1281,11 +1648,12 @@ class SettingsDialogMixin:
             self._plc_sensor_enforce_buttons[enforce_key] = btn
         self._refresh_plc_sensor_enforce()
 
-        # RESET COORDINATES moved to section 3, MOTION CONTROL: machine
-        # action used while jogging to reference pose, reachable only
-        # through this dialog meant leaving controls already in use.
+        # Saved sets AFTER the switches: presets are occasional, the
+        # switches are safety state and must be visible without scrolling.
+        # (RESET COORDINATES moved to section 3, MOTION CONTROL.)
+        self._build_preset_row(body)
 
-        self._help_block(body, LIMIT_HELP)
+        self._help_block(body, LIMIT_HELP + "\n\n" + SCAN_HELP)
 
     def _toggle_limit_enforce(self, enforce_key):
         """Switches ONE axis's boundary on or off.
@@ -1390,6 +1758,14 @@ class SettingsDialogMixin:
 
     def _toggle_plc_link(self):
         want = not self.settings.get(PLC_LINK_ENABLED_KEY, True)
+        # Confirmed like every other protection switch: with the link off
+        # the board sees no travel switch at all, and HOME is refused.
+        if not want and not messagebox.askyesno(
+                "Disable the PLC link",
+                "Turn OFF the PLC link?\n\nClearCore stops reading M30..M32: "
+                "no travel switch will stop an axis, HOME is refused, and a "
+                "scan cannot start.\n\nContinue?"):
+            return
         self.settings[PLC_LINK_ENABLED_KEY] = want
         self.send(f"SET_PLC_LINK:{1 if want else 0}")
         self._save_settings_file()
@@ -1404,7 +1780,9 @@ class SettingsDialogMixin:
         btn = getattr(self, "_plc_link_btn", None)
         if btn is None:
             return
-        btn.set_config("PLC CONNECTED" if on else "PLC DISABLED",
+        # A switch, not a status lamp -- "CONNECTED" here read as the link
+        # being up while the lamp in section 1 said UNREACHABLE.
+        btn.set_config("PLC LINK ON" if on else "PLC LINK OFF",
                        SURFACE if on else ACCENT_RED,
                        icon="🔌" if on else "⚠",
                        fg_color=TEXT_LIGHT if on else INK_DARK)
@@ -1523,10 +1901,14 @@ class SettingsDialogMixin:
         # would mean switched-off axis could never be taught, exactly when
         # you teach it.
         limits, error = self._collect_limits()
-        if error:
-            messagebox.showerror("Error", error)
+        scan, scan_error = self._collect_scan()
+        if error or scan_error:
+            messagebox.showerror("Error", error or scan_error)
             return
         self.settings.update(**limits)
+        # The scan ceiling is never sent: it is enforced at the panel, and the
+        # board keeps its own hard refusal at the end of the stroke.
+        self.settings.update(**scan)
         self._send_limits()
         # P2P panel advertises reachable band from these very numbers, must
         # repaint here. ONLY statement of working envelope now structural
@@ -1547,7 +1929,10 @@ class SettingsDialogMixin:
                  f"({a1[0]:g}..{a1[1]:g} motor°) · "
                  f"A2M {base_angle_from_motor_deg(a2[0]):g}.."
                  f"{base_angle_from_motor_deg(a2[1]):g} base° "
-                 f"({a2[0]:g}..{a2[1]:g} motor°)")
+                 f"({a2[0]:g}..{a2[1]:g} motor°) · "
+                 f"scan ZM ceiling {scan[SCAN_MAX_Z_KEY]:g} mm")
+        if hasattr(self, "_refresh_scan_hint"):
+            self._refresh_scan_hint()
         if not self._hardware_live():
             self.log("No board confirmed yet — limits will be re-sent as soon as "
                      "the handshake succeeds.", tag="warn")
@@ -1555,6 +1940,8 @@ class SettingsDialogMixin:
     def _default_limits(self):
         for key, spec in LIMIT_FIELDS.items():
             self._limit_vars[key].set(f"{_limit_to_display(key, spec[6]):g}")
+        for key, spec in SCAN_SETTING_FIELDS.items():
+            self._scan_vars[key].set(f"{spec[2]:g}")
         self.log("Boundaries reset to the mechanical envelope — press APPLY "
                  "to send them.")
 
@@ -1565,10 +1952,9 @@ class SettingsDialogMixin:
             value, error = self._read_number(self._limit_vars[key], f"{axis} {label}")
             if error:
                 return None, error
-            # floor/ceil None = no envelope. Elbows are the case: reported
-            # angle rides on unmeasured gear ratio, really does reach four
-            # figures — any number machine shows is a number it can be
-            # standing at.
+            # floor/ceil None = no envelope: the elbows. Their zero is
+            # wherever the board powered up, so any number it shows is a
+            # number it can be standing at.
             #
             # RM's two keys are validated and reported in DISPLAY units
             # (0..-340) — the units the operator actually typed — then
@@ -1619,7 +2005,7 @@ class SettingsDialogMixin:
                     f"cannot be jogged back out.")
         return out, None
 
-    # TAB 3 — PID
+    # TAB — PID
     def _build_pid_tab(self, page, dlg):
         self._tab_buttons(page, self._apply_pid, self._default_pid, "PID")
         body = self._tab_body(page)
@@ -1718,53 +2104,21 @@ class SettingsDialogMixin:
             values[lock_key] = self._pid_locks[lock_key]
         return values, None
 
-    # TAB — CONTROLS (jog key bindings)
-    # TAB — SCAN
-    def _build_scan_tab(self, page, dlg):
-        self._tab_buttons(page, self._apply_scan, self._default_scan,
-                          "scan settings")
-        body = self._tab_body(page)
-
-        grid = tk.Frame(body, bg=PANEL_BG)
-        grid.pack(fill="x")
-        grid.grid_columnconfigure(0, weight=1)
-        for row, (key, spec) in enumerate(SCAN_SETTING_FIELDS.items()):
-            label, unit, _default, _lo, _hi = spec
-            self._field_row(grid, row, label, self._scan_vars[key], unit)
-
-        self._help_block(body, SCAN_HELP)
-
-    def _apply_scan(self):
+    def _collect_scan(self):
+        """The scan ceiling from the Boundaries tab: ({key: value}, None) or
+        (None, error)."""
         out = {}
         for key, (label, unit, _default, lo, hi) in SCAN_SETTING_FIELDS.items():
             value, error = self._read_number(self._scan_vars[key], label)
             if error:
-                messagebox.showerror("Error", error)
-                return
+                return None, error
             if not (lo <= value <= hi):
-                messagebox.showerror(
-                    "Error",
-                    f"“{label}” must be between {lo:g} and {hi:g} {unit}.\n\n"
-                    f"You entered {value:g} {unit}. The upper end is the "
-                    f"machine's own ZM stroke — a ceiling past it would never "
-                    f"warn about anything.")
-                return
+                return None, (f"“{label}” must be between {lo:g} and {hi:g} {unit}.\n\n"
+                              f"You entered {value:g} {unit}. The upper end is the "
+                              f"machine's own ZM stroke — a ceiling past it would "
+                              f"never warn about anything.")
             out[key] = value
-        self.settings.update(**out)
-        self._save_settings_file()
-        # Nothing is sent to the board: this ceiling is the operator's own
-        # working limit and is enforced at the panel. The board keeps its
-        # own hard refusal at the end of the stroke, which is a different
-        # number and not this one's business.
-        self.log(f"Scan settings applied — maximum ZM travel per scan "
-                 f"{out[SCAN_MAX_Z_KEY]:g} mm.")
-        if hasattr(self, "_refresh_scan_hint"):
-            self._refresh_scan_hint()
-
-    def _default_scan(self):
-        for key, spec in SCAN_SETTING_FIELDS.items():
-            self._scan_vars[key].set(f"{spec[2]:g}")
-        self.log("Scan settings reset to defaults — press APPLY to keep them.")
+        return out, None
 
     def _build_controls_tab(self, page, dlg):
         self._tab_buttons(page, self._apply_keybinds, self._default_keybinds,
@@ -1896,7 +2250,7 @@ class SettingsDialogMixin:
         self.log("Key bindings applied and saved — " +
                  keybinds.to_hint(keybinds.active_map()))
 
-    # TAB 5 — APPEARANCE
+    # TAB — APPEARANCE
     def _build_appearance_tab(self, page, dlg):
         # Button bar MUST be packed before body. Body packs expand=True,
         # would otherwise claim whole page, leaving bottom bar zero height
@@ -2002,9 +2356,14 @@ class SettingsDialogMixin:
     def _read_number(var, label):
         raw = var.get().strip().replace(",", ".")
         try:
-            return float(raw), None
+            value = float(raw)
         except ValueError:
+            value = None
+        # float() takes "nan" and "inf": NaN passed every "< lo" test and
+        # was saved, then sent to the board as a speed.
+        if value is None or not math.isfinite(value):
             return None, f"“{label}” is not a valid number: {raw!r}"
+        return value, None
 
     def _close_settings(self, dlg):
         self._settings_dlg = None

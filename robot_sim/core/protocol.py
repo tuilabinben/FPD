@@ -2,7 +2,7 @@
 
 import re
 
-import re as _re
+_re = re
 
 from ..config import (
     ARM_HOME_DEG,
@@ -106,6 +106,14 @@ class ProtocolMixin:
             self.status_var.set(f"RUNNING — {text.split(']', 1)[-1].strip()}")
             return
 
+        if upper.startswith("[TEST]"):
+            # Settings -> Motion's TEST. RX pump already logged the line.
+            if "DONE" in upper:
+                done = getattr(self, "motion_test_done", None)
+                if done is not None:
+                    done(text)
+            return
+
         if upper.startswith("[PARAMS_OK]"):
             self.log("ClearCore acknowledged the new PID gains.")
             return
@@ -193,6 +201,7 @@ class ProtocolMixin:
             # If it was the scan, drop the GUI's run too, or START stays
             # greyed out with nothing running. RX pump logged it already.
             self.scan_refused_by_board()
+            self._end_motion_test()
             return
 
         if upper.startswith("[HOME]"):
@@ -207,9 +216,10 @@ class ProtocolMixin:
                 self._set_motion_locked(False)
                 self.jog_dot.itemconfig(self._jog_dot_id, fill=ACCENT_RED)
                 self.jog_status_var.set("HOME failed")
-                self.status_var.set("HOME FAILED — the PLC never returned DONE.")
-                self.log("HOME failed: no DONE from the PLC. Check the Ethernet link to "
-                         "the PLC and the PLC program.", tag="error")
+                self.status_var.set("HOME FAILED — a limit switch never came ON.")
+                self.log("HOME failed: the board never saw every M30..M32 switch come "
+                         "ON. Check the PLC link (PLC_TEST) and the switches.",
+                         tag="error")
                 return
             return
 
@@ -248,10 +258,16 @@ class ProtocolMixin:
             self.is_homing = False
             self._cancel_job("anim_job")
             self._release_all_jog_axes(send_stop=False)
+            self._end_motion_test()
             self._set_motion_locked(False)
             self.jog_dot.itemconfig(self._jog_dot_id, fill=TEXT_MUTED)
             self.status_var.set("STOPPED — Emergency Stop Triggered!")
             return
+
+    def _end_motion_test(self):
+        ended = getattr(self, "motion_test_ended", None)
+        if ended is not None:
+            ended()
 
     _PLC_STATE_RE = _re.compile(r"link=(\w+)\s+socket=(\w+)", _re.IGNORECASE)
     #: data=NONE|STALE|OK — whether DEVICE READS are landing. Lamp reports
@@ -293,7 +309,6 @@ class ProtocolMixin:
                     self._set_plc_sensor(bit, ch == "1")
                 self._read_plc_limit_ends(text)
                 self._mark_plc_sensors_seen()
-                self._latch_home_state_if_new()
 
         m = self._PLC_STATE_RE.search(text)
         if not m:
@@ -332,23 +347,6 @@ class ProtocolMixin:
             state = "connected"
         self._set_plc_led(state, detail=text)
 
-    def _latch_home_state_if_new(self):
-        """Fires the coordinate reset on the RISING edge of the home state.
-
-        Edge-triggered: condition stays true while machine sits at home,
-        re-zeroing every 3 s poll would quietly eat any real motion away
-        from the reference.
-        """
-        now = self.plc_home_state()
-        was = getattr(self, "_plc_home_state_prev", False)
-        self._plc_home_state_prev = now
-        if not now or was:
-            return
-        if self.motion_locked or self.is_running or self.jog_active:
-            self._plc_home_state_prev = False    # try again once stopped
-            return
-        self._adopt_home_state_reset()
-
     def _plc_link_lost(self):
         """Serial or PLC link gone: sensors unknown, not clear."""
         self._set_plc_led("unknown")
@@ -386,21 +384,19 @@ class ProtocolMixin:
     #: when the bit went on. "?" while it has no device data.
     _PLC_LIMIT_END_RE = _re.compile(
         r"end\s+Z/R/A2\s*=\s*([-+?]{3})", _re.IGNORECASE)
-    _PLC_HOME_LINE_RE = _re.compile(
-        r"\[PLC_HOME\]\s+(\w+)\s+home sensor\s+(M\d)\b.*?\b(REACHED|left)\b",
-        _re.IGNORECASE)
-
     def _on_plc_home_line(self, text: str):
-        """One sensor changed state, or the HOME state latched."""
+        """The board latched the HOME state and zeroed its counters.
+
+        The BOARD decides, the GUI follows. It used to latch on its own as
+        well, from the polled bits, which reset the GUI's pose on moments
+        the board had refused (mid-scan, still settling). And the board's
+        own refusal reads "HOME state reached ... coordinates NOT reset",
+        so matching "HOME STATE" alone adopted exactly the reset that did
+        not happen.
+        """
         self.log(text, tag="rx")
-        m = self._PLC_HOME_LINE_RE.search(text)
-        if m:
-            bit, event = m.group(2).upper(), m.group(3).upper()
-            self._set_plc_sensor(bit, event == "REACHED")
-            return
-        if "HOME STATE" in text.upper():
-            # Board latched home state and zeroed its counters — GUI's copy
-            # of pose has to follow or the two disagree from this instant.
+        upper = text.upper()
+        if "HOME STATE" in upper and "NOT RESET" not in upper:
             self._adopt_home_state_reset()
 
     def _read_plc_limit_ends(self, text: str):

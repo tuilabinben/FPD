@@ -24,11 +24,18 @@ class Variable:
         self._v = value if value is not None else self._default
     def get(self):
         return self._v
+    # Traces FIRE. They used to be swallowed, so every live readout that
+    # follows a keystroke passed its tests without ever being called -- the
+    # same trap Serial.println was in on the firmware side.
     def set(self, v):
         self._v = v
-    def trace_add(self, *a, **k):
+        for fn in getattr(self, "_traces", ()):
+            fn("", "", "write")
+    def trace_add(self, mode, fn):
+        self.__dict__.setdefault("_traces", []).append(fn)
+        return str(len(self._traces))
+    def trace(self, *a, **k):
         pass
-    trace = trace_add
 
 
 class StringVar(Variable):
@@ -104,6 +111,7 @@ class Widget:
     def winfo_exists(self): return True
     def winfo_toplevel(self): return self
     def winfo_fpixels(self, s): return 96.0
+    def winfo_screenwidth(self): return 1920
 
 
 class Misc(Widget): pass

@@ -203,9 +203,7 @@ blocks for 30 ms, which is 3° of travel — wider than the features you are loo
 | Ultrasonic echo | **IO-1** | pulse width in, 30 ms timeout ≈ 5 m |
 | Analog distance | **A-9** | 0–10 V or 4–20 mA sensor into an analog input |
 
-IO-3/4/5 are the PLC limit lamps and are not available. IO-1 and IO-2 belong to the
-opt-in rotary limit sensors — check `ENABLE_ROT_Z_LIMIT_SENSORS` in the firmware is
-still `0` before wiring the echo there.
+IO-3/4/5 are the PLC limit lamps and are not available.
 
 **A reading that failed comes back negative, never 0.** Zero millimetres is a legitimate
 distance and "the echo never returned" is not, so a miss is plotted as a gap, counted

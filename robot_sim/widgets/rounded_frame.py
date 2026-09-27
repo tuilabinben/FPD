@@ -86,11 +86,6 @@ class RoundedFrame(tk.Frame):
                       self.fill, self.surface,
                       border=self.border, border_w=self.border_w)
 
-    def set_fill(self, colour):
-        self.fill = colour
-        self.body.config(bg=colour)
-        self._redraw()
-
     def set_border(self, colour, width=None):
         """Recolours outline w/o touching fill — used for amber over-speed
         warning and validation errors."""
@@ -98,6 +93,3 @@ class RoundedFrame(tk.Frame):
         if width is not None:
             self.border_w = width
         self._redraw()
-
-    def configure_body(self, **kw):
-        self.body.config(**kw)

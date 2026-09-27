@@ -8,7 +8,7 @@ from ..config import (
     PING_TIMEOUT_MS,
     SERIAL_POLL_MS,
 )
-from ..theme import ACCENT_GREEN, ACCENT_ORANGE, ACCENT_RED, TEXT_MUTED
+from ..theme import ACCENT_GREEN, ACCENT_ORANGE, ACCENT_RED
 from ..widgets import set_led
 
 NO_PORT_LABEL = "No COM ports"

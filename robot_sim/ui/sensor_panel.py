@@ -31,7 +31,6 @@ from ..theme import (
     ACCENT_PURPLE,
     FONT_CAPTION,
     FONT_HINT,
-    LED_BG,
     PANEL_BG,
     TEXT_DIM,
     TEXT_MUTED,
@@ -53,10 +52,7 @@ class SensorPanelMixin:
                  font=FONT_CAPTION).pack(side="left", padx=(6, 10))
 
         for bit, label, _axis, _cmd, end in PLC_SENSOR_PANEL:
-            # End in caption because the three do NOT sit at the same end —
-            # ZM and A2M stop at their minimum, RM at its maximum because it
-            # is mounted inverted. "Covered" means the opposite thing for
-            # them, so reading the lamp without the end is guesswork.
+            # End in the caption, so the lamp says which way is refused.
             # A2M's is wired at BOTH ends, so its caption cannot name one.
             # Which end it caught shows in the lamp text instead, because it
             # changes while the machine runs.

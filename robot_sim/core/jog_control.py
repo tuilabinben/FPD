@@ -6,13 +6,12 @@ from ..config import (
     ARM_SIM_MAX_DEG,
     ARM_SIM_MIN_DEG,
     BOOST_LEVELS,
-    ARM_GEAR_RATIO,
     JOG_ARM_AXES,
     JOG_HEARTBEAT_MS,
-    JOG_KEYCAPS,
     JOG_LINK_PROMOTION,
     JOG_SIM_TICK_MS,
     JOG_STOP_COMMAND,
+    MASTER_RPM,
     LIMITS_ENABLED_KEY,
     LIMIT_ENFORCE_BY_AXIS,
     LIMIT_FIELDS,
@@ -54,7 +53,7 @@ class JogControlMixin:
         if command in self.jog_active:
             return
         if self._is_limited(command):
-            self.log(f"{command} blocked — the optical limit sensor is triggered. "
+            self.log(f"{command} blocked — that axis is on its soft limit. "
                      f"Jog the opposite way to come off it.", tag="warn")
             return
 
@@ -150,8 +149,8 @@ class JogControlMixin:
 
     def _update_jog_readout(self):
         """sim_a1/sim_a2 are MOTOR degrees — raw rotation board counts.
-        Primary card shows the derived BASE angle (0..90, the operator's
-        working scale) instead — motor deg alone was the old bug (shown as
+        Primary card shows the derived BASE angle (-30 at HOME, the
+        operator's frame) instead — motor deg alone was the old bug (shown as
         if it were the arm angle). Fold + reach stay in the line below,
         alongside, for anyone who wants the raw figure or the reach it
         implies."""
@@ -181,9 +180,9 @@ class JogControlMixin:
         elif direction in self.z_limit:
             self.z_limit[direction] = True
         elif direction in JOG_ARM_AXES:
-            # arm limit. unlike optical sensors on RM/ZM nothing to latch:
-            # elbow limit is soft, opposite direction always immediately
-            # available. releasing axis below is whole response.
+            # arm limit: nothing to latch, the opposite direction is always
+            # immediately available. releasing the axis below is the whole
+            # response.
             pass
         else:
             self.log(f"[LIMIT] {direction} — unrecognised axis.", tag="warn")
@@ -198,7 +197,7 @@ class JogControlMixin:
         if direction in self.jog_pads:
             self.jog_pads[direction].key_deactivate()
         self._refresh_jog_status()
-        self.log(f"[LIMIT] {direction} — optical sensor reached; this direction is "
+        self.log(f"[LIMIT] {direction} — soft limit reached; this direction is "
                  f"now blocked.", tag="warn")
 
     def _clear_limit_if_opposite(self, direction):
@@ -237,7 +236,7 @@ class JogControlMixin:
         is faithful preview of what machine actually does, not optimistic.
         """
         s = self.settings
-        master = s["master_rpm"]
+        master = MASTER_RPM         # a constant now, not a setting
         # arm bounded in MOTOR RPM, cap applied there and result converted
         # — not to °/s figure derived from gear ratio nobody's measured yet
         arm_rpm = min(arm_motor_rpm(master, s["arm_pct"]), ARM_MOTOR_RPM_MAX)
@@ -490,8 +489,10 @@ class JogControlMixin:
             f"LINK: {'ON' if active else 'OFF'}",
             ACCENT_ORANGE if active else SURFACE,
             icon="🔗", fg_color=INK_DARK if active else TEXT_LIGHT)
-        a1_keys = f"{JOG_KEYCAPS['A1_FWD']}/{JOG_KEYCAPS['A1_BACK']}"
-        a2_keys = f"{JOG_KEYCAPS['A2_FWD']}/{JOG_KEYCAPS['A2_BACK']}"
+        # the LIVE layout: the import-time copy named the old keys after a rebind
+        caps = self._caps()
+        a1_keys = f"{caps['A1_FWD']}/{caps['A1_BACK']}"
+        a2_keys = f"{caps['A2_FWD']}/{caps['A2_BACK']}"
         self.log(f"LINK on — {a1_keys} and {a2_keys} both drive BOTH arms together."
                  if active else
                  f"LINK off — A1M ({a1_keys}) and A2M ({a2_keys}) move independently.")

@@ -24,6 +24,8 @@ from .config import (
     PLC_SENSOR_PANEL,
     PID_LOCK_KEYS,
     SCAN_SETTING_FIELDS,
+    MOTION_PROFILE_KEY,
+    DEFAULT_MOTION_PROFILE,
     SPEED_FIELDS,
     ACCEL_FIELDS,
     WINDOW_GEOMETRY,
@@ -222,7 +224,7 @@ class RobotControlApp(
         Link itself never interrupted — only the widgets showing it were —
         so this is presentation catching up with state that never changed.
         """
-        from .theme import ACCENT_GREEN, ACCENT_MINT, ACCENT_RED, TEXT_MUTED
+        from .theme import ACCENT_GREEN, ACCENT_RED
         from .widgets import set_led
 
         if self.is_connected:
@@ -295,6 +297,9 @@ class RobotControlApp(
         # it persists.
         for key, spec in SCAN_SETTING_FIELDS.items():
             self.settings[key] = spec[2]
+        # Needs a default HERE: the loader only restores keys this dict
+        # already holds, so without it a saved profile never came back.
+        self.settings[MOTION_PROFILE_KEY] = DEFAULT_MOTION_PROFILE
         self._settings_dlg = None
         # Settings saved from previous run win over defaults above.
         self._load_settings_file()
@@ -343,7 +348,6 @@ class RobotControlApp(
         self.plc_sensor_end = {bit: end for bit, _l, _a, _c, end in PLC_SENSOR_PANEL}
         self.plc_sensor_data_seen = False
         self._plc_sensor_seen_at = None
-        self._plc_home_state_prev = False
         self.plc_sensor_lamps = {}
         self.plc_home_state_lamps = []
 
@@ -352,19 +356,6 @@ class RobotControlApp(
         # Scan store, flags, sensor history. Here, not in the panel, so a
         # theme rebuild cannot lose points already collected.
         self._init_scan_state()
-
-    # ── backwards-compatible aliases for the pre-refactor names ──────
-    @property
-    def elbow_config(self):
-        return self.arm_config
-
-    @elbow_config.setter
-    def elbow_config(self, value):
-        self.arm_config = value
-
-    @property
-    def elbow_buttons(self):
-        return self.arm_buttons
 
     # ── the shared live pose ─────────────────────────────────────────
     # One list, four names. Every readout on both panels reads through

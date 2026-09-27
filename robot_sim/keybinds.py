@@ -38,7 +38,6 @@ JOG_ACTIONS = (
 )
 ACTION_ORDER = tuple(a[0] for a in JOG_ACTIONS)
 ACTION_LABEL = {a[0]: a[1] for a in JOG_ACTIONS}
-ACTION_GROUP = {a[0]: a[2] for a in JOG_ACTIONS}
 
 #: Reserved — do something else, may not be taken by jog axis.
 #: KEYS MUST BE TK KEYSYMS, spelled exactly as Tk reports them — that's what captured keypress

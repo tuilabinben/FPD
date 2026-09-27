@@ -58,6 +58,13 @@ Two stub details are load-bearing, both paid for by real bugs:
 
 `tests/tkstub` is not a renderer. It records the widget tree and holds
 `StringVar` values, which is enough to exercise every dialog path.
+**`trace_add` callbacks FIRE on `set()`** — they used to be swallowed, so
+every live readout that follows a keystroke passed without ever running.
+
+The g++ harness never sees the **prototypes the Arduino IDE generates** and
+puts above the sketch, so a struct declared below the first function breaks
+the real build while every test passes. `python_check.py` checks that rule;
+the real compile is `arduino-builder -fqbn ClearCore:sam:clearcore`.
 
 ---
 
@@ -206,6 +213,12 @@ Two consequences that bite:
 * `atan2` returns (-180, 180], so a bearing just clockwise of home would
   read -5 and be refused as "below the CCW limit". `rot_from_bearing()` in
   the GUI and the `th2 += 360` in `solveIkFrogleg()` wrap it into [0, 360).
+* **`INVERT_ROT` is `false`, set on the machine.** RM's count must RISE
+  moving away from `M31`, because HOME, the scan's switch search and the
+  switch check all find it by driving the count DOWN. At `true` (chosen so
+  the D key turned CW) HOME turned away from the switch. Flipping it swapped
+  the RM jog keys' physical direction too; fix that with a key swap in
+  Settings → Controls, never by flipping this back or reversing HOME alone.
 * The **20 deg wedge between 340 and 360 is unreachable** from either side.
   It is the gap the turntable cannot sweep through, and IK refuses it.
 
@@ -629,10 +642,11 @@ sharing the same acceleration budget. That asymmetry is the thing to
 remember, and it is why `DEFAULT_ARM_ACC_PCT` must not be "tidied up" back
 to `DEFAULT_ARM_PCT`.
 
-At the settings above the coast is ~100 motor° on the arm, ~6.9° on RM and
-**~15 mm on ZM** — the lift is the one to watch by hand, though a scan is
-unaffected because `SCAN_SPEED_SCALE` cuts the velocity and not the
-acceleration, leaving ~0.6 mm.
+At the settings above, with the master accel at **300 RPM/s** (it was
+375; lowered on request, both sides, asserted), the coast is ~125 motor° on
+the arm, ~8.7° on RM and **~19 mm on ZM** — the lift is the one to watch by
+hand, though a scan is unaffected because `SCAN_SPEED_SCALE` cuts the
+velocity and not the acceleration, leaving ~0.75 mm.
 
 Both sides carry the same six numbers — `robot_sim/config.py`'s
 `DEFAULT_*_PCT` / `DEFAULT_*_ACC_PCT` and the firmware's `*_PCT_DEF` /
@@ -658,7 +672,8 @@ APPLY on the Speed tab to actually adopt them.
 ### 6. The PLC link is MC Protocol, it is READ-ONLY, and HOME no longer uses it
 
 The PLC is a Mitsubishi at **192.168.3.101:1025**, and ClearCore is an MC
-Protocol **3E BINARY** client (`#define PLC_MC_ASCII 0`). It batch-reads
+Protocol **3E BINARY** client — BINARY only; the ASCII code path and the
+placeholder / digital-IO link modes were deleted as dead. It batch-reads
 **three words, `M0..M47`**, so the three bits it needs land in one round
 trip. **It writes nothing, ever.**
 
@@ -670,7 +685,7 @@ trip. **It writes nothing, ever.**
 | Device | Meaning | Direction |
 | :--- | :--- | :--- |
 | `M32` | ZM travel limit switch — bottom of the stroke | read |
-| `M31` | RM travel limit switch — the CW end | read |
+| `M31` | RM travel limit switch — the CCW end, RM's zero | read |
 | `M30` | A2M travel limit switch — **wired at both ends** | read |
 
 **Those three are the only devices read.** `M1` (DONE), `M5`–`M8` (the old
@@ -731,12 +746,17 @@ Consequences, all asserted:
   swallowing stub would let a pin test pass while the terminal never moved
   — the same trap `Serial.println` was in.
 
-**Vestige, deliberately left:** `config.py` still carries
-`PLC_HOME_REQUEST_DEVICE = "X0"`, `PLC_HOME_REQUEST_SOURCE` and the `X0`
-row in `PLC_DEVICE_MAP`, and `python_check.py` still asserts them. They
-document the wire that *was* there and are read by nothing else; the
-firmware is the authority and it homes itself. Do not build anything new on
-them.
+The old `X0` home-request vestige (`PLC_HOME_REQUEST_DEVICE`,
+`PLC_DEVICE_MAP`) is **deleted** from `config.py`; `python_check.py` asserts
+it stays gone. The firmware is the authority and it homes itself.
+
+**The HOME-state reset is the BOARD's, and the GUI only follows it.** The
+GUI used to latch its own copy from the polled bits, which reset its pose at
+moments the board had refused (mid-scan, still settling) -- and the board's
+refusal line itself reads "HOME state reached ... NOT reset", which the GUI
+matched as a reset. `_on_plc_home_line()` now adopts only the real latch.
+The board warns ONCE per entry while moving (it used to warn on every 20 ms
+poll), and never zeroes under a running scan.
 
 Do not go back to v9.0's `"M2\n"` → `"DONE"` line protocol. It needed a
 SOCOPEN/RECV ladder written on the PLC to parse it; MC protocol answers
@@ -926,7 +946,7 @@ Consequences that will bite:
 * **A slice holds `points + 1`**, because the first sample is taken at the
   reference angle before the turntable moves. `deg_step = sweep / points`,
   NOT `/ (points - 1)`: that makes the count exact and the speed wrong.
-* **`scan_max_z_mm` (Settings → Scan, default 180 mm) WARNS and asks.** It
+* **`scan_max_z_mm` (Settings → **Boundaries**, a SCAN row under the axes — it had its own tab once; default 180 mm) WARNS and asks.** It
   is the operator's own working ceiling; `D1_MAX_MM` on the board is the
   hard refusal. Total lift is `spacing * (slices - 1)` — using `slices`
   would refuse scans that fit.
@@ -954,9 +974,9 @@ acceleration does **between** them:
 
 | | Ramp | Jerk | 180° at RM's defaults |
 | :--- | :--- | :--- | ---: |
-| Trapezoidal | steps between three values | **infinite** at each corner | 2.80 s |
-| S-curve, `rS = 0.5` | half the ramp eases in/out, 7 phases | bounded | 2.90 s |
-| Pure S-curve, `rS = 1` | no constant-accel phase at all | bounded, half the above | 3.00 s |
+| Trapezoidal | steps between three values | **infinite** at each corner | 2.85 s |
+| S-curve, `rS = 0.5` | half the ramp eases in/out, 7 phases | bounded | 2.98 s |
+| Pure S-curve, `rS = 1` | no constant-accel phase at all | bounded, half the above | 3.10 s |
 
 **Smoothness costs time** — bounded jerk cannot reach the same average
 acceleration — and the panel prints the total so it cannot look free.
@@ -985,6 +1005,50 @@ as a moving setpoint: `commandRunLeg()` plans the profile, and every
 where `u` comes from `profileAt()`. The generator only ever chases a
 setpoint that is already the right shape, which it can do because the
 setpoint never asks for more than the axis's own limits.
+
+**The tab is a dropdown plus a TEST, as the senior asked** — no radio list,
+no explanation block. TEST sends `TEST_MOVE:<Z|ROT|A1|A2>,<target>,<rpm>,
+<profile>`: one motor to an **ABSOLUTE target and back** to where it was
+(repeated presses cannot walk an axis anywhere), through the ordinary
+run-leg path, with the DROPDOWN's profile — trying a shape does not apply
+it. The four targets are the **motor's own**, in the frame the operator
+reads: RM **45/90/180/270** turntable °, A1M/A2M **0/30/45/60** base °
+(the wire carries MOTOR degrees, converted in the GUI), ZM **20/50/100/150**
+mm above HOME. Absolute, not a distance, because the arm list contains 0.
+Speed is the **motor's RPM**, with **no upper limit, on request**: the board lifts that motor's `VelMax` for the
+test and `cancelRun()` / `[TEST] DONE` put it back; past the axis's
+engineering ceiling the panel WARNS (an open-loop stepper stalls silently)
+and still sends. Refused outside the taught band or physical travel.
+**Accel is typed too** (motor RPM/s, default 120, no upper limit), the
+optional LAST `TEST_MOVE` field (absent → the axis's applied Speed-tab accel).
+It becomes the motor's `AccelMax` for the test **whatever the profile,
+NONE included**, so a comparison runs both shapes at the same limits and
+TRAPEZOIDAL vs NO profile really does cost 0 s. Accel was once derived
+from speed (2 × v) for every profiled move; that was REVERTED on request --
+profiles use the Speed tab's accel, and only the TEST takes a typed one.
+**COMPARE runs two profiles back to back.** The ramp shape at the top is the
+MAIN one — the one APPLY applies — and "Compare with" (four profiles, or
+Off) is the second. TEST runs the main one there and back, pauses
+`TEST_COMPARE_PAUSE_MS`, then the same move with the comparison. The GUI
+sequences it — the second `TEST_MOVE` goes out on the first `[TEST] DONE`,
+no firmware change — and `_send_test()` re-checks `motion_test_running`, so
+an E-STOP in the pause cancels the second run. The board's measured
+out/back times from each `[TEST] DONE` are shown together with the
+difference, in a TABLE beside the inputs (`_render_compare()`; no chart, by
+request). Measurements only show while the inputs still describe the move
+that produced them.
+
+Under the TEST inputs the panel also PREDICTS **one leg of that move with
+the main profile vs the comparison** (vs NO profile when it is Off) and
+prints the difference in seconds.
+`_test_leg_time()` mirrors the board: NO profile is the step generator's
+own trapezoid with VelMax = the typed RPM and AccelMax = the TYPED accel,
+so it is timed as `trapezoidal()` with those limits, and the profile is
+planned against the same two. TRAPEZOIDAL therefore costs exactly 0 s — the
+same shape — and the panel says so rather than showing a fake difference.
+
+The tab has its own STOP, because the dialog holds the grab and the main
+window's E-STOP cannot be clicked while a test runs.
 
 `SET_MOTION_PROFILE:<NONE|TRAPEZOIDAL|SCURVE|PURE_SCURVE>`. Held in RAM
 like the limits, so `_push_settings_to_board()` re-sends it on every
@@ -1067,9 +1131,20 @@ zeroed under it.
 clock does not land exactly — a blocking sensor read stretches a service
 pass, the generator lags the commanded velocity — so the plan hands over
 to a slow creep at its tail and the leg ends on the condition that
-actually matters: the sweep angle, or the RM switch. Bounded by
-`SCAN_CREEP_MAX_DEG` / `_MM`; past that the plan and the machine disagree
-by more than slop explains, and it says so.
+actually matters: the sweep angle, or the RM switch. There is no creep
+"overrun" check, deliberately: `currentRot()` is the COMMANDED step count,
+so the plan and the counter can never disagree -- a bound on that
+difference measures nothing.
+
+**The sweep is fitted to RM's soft limit once, at the first reference.**
+The default band stops 5 deg short of the 340 deg travel, so a 340 deg
+sweep was stopped at 335 and every layer aborted. `scanFitSweepToSoftLimit()`
+shortens it and says so with a `[WARN]`.
+
+**Any other motion command ends a scan.** RUN, HOME, MOVE_*, RESET_POSITION
+and BYE all go through `cancelJog()`, which now calls `cancelScan()`; a jog
+key does too. Left running, the scan's next pass zeroed RM with
+`MoveVelocity(0)` in the middle of the new move.
 
 The profiled approach is *better* at the switch, not worse: the return leg
 now decelerates into it and arrives at creep speed, where the old flat
@@ -1097,8 +1172,8 @@ The scan's SPEED still comes from `scanRotScale()`, for a different reason
 again (the sensor, not smoothness); the profile decides only how it gets
 there.
 
-The measured coast on an UNPROFILED release is still ~100 motor° on the arm
-and ~15 mm on ZM; the profiled ease is a bit longer again (bounded jerk
+The coast on an UNPROFILED release is ~125 motor° on the arm and ~19 mm
+on ZM at the 300 RPM/s master accel (it was ~100 / ~15 at 375); the profiled ease is a bit longer again (bounded jerk
 costs distance same as it costs time — see the run-leg table above), which
 is one more reason `LIMIT_SAFETY_MARGIN` insets the far end rather than the
 boundary being flush with the stop.
@@ -1326,8 +1401,10 @@ ladder.
   which report state rather than stage a change.
 * **Per-section APPLY / DEFAULTS.** A global reset that wiped taught
   boundaries because someone undid a speed change costs an afternoon of
-  re-teaching. The seven tabs — **Speed · Motion · Boundaries · Scan · Controls ·
+  re-teaching. The six tabs — **Speed · Motion · Boundaries · Controls ·
   PID · Appearance** — each own their buttons, acting only on that tab.
+  The window is as wide as its tab strip AND its widest tab body
+  (capped at the screen) — the strip alone once cut the Motion tab off.
 * **Round corners everywhere**, anti-aliased via Pillow supersampling
   (`widgets/draw.py`). Tk's `create_polygon(smooth=True)` is a spline with
   no AA and looked jagged — do not go back to it.
@@ -1361,7 +1438,10 @@ far, and `_load_settings_file()` still applies both:
   the new frame refuses every bearing past 150°, including any negative X.
 
 A key the app does not already hold is ignored, so a NEW setting needs no
-bump — it simply defaults. If you change what a stored value *means*, bump
+bump — it simply defaults. **The flip side: a new setting MUST be seeded in
+`app.py`'s settings dict, or it is saved and never loaded back.** The motion
+profile was, for a while: an S-curve reverted to NONE on every restart. Each
+loaded value takes the TYPE of its seeded default (bool / str / finite float). If you change what a stored value *means*, bump
 and drop the affected keys with a warning. Do not convert values that were
 produced by a *superseded* gear ratio; they were never real angles to
 convert. Reading a stale value silently is how someone ends up hunting a

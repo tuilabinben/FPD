@@ -323,6 +323,7 @@ class App(SD.SettingsDialogMixin):
             self.settings[k] = spec[2]
         for k, spec in C.LIMIT_FIELDS.items():
             self.settings[k] = spec[6]
+        self.settings[C.MOTION_PROFILE_KEY] = C.DEFAULT_MOTION_PROFILE
         self._load_settings_file()
         self.is_homed = False
         self.sim_z = self.sim_rot = 0.0
@@ -333,6 +334,9 @@ class App(SD.SettingsDialogMixin):
     def _hardware_live(self): return False
     def home(self): pass
     def reset_coordinates(self): pass
+    def emergency_stop_all(self): self.estops = getattr(self, "estops", 0) + 1
+    motion_locked = False
+    def _set_motion_locked(self, locked): self.motion_locked = locked
     # Lives on P2PControlMixin in the real app. Stubbed rather than
     # guarded with getattr in the dialog: APPLY must repaint the panel's
     # reach line, because that line is now the only statement of the
@@ -411,6 +415,29 @@ app._apply_limits()
 check(not [c for c in messagebox.CALLS if c[0] == "error"],
       "  ...and APPLY accepts the pair, in either order")
 
+print("\n  -- the scan's ZM ceiling lives in Boundaries, not its own tab --")
+def _walk(w):
+    yield w
+    for c in w.winfo_children():
+        yield from _walk(c)
+check("scan" not in app._tab_pages and not hasattr(app, "_build_scan_tab"),
+      "there is no Scan tab")
+check(any(getattr(w, "opts", {}).get("textvariable") is app._scan_vars[C.SCAN_MAX_Z_KEY]
+          for w in _walk(app._tab_pages["limits"])),
+      "  ...its ceiling is a field on the Boundaries tab")
+app._scan_vars[C.SCAN_MAX_Z_KEY].set("150")
+app._apply_limits()
+check(app.settings[C.SCAN_MAX_Z_KEY] == 150.0, "  ...and Boundaries APPLY saves it")
+messagebox.CALLS.clear(); _lim_before = dict(app.settings)
+app._scan_vars[C.SCAN_MAX_Z_KEY].set("999")
+app._apply_limits()
+check([c for c in messagebox.CALLS if c[0] == "error"] and app.settings == _lim_before,
+      "  ...a ceiling past the stroke is refused, and NOTHING on the tab is applied")
+app._default_limits()
+check(app._scan_vars[C.SCAN_MAX_Z_KEY].get() == f"{C.DEFAULT_SCAN_MAX_Z_MM:g}",
+      "  ...and Boundaries DEFAULTS resets it too")
+app._scan_vars[C.SCAN_MAX_Z_KEY].set(f"{C.DEFAULT_SCAN_MAX_Z_MM:g}")
+
 print("\n  -- key capture --")
 class Ev:
     def __init__(self, k): self.keysym = k
@@ -444,7 +471,6 @@ fw = open(os.path.join(os.path.dirname(HERE), "RobotMotionController_v9_ClearCor
                        "RobotMotionController_v9_ClearCore.ino"), encoding="utf-8").read()
 check("ARM_ZERO_CAD_DEG" in fw, "the firmware carries the same offset constant")
 check("const double FOLD_ANGLE_HOME_DEG     = 0.0;" in fw, "  ...and homes at 0°")
-check("ARM_LIMITS_UNBOUNDED" in fw, "  ...and documents the elbows as unbounded")
 check("void armBand(" in fw, "  ...and sorts the taught pair at point of use")
 
 
@@ -538,24 +564,16 @@ check(abs(C.Z_OFFSET_ARM1_MM - C.Z_OFFSET_ARM2_MM - 9.0) < 1e-9,
 
 
 # ══════════════════════════════════════════════════════════════════════
-print("\n=== 8. PLC link: Ethernet reads, HOME goes out on a wire ===")
+print("\n=== 8. PLC link: Ethernet reads M30..M32 and nothing else ===")
 check(C.PLC_IP == "192.168.3.101" and C.PLC_PORT == 1025,
       "the endpoint from the PLC configuration screen")
-check(C.PLC_HOME_REQUEST_DEVICE == "X0", "HOME still arrives at X0, not M21")
-check("IO-0" in C.PLC_HOME_REQUEST_SOURCE,
-      "  ...but it is DRIVEN from ClearCore's IO-0 terminal, not written")
-check(C.PLC_LINK_IS_READ_ONLY, "  ...and the Ethernet link is read-only")
-check(dict((d, dirn) for d, _c, dirn in C.PLC_DEVICE_MAP)["X0"] == "wire",
-      "  ...so X0's direction in the device map is 'wire', never 'write'")
-check(not any(dirn == "write" for _d, _c, dirn in C.PLC_DEVICE_MAP),
-      "  ...and NO device in the map is written at all")
+check(not hasattr(C, "PLC_DEVICE_MAP") and not hasattr(C, "PLC_HOME_REQUEST_DEVICE"),
+      "the old X0 home-request vestige is gone -- the board homes itself")
 # M5..M8 (home sensors), M1 (DONE) and M10..M13 (run) are gone from BOTH
 # sides now, not just muted -- see PLC_SENSOR_PANEL below. They lit a lamp
 # and decided nothing, while M30 was the bit actually refusing a jog.
 check(not hasattr(C, "PLC_HOME_SENSOR_BITS"),
       "the old M5..M8 sensor-bit map is gone from config.py, not just unused")
-check([d for d, _c, _dir in C.PLC_DEVICE_MAP if d in ("M10", "M11", "M12", "M13")] == [],
-      "the run bits M10..M13 are not in the device map either")
 # ZM and A2M are SWAPPED from the tidy numeric order, measured on the
 # machine: M32 follows ZM, M30 follows A2M.
 check(C.PLC_SENSOR_PANEL == (
@@ -572,8 +590,8 @@ check(('#define PLC_IP_3 %s' % C.PLC_IP.split(".")[-1]) in fw,
       "the firmware's PLC address ends in the same octet")
 check("const uint16_t PLC_PORT = %d;" % C.PLC_PORT in fw,
       "  ...and uses the same port")
-check("#define PLC_LINK_MODE PLC_LINK_ETHERNET" in fw,
-      "  ...and the Ethernet link is the compiled default, not the placeholder")
+check("PLC_LINK_PLACEHOLDER" not in fw and "#include <Ethernet.h>" in fw,
+      "  ...and the Ethernet link is the only one compiled")
 
 print("\n  -- the Ethernet link is READ-ONLY; HOME talks to no PLC device --")
 # HOME used to assert a wire (ClearCore IO-0 -> PLC X0) and wait for the
@@ -652,7 +670,7 @@ check("_save_settings_file" not in src_pr_early.split("def _on_home_complete")[0
 print("\n=== 9. motor degrees vs frog-leg degrees ===")
 from robot_sim.kinematics import motor_deg_to_reach as _mdr
 from robot_sim.kinematics import (fold_angle_from_motor_deg, motor_deg_from_fold_angle,
-                                  motor_deg_to_reach, reach_to_motor_deg)
+                                  motor_deg_to_reach)
 
 # BENCH-MEASURED, not the model's derived 2.0: the arm reaches its rated
 # 575 mm where the old ratio put it at 498 mm.
@@ -677,16 +695,12 @@ check(abs(motor_deg_to_reach(_m) - fold_angle_to_reach(60.0)) < 1e-9,
       "%.0f motor° is fold 60°, R = %.1f mm" % (_m, fold_angle_to_reach(60.0)))
 check(abs(motor_deg_to_reach(_m) - fold_angle_to_reach(60.0 * C.ARM_GEAR_RATIO)) > 100.0,
       "  ...and NOT fold %.0f°, far further out — the old bug" % _m)
-check(abs(reach_to_motor_deg(C.ARM_SPEC_REACH_MM)
-          - motor_deg_from_fold_angle(C.FOLD_ANGLE_SPEC_MAX_DEG)) < 0.01,
+check(abs(reach_to_fold_angle(C.ARM_SPEC_REACH_MM) - C.FOLD_ANGLE_SPEC_MAX_DEG) < 0.01,
       "570.3 mm maps back to fold 90° = base +60, the working maximum")
 
 print("\n  -- the speed figures split the same way --")
 check(abs(C.arm_motor_speed_deg_s(150, 125) - 1125.0) < 0.01,
       "AM at 125% of 150 RPM is 1125 MOTOR °/s (exact, no ratio)")
-check(abs(C.arm_speed_deg_s(150, 125) - 1125.0 / C.ARM_GEAR_RATIO) < 0.01,
-      "  ...which is %.1f frog-leg °/s at ratio %.2f"
-      % (1125.0 / C.ARM_GEAR_RATIO, C.ARM_GEAR_RATIO))
 check(abs(C.arm_motor_rpm(150, 125) - 187.5) < 0.01,
       "  ...and 187.5 motor RPM, unchanged and still ratio-free")
 check(C.SPEED_PREVIEW_BY_KEY["arm_pct"][4] == "motor °/s",
@@ -1302,8 +1316,6 @@ check("self.send(\"STOP\")" in src_hb,
       "  ...and a lost link still triggers the all-stop")
 check('self.send("PLC_STATUS", log_tx=False)' in src_hb,
       "the same tick polls the board for its PLC state, so there is one cadence")
-check(C.PLC_STATUS_POLL_MS == C.HEARTBEAT_INTERVAL_MS,
-      "  ...at the heartbeat interval")
 
 print("\n  -- the lamp follows the board, and logs only on a CHANGE --")
 class Lamp:
@@ -1321,7 +1333,6 @@ class Lamp:
         self.jog_active = set()
         self.motion_locked = False
         self.is_running = False
-        self._plc_home_state_prev = False
     def log(self, msg, tag="default"): self.logged.append((msg, tag))
     _parse_hardware_response = PR2.ProtocolMixin._parse_hardware_response
     _on_plc_state = PR2.ProtocolMixin._on_plc_state
@@ -1337,7 +1348,6 @@ class Lamp:
     _set_plc_sensor = PR2.ProtocolMixin._set_plc_sensor
     plc_sensor_covered_for_jog = PR2.ProtocolMixin.plc_sensor_covered_for_jog
     warn_if_jogging_into_sensor = PR2.ProtocolMixin.warn_if_jogging_into_sensor
-    _latch_home_state_if_new = PR2.ProtocolMixin._latch_home_state_if_new
     plc_home_state = SP.SensorPanelMixin.plc_home_state
     _refresh_plc_sensor_lamps = lambda self: None
     _adopt_home_state_reset = lambda self: None
@@ -1493,14 +1503,8 @@ print("\n=== 23. the PLC poll is fast always, and even faster while homing ===")
 # operator asked for it a second time and said explicitly not to revert it
 # again. Do not "fix" this back down — if the link genuinely cannot sustain
 # it, that's SET_PLC_POLL on the live machine, not a silent default change.
-check(C.PLC_POLL_IDLE_MS == 20,
-      "idle polling defaults to the operator's 20 ms")
-check(C.PLC_POLL_HOMING_MS < C.PLC_POLL_IDLE_MS,
-      "  ...and homing polls even faster")
-check(C.PLC_POLL_MS == C.PLC_POLL_IDLE_MS,
-      "  ...with PLC_POLL_MS still naming the idle rate")
 check("PLC_POLL_IDLE_DEF_MS = 20;" in fw,
-      "the firmware agrees on the idle rate as its DEFAULT")
+      "the firmware idles at the operator's 20 ms, as its DEFAULT")
 # Still runtime-adjustable — SLOWER, if a given PLC ever needs it — and not
 # persisted: a power cycle returns to the deliberate default.
 check("SET_PLC_POLL:" in fw, "  ...and it can still be changed without a re-flash")
@@ -1511,8 +1515,6 @@ check("const unsigned long PLC_POLL_HOMING_MS = 10;" in fw,
 # true, and the sooner that lands the sooner the axes stop.
 check("isHoming ? PLC_POLL_HOMING_MS : plcPollIdleMs" in fw,
       "  ...and picks between them on isHoming, covering the whole cycle")
-check(C.PLC_POLL_IDLE_MS < 30000,
-      "the idle poll stays well inside the 30 s HOME timeout")
 check("if (ms < 1 || ms > 60000)" in fw,
       "SET_PLC_POLL accepts 1 ms..60 s, so the rate is tuned on the machine")
 
@@ -1760,7 +1762,7 @@ check("double pulsesPerMmZ()" in fw, "  ...and pulses/mm is derived from it")
 # Nothing may compute with the old constant any more, or a re-calibration
 # would be half-applied: the position would re-scale but the velocity, or
 # the move, would not.
-_body = fw.split("const double Z_MM_PER_MOTOR_REV = Z_MM_PER_REV_DEF;")[1]
+_body = fw.split("double pulsesPerMmZ() {")[1]
 check("PULSES_PER_MM_Z" not in _body,
       "the fixed PULSES_PER_MM_Z is gone from every calculation")
 check(_body.count("pulsesPerMmZ()") >= 4,
@@ -2204,7 +2206,6 @@ class Lamp2:
         self.motion_locked = False
         self.is_running = False
         self.jog_active = set()
-        self._plc_home_state_prev = False
     def log(self, m, tag="default"): self.logged.append((m, tag))
     _parse_hardware_response = PR2.ProtocolMixin._parse_hardware_response
     _on_plc_state = PR2.ProtocolMixin._on_plc_state
@@ -2220,7 +2221,6 @@ class Lamp2:
     _set_plc_sensor = PR2.ProtocolMixin._set_plc_sensor
     _mark_plc_sensors_seen = PR2.ProtocolMixin._mark_plc_sensors_seen
     _mark_plc_sensors_unknown = PR2.ProtocolMixin._mark_plc_sensors_unknown
-    _latch_home_state_if_new = PR2.ProtocolMixin._latch_home_state_if_new
     _adopt_home_state_reset = lambda self: None
     plc_home_state = SP.SensorPanelMixin.plc_home_state
     plc_sensors_known = SP.SensorPanelMixin.plc_sensors_known
@@ -2273,7 +2273,7 @@ for phrase, why in (
         ("TCP connect:", "  ...whether the socket opened"),
         ("[PLC_TEST] TX ", "  ...the exact frame sent"),
         ("RX nothing", "  ...and distinguishes no answer"),
-        ("not with MC protocol 3E ASCII", "  ...from a wrong protocol"),
+        ("not with MC protocol 3E BINARY", "  ...from a wrong protocol"),
         ("End code", "  ...from a refusal")):
     check(phrase in fw, why)
 check("PLC_DEBUG:" in fw and "[PLC_TX]" in fw and "[PLC_RX]" in fw,
@@ -2324,7 +2324,6 @@ class Flap:
         self.motion_locked = False
         self.is_running = False
         self.jog_active = set()
-        self._plc_home_state_prev = False
     def log(self, m, tag="default"): self.logged.append((m, tag))
     _parse_hardware_response = PR2.ProtocolMixin._parse_hardware_response
     _on_plc_state = PR2.ProtocolMixin._on_plc_state
@@ -2339,7 +2338,6 @@ class Flap:
     _set_plc_sensor = PR2.ProtocolMixin._set_plc_sensor
     _mark_plc_sensors_seen = PR2.ProtocolMixin._mark_plc_sensors_seen
     _mark_plc_sensors_unknown = PR2.ProtocolMixin._mark_plc_sensors_unknown
-    _latch_home_state_if_new = PR2.ProtocolMixin._latch_home_state_if_new
     _adopt_home_state_reset = lambda self: None
     plc_home_state = SP.SensorPanelMixin.plc_home_state
     plc_sensors_known = SP.SensorPanelMixin.plc_sensors_known
@@ -2903,8 +2901,11 @@ check(C.MOTION_PROFILE_NONE != C.MOTION_PROFILE_TRAPEZOIDAL,
 
 _ma = App(); _ma.open_settings_dialog()
 check(_ma._motion_var.get() == C.DEFAULT_MOTION_PROFILE, "the tab opens on the stored value")
+check(_ma._motion_label_var.get() == "No profile", "  ...and the dropdown shows it")
+check(_ma._motion_combo.opts.get("state") == "readonly",
+      "the ramp shape is a DROPDOWN of the four choices, not free text")
 for _k, _label, _blurb in C.MOTION_PROFILES:
-    _ma._motion_buttons[_k].invoke()
+    _ma._motion_label_var.set(_label); _ma._on_motion_pick()
     check(_ma._motion_var.get() == _k, "  ...choosing %s selects it" % _label)
     if _k == C.MOTION_PROFILE_NONE:
         check("No profile" in _ma._motion_summary_v.get(),
@@ -2912,10 +2913,110 @@ for _k, _label, _blurb in C.MOTION_PROFILES:
     else:
         check("peak" in _ma._motion_summary_v.get(),
               "  ...and %s reports its peaks" % _label)
+check("MOTION_HELP" not in open(SD.__file__, encoding="utf-8").read(),
+      "the explanation block at the bottom is gone, on request")
 
-# ONE choice, not four toggles: two profiles at once has no meaning.
-check(len({id(b.opts.get("variable")) for b in _ma._motion_buttons.values()}) == 1,
-      "all four share one variable, so the choice is exclusive by construction")
+print("\n  -- TEST: one motor, out and back, with the dropdown's profile --")
+check([m for m, _t in C.MOTION_TEST_MOTORS] == ["RM", "A1M", "A2M", "ZM"],
+      "a motor picker")
+for _m, _want, _lab in (("RM", ["45", "90", "180", "270"], "turntable"),
+                        ("A1M", ["0", "30", "45", "60"], "base"),
+                        ("A2M", ["0", "30", "45", "60"], "base"),
+                        ("ZM", ["20", "50", "100", "150"], "mm")):
+    _ma._test_motor_var.set(_m)
+    check(_ma._test_target_combo.opts.get("values") == _want
+          and _lab in _ma._test_target_label_v.get()
+          and _ma._test_target_var.get() == _want[0],
+          "  ...%s offers %s (%s), and the pick follows the motor"
+          % (_m, "/".join(_want), _lab))
+_ma._test_motor_var.set("RM"); _ma._test_target_var.set("180")
+_ma._test_rpm_var.set("5000")
+check("°" in _ma._test_hint_v.get() and "ceiling" in _ma._test_hint_v.get(),
+      "a speed past the axis's ceiling WARNS in the hint -- no limit was asked for")
+_ma._test_rpm_var.set("nan")
+check("not a valid number" in _ma._test_hint_v.get(), "  ...and 'nan' is not a speed")
+_ma._test_rpm_var.set("120")
+_ma_sent = []
+_ma.send = lambda c, log_tx=True: _ma_sent.append(c)
+_ma._motion_var.set(C.MOTION_PROFILE_PURE_SCURVE)
+_ma._run_motion_test()
+check(not _ma_sent, "with no board connected, TEST sends nothing")
+_ma._hardware_live = lambda: True
+_ma._compare_label_var.set(C.COMPARE_OFF)
+_ma._run_motion_test()
+check(_ma_sent == ["TEST_MOVE:ROT,180.000,120,PURE_SCURVE,120"],
+      "TEST sends motor, TURNTABLE target, RPM, the DROPDOWN's profile and the typed accel")
+check(_ma.motion_locked and _ma.settings[C.MOTION_PROFILE_KEY] == C.DEFAULT_MOTION_PROFILE,
+      "  ...locks the motion controls, and leaves the applied profile alone")
+_ma.motion_test_done("[TEST] DONE - out 3.57 s, back 3.58 s.")
+check(not _ma.motion_locked and "out 3.57 s" in _ma._test_result_v.get(),
+      "  ...and [TEST] DONE unlocks them, showing what the board measured")
+
+print("\n  -- COMPARE: the main profile, then a second one, back to back --")
+_ma_sent.clear()
+_ma._compare_label_var.set("No profile")
+_ma._run_motion_test()
+check(_ma_sent == ["TEST_MOVE:ROT,180.000,120,PURE_SCURVE,120"],
+      "the MAIN profile runs first -- the one APPLY applies")
+_ma.motion_test_done("[TEST] DONE - out 3.57 s, back 3.58 s.")
+check(_ma.motion_locked and "next" in _ma._test_result_v.get(),
+      "  ...then it stays locked and queues the comparison")
+_ma._send_test(C.MOTION_PROFILE_NONE)       # what the pause's after() fires
+check(_ma_sent[-1] == "TEST_MOVE:ROT,180.000,120,NONE,120",
+      "  ...and runs the SAME move with the comparison profile")
+_ma.motion_test_done("[TEST] DONE - out 3.41 s, back 3.42 s.")
+check(not _ma.motion_locked and "+0.32 s" in _ma._test_result_v.get(),
+      "  ...then shows both measurements and the difference: +0.32 s")
+_cc = {k: v.get() for k, v in _ma._cmp_cells.items()}
+check(_cc["main", "name"] == "Pure S-curve" and _cc["other", "name"] == "No profile"
+      and _cc["main", "out"] == "3.57 s" and _cc["other", "back"] == "3.42 s"
+      and _cc["diff", "out"] == "+0.16 s" and _cc["main", "pred"].endswith(" s"),
+      "  ...as a TABLE beside the inputs: predicted, measured out/back, difference")
+_ma._test_target_var.set("90")
+check(_ma._cmp_cells["main", "out"].get() == "—",
+      "  ...and a different move does not show the last move's measurements")
+_ma._test_target_var.set("180")
+check(_ma._cmp_cells["main", "out"].get() == "3.57 s", "  ...which come back for the same move")
+_ma._run_motion_test(); _ma.motion_test_ended(); _n_sent = len(_ma_sent)
+_ma._send_test(C.MOTION_PROFILE_NONE)
+check(len(_ma_sent) == _n_sent and not _ma.motion_locked,
+      "  ...an E-STOP between the two runs cancels the second")
+
+print("\n  -- the profile's cost in seconds, against no profile --")
+import robot_sim.motion_profile as MP
+_ma.sim_rot = 0.0
+_ma._test_motor_var.set("RM"); _ma._test_target_var.set("180"); _ma._test_rpm_var.set("120")
+_ma._test_acc_var.set("90")
+check("accel" in _ma._test_hint_v.get(), "the ACCEL is a typed input, like the speed")
+_v = 120 * 6.0 / C.I_RM_TOTAL
+_a = 90 * 6.0 / C.I_RM_TOTAL                          # the typed RPM/s, as the board takes it
+_t_none = MP.trapezoidal(180.0, _v, _a).T
+_t_pure = MP.s_curve(180.0, _v, _a, 1.0).T
+_tp = _ma._test_leg_time("ROT", 180, 120.0, 90.0, C.MOTION_PROFILE_PURE_SCURVE)
+_tn = _ma._test_leg_time("ROT", 180, 120.0, 90.0, C.MOTION_PROFILE_NONE)
+check(abs(_tn - _t_none) < 1e-9 and abs(_tp - _t_pure) < 1e-9,
+      "NO profile and the profile are both timed at the TYPED speed and accel: "
+      "%.2f s vs %.2f s" % (_t_pure, _t_none))
+check(("%+.2f s" % (_t_pure - _t_none)) in _ma._test_time_v.get(),
+      "  ...and the panel shows the difference in seconds")
+_ma._test_acc_var.set("0")
+check("above 0 RPM/s" in _ma._test_hint_v.get(), "  ...a zero accel is refused in the hint")
+_ma._test_acc_var.set("120")
+_ma._motion_var.set(C.MOTION_PROFILE_TRAPEZOIDAL)
+check("the same time" in _ma._test_time_v.get(),
+      "  ...TRAPEZOIDAL vs NO profile at the same limits costs nothing, and it says so")
+_ma._motion_var.set(C.MOTION_PROFILE_NONE)
+check("Pick a ramp shape" in _ma._test_time_v.get(), "  ...NONE has nothing to compare")
+_ma.sim_rot = 180.0; _ma._refresh_test_hint()
+check("Already at that target" in _ma._test_time_v.get(),
+      "  ...and a target it is already at has nothing to time")
+_ma.sim_rot = 0.0
+_ma._motion_var.set(C.MOTION_PROFILE_PURE_SCURVE)
+_ma_sent.clear(); _ma._test_motor_var.set("A2M"); _ma._test_target_var.set("60")
+_ma._run_motion_test(); _ma.motion_test_ended()
+check(_ma_sent[:1] == ["TEST_MOVE:A2,%.3f,120,PURE_SCURVE,120" % K.motor_deg_from_base_angle(60)],
+      "  ...an arm's BASE angle goes out as MOTOR degrees, the board's frame")
+_ma._motion_var.set(C.DEFAULT_MOTION_PROFILE)
 
 _ma._motion_var.set(C.MOTION_PROFILE_SCURVE)
 _ma_logged, _ma_sent = [], []
@@ -2926,7 +3027,7 @@ check(_ma.settings[C.MOTION_PROFILE_KEY] == C.MOTION_PROFILE_SCURVE,
       "APPLY stores the choice")
 check(any("SET_MOTION_PROFILE:SCURVE" in c for c in _ma_sent),
       "  ...and SENDS it, so the board actually executes the shape")
-check(any("Jog still ramps linearly" in m for m in _ma_logged),
+check(any("jog gets the ease-up/down half" in m for m in _ma_logged),
       "  ...saying where it applies and where it does not — a setting that "
       "looks like it changed more than it did is the worst kind")
 # The board holds it in RAM, like the limits, so a reconnect must re-send.
@@ -2950,14 +3051,93 @@ _mc = App(); _mc.open_settings_dialog()
 _omega, _alpha = _mc._motion_preview_limits()
 check(abs(_omega - C.rot_speed_deg_s(C.MASTER_RPM, C.DEFAULT_ROT_PCT)) < 1e-9,
       "the preview uses RM's configured speed, not the .m's example")
+check(float(re.search(r"const float MASTER_ACC_DEF\s*=\s*([\d.]+)f;", _ino_src).group(1))
+      == C.MASTER_ACC_RPM_S == 300.0,
+      "the master accel is 300 RPM/s on BOTH sides")
 check(abs(_alpha - C.rot_accel_deg_s2(C.MASTER_ACC_RPM_S, C.DEFAULT_ROT_ACC_PCT)) < 1e-9,
       "  ...and RM's own ACCEL percentage, which is not the speed one")
+check("profileAccel" not in _ino_src and not hasattr(C, "profile_accel"),
+      "  ...profiles use the Speed tab's accel -- nothing derives it from speed")
 _mc._speed_vars["rot_pct"].set("25")
 check(_mc._motion_preview_limits()[0] < _omega,
       "  ...and it follows the Speed tab as it is typed")
 _mc._speed_vars["rot_pct"].set("")
 check(_mc._motion_preview_limits()[0] > 0,
       "  ...while a half-typed speed falls back instead of raising")
+
+
+print("\n=== audit: the GUI follows the board's HOME-state reset, and only that ===")
+class _HomeLines:
+    _on_plc_home_line = PR2.ProtocolMixin._on_plc_home_line
+    def __init__(self): self.resets = 0
+    def log(self, *_a, **_k): pass
+    def _adopt_home_state_reset(self): self.resets += 1
+_hl = _HomeLines()
+_hl._on_plc_home_line("[PLC_HOME] HOME state reached but the machine is still moving — "
+                      "coordinates NOT reset. They will be once it stops here.")
+check(_hl.resets == 0, "the board's refusal does NOT reset the GUI's coordinates")
+_hl._on_plc_home_line("[PLC_HOME] HOME STATE — M30, M31 and M32 all true.")
+check(_hl.resets == 1, "  ...the board's actual latch does")
+check(not hasattr(PR2.ProtocolMixin, "_latch_home_state_if_new"),
+      "  ...and the GUI no longer latches a second time on its own")
+
+# The offline jog read settings["master_rpm"], a key that stopped existing
+# when MASTER_RPM became a constant -- every sim tick raised KeyError and an
+# unconnected jog never moved.
+class _SimJog:
+    _axis_speeds = JC.JogControlMixin._axis_speeds
+_sj = _SimJog(); _sj.settings = App().settings
+check(all(v > 0 for v in _sj._axis_speeds()),
+      "the offline jog computes its speeds from the settings the app really holds")
+
+print("\n=== audit: settings survive a restart with their TYPES ===")
+class _TypedLoader(SD.SettingsDialogMixin):
+    def __init__(self):
+        self.settings = {C.PLC_LINK_ENABLED_KEY: True, "rot_pct": 50.0,
+                         C.MOTION_PROFILE_KEY: C.DEFAULT_MOTION_PROFILE}
+        self._load_settings_file()
+write({C.SETTINGS_SCHEMA_KEY: C.SETTINGS_SCHEMA, C.PLC_LINK_ENABLED_KEY: False,
+       C.MOTION_PROFILE_KEY: C.MOTION_PROFILE_SCURVE, "rot_pct": float("nan")})
+_tl = _TypedLoader()
+check(_tl.settings[C.MOTION_PROFILE_KEY] == C.MOTION_PROFILE_SCURVE,
+      "a saved motion profile comes back -- it used to revert to NONE every start")
+check(_tl.settings[C.PLC_LINK_ENABLED_KEY] is False,
+      "  ...a switch comes back as a bool, not 0.0")
+check(_tl.settings["rot_pct"] == 50.0, "  ...and a NaN in the file is refused")
+write({C.SETTINGS_SCHEMA_KEY: C.SETTINGS_SCHEMA, C.MOTION_PROFILE_KEY: "QUINTIC"})
+check(_TypedLoader().settings[C.MOTION_PROFILE_KEY] == C.DEFAULT_MOTION_PROFILE,
+      "  ...and an unknown profile name falls back instead of being stored")
+os.path.exists(C.SETTINGS_FILE) and os.remove(C.SETTINGS_FILE)
+check("self.settings[MOTION_PROFILE_KEY] = DEFAULT_MOTION_PROFILE"
+      in open(os.path.join(os.path.dirname(HERE), "robot_sim", "app.py"),
+              encoding="utf-8").read(),
+      "the real app seeds the profile key, which is what lets it load at all")
+check(SD.SettingsDialogMixin._read_number(tk.StringVar(value="nan"), "x")[0] is None
+      and SD.SettingsDialogMixin._read_number(tk.StringVar(value="inf"), "x")[0] is None,
+      "a typed 'nan' or 'inf' is not a number")
+print("\n=== the sketch survives the Arduino IDE's generated prototypes ===")
+# Arduino writes a prototype for every function and puts them ABOVE the
+# sketch's own code. A struct/enum declared below the first function is then
+# unknown to any prototype naming it -- "ScanMove was not declared in this
+# scope" -- while g++ on firmware_check.cpp, which never sees those
+# prototypes, stays green. So the rule is checked here instead.
+def _late_types_in_signatures(src):
+    sig_re = re.compile(r"^(?![ \t#/])([A-Za-z_][\w \t\*&:<>]*?)\b(\w+)\s*"
+                        r"\(([^;{}]*?)\)\s*(?:const\s*)?\{", re.M | re.S)
+    sigs = [m for m in sig_re.finditer(src)
+            if m.group(2) not in ("if", "for", "while", "switch", "return", "else")]
+    first = sigs[0].start()
+    late = [m.group(1) for m in re.finditer(r"^(?:struct|enum)\s+(\w+)", src, re.M)
+            if m.start() > first]
+    return [(m.group(2), t) for m in sigs for t in late
+            if re.search(r"\b%s\b" % t, m.group(1) + m.group(3))]
+_late = _late_types_in_signatures(fw)
+check(not _late, "every type a function signature names is declared above the "
+                 "first function%s" % ("" if not _late else " -- NOT: %s" % _late))
+
+check("BKSP" in SD.CONTROLS_HELP and "ENTER" in SD.CONTROLS_HELP
+      and "H (home)" not in SD.CONTROLS_HELP,
+      "the Controls help names the keys that really are reserved")
 
 
 print("\n" + ("ALL PYTHON CHECKS PASSED" if not FAIL else "FAILURES: %s" % FAIL))

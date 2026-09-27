@@ -131,7 +131,7 @@ a speed past what RM can do — the points still land at the same angles, the sw
 longer, and both the panel and the board say so.
 
 Two things **warn and ask** rather than refusing, because both are the operator's own
-limits: a total ZM travel past the ceiling in **Settings → Scan** (default **180 mm**), and a
+limits: a total ZM travel past the ceiling in **Settings → Boundaries** (default **180 mm**), and a
 speed past RM's. The hard refusals stay on the board — the 285 mm stroke, and no PLC device
 data.
 
@@ -163,7 +163,7 @@ axis motor RPM = 150 × (axis % / 100) × AXIS_SCALE
   backstops still clamp underneath: `ROT_VEL_MAX_DEG_S` 120, `Z_VEL_MAX_MM_S` 140,
   `ARM_MOTOR_RPM_MAX` 400. The preview prints `▸ capped` when one bites.
 - The 1% floor stays: 0% would freeze an axis and a negative would reverse it.
-- Acceleration is a **separate** family of percentages against 375 RPM/s, so the ramp can be
+- Acceleration is a **separate** family of percentages against 300 RPM/s, so the ramp can be
   tuned without touching cruise speed.
 
 ---
@@ -253,13 +253,11 @@ A Mitsubishi PLC at **192.168.3.101:1025**. ClearCore is an **MC protocol 3E** c
 | Device | Meaning | Sits at |
 | :--- | :--- | :--- |
 | `M32` | ZM travel limit | minimum — bottom of the stroke |
-| `M31` | RM travel limit | maximum — the axis is mounted inverted |
+| `M31` | RM travel limit | minimum — the CCW end, where HOME parks RM |
 | `M30` | A2M travel limit | **both ends** — see below |
-| `X0` | HOME request | a **physical wire** from ClearCore IO-0 |
 
-**HOME is a wire, not a packet.** `X0` is an input device: the PLC refreshes X from the
-terminals every scan, so a network write to it was overwritten within 10 ms. It worked only
-while X0 was unwired, and the failure looked like a ClearCore fault.
+**HOME is driven by the board itself.** It drives ZM, RM and A2M onto their own switches and
+stops each on its own bit; the PLC is only read, never asked. No device data, no HOME.
 
 **A2M's switch is wired at both ends of its travel** — one device, two switches, so the bit
 cannot say which end tripped it. The board records the direction the axis was travelling on the
@@ -311,7 +309,7 @@ request.
 
 ## Settings
 
-Six tabs — **Speed · Boundaries · Scan · Controls · PID · Appearance** — each with its own APPLY and
+Six tabs — **Speed · Motion · Boundaries · Controls · PID · Appearance** — each with its own APPLY and
 DEFAULTS acting **only on that tab**. A global reset that wiped taught boundaries because
 someone undid a speed change is the failure this avoids.
 
@@ -364,7 +362,7 @@ USB serial, **115200 baud** by default, two-way ASCII lines.
 | `RESET_LIMITS` | back to the inset defaults |
 | **Reference** | |
 | `RESET_COORD:<Z\|ROT\|A1\|A2>` | zero one counter; does **not** claim a full reference |
-| `HOME` | PLC homing, via the IO-0 → X0 wire |
+| `HOME` | the board drives each axis onto its own switch (M30..M32) |
 | **P2P** | |
 | `LOAD:…` · `LOAD_BOTH:…` | joint-space program, single or dual arm |
 | `MOVE_XYZ:arm,X,Y,Z` · `LOAD_XYZ:…` | Cartesian — board runs IK. **HOME = X0 Y0 Z0** |
@@ -472,7 +470,7 @@ the package instead.
 | `robot_sim/` | the GUI — `config.py` holds every constant, `kinematics.py` the maths |
 | `robot_sim/core/` | one mixin per concern: protocol, jog, P2P, safety, serial, keyboard |
 | `robot_sim/ui/` | panels and the settings dialog |
-| `RobotMotionController_v9_ClearCore/` | the firmware — one `.ino`, plus `FIRMWARE_NOTES.md` |
+| `RobotMotionController_v9_ClearCore/` | the firmware — one `.ino` |
 | `Scan/` | the stand-alone scanner — same firmware commands, and the only one that can run simulated |
 | `ClearCore_PLC_Test/` | standalone PLC link probe, for bringing the Mitsubishi up on its own |
 | `tests/` | both suites and their stubs |

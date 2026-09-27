@@ -46,7 +46,6 @@ class P2PControlMixin:
                 btn.set_config(c, SURFACE, fg_color=TEXT_LIGHT)
         self.log(f"Arm config set to {cfg}.")
 
-    _set_elbow_config = set_arm_config
 
     def _invalidate_loaded_program(self, reason=None):
         if self.loaded_program is None:
@@ -444,15 +443,6 @@ class P2PControlMixin:
             self.log("WARNING: command sent, but ClearCore has not confirmed the "
                      "handshake.", tag="warn")
         self._simulate_p2p_run()
-
-    def p2p_stop(self):
-        self.send("STOP")
-        self.is_running = False
-        self.is_homing = False           # STOP during HOME must clear it too
-        self._cancel_jobs("anim_job", "_home_sim_job", "_reset_position_sim_job")
-        self._set_motion_locked(False)
-        self.status_var.set("STOPPED — Program halted.")
-        self.log("STOP — P2P program halted.", tag="warn")
 
     def _simulate_p2p_run(self):
         prog = self.loaded_program

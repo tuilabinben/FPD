@@ -32,17 +32,12 @@ from .config import (
     ARM2_Z_DROP_MM,
     ARM_GEAR_RATIO,
     BASE_ANGLE_CAD_OFFSET_DEG,
-    BASE_ANGLE_HOME_DEG,
-    BASE_ANGLE_MAX_DEG,
     ARM_LINK_SUM_MM,
     ARM_RADIAL_OFFSET_MM,
     D1_MAX_MM,
     D1_MIN_MM,
     ARM_ZERO_CAD_DEG,
     FOLD_ANGLE_HOME_DEG,
-    FOLD_ANGLE_MAX_DEG,
-    FOLD_ANGLE_MIN_DEG,
-    FOLD_ANGLE_SPEC_MAX_DEG,
     FOLD_ANGLE_SINGULARITY_WARN_DEG,
     ROT_MAX_DEG,
     ROT_MIN_DEG,
@@ -196,11 +191,6 @@ def motor_deg_from_base_angle(base_deg):
 def motor_deg_to_reach(motor_deg):
     """Motor rotation from home (deg) -> radial reach of the wafer centre."""
     return fold_angle_to_reach(fold_angle_from_motor_deg(motor_deg))
-
-
-def reach_to_motor_deg(r_mm):
-    """Radial reach (mm) -> motor rotation from home."""
-    return motor_deg_from_fold_angle(reach_to_fold_angle(r_mm))
 
 
 def is_near_singularity(fold_deg):
@@ -431,11 +421,6 @@ def forward_kinematics(d1, theta2, theta_a1m, theta_a2m, arm=None):
     return r * math.cos(rad), r * math.sin(rad), d1 + z_offset
 
 
-def home_pose():
-    """(d1, theta2, th3_a1m, th3_a2m) of the retracted CAD home pose."""
-    return D1_MIN_MM, 0.0, FOLD_ANGLE_HOME_DEG, FOLD_ANGLE_HOME_DEG
-
-
 def sample_joint_path(start_j, target_j, arm=None, n=30):
     """(x, y) mm polyline for linear joint-space move start_j -> target_j,
     both (d1, rot, a1_motor_deg, a2_motor_deg).
@@ -454,6 +439,3 @@ def sample_joint_path(start_j, target_j, arm=None, n=30):
         pts.append((x, y))
     return pts
 
-
-# Kept so callers that only need the elbow span don't import config.
-FOLD_ANGLE_RANGE_DEG = (FOLD_ANGLE_MIN_DEG, FOLD_ANGLE_MAX_DEG)

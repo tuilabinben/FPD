@@ -126,8 +126,8 @@ class SimulatedBoard:
         self.sweep = 340.0
         self.z = 0.0
         self.z_step = 0.0
-        self.direction = -1
-        self.ref_deg = 340.0
+        self.direction = 1
+        self.ref_deg = 0.0
         self._travelled = 0.0
         self._next_at = 0.0
         self.sensor = "ULTRASONIC"
@@ -201,17 +201,17 @@ class SimulatedBoard:
                       f"zStep={self.z_step:.2f} degStep={self.deg_step:.2f} "
                       f"sweep={self.sweep:.1f} fromZ=0.00")
         # The board turns to the RM switch first and sweeps from there. The
-        # switch sits at the CW end, so the first layer runs BACKWARDS from
-        # it and the next one comes back -- see _next_layer().
+        # switch sits at the CCW end, RM's zero, so the first layer runs UP
+        # from it and the next one comes back -- see _next_layer().
         self._on_line("[SCAN_SEEK] turning RM to its switch to reference the sweep...")
-        self.ref_deg = self.sweep
+        self.ref_deg = 0.0
         self._on_line(f"[SCAN_REF] RM on its switch at {self.ref_deg:.2f} deg "
                       f"- sweeping from here")
-        self._begin_layer(-1)
+        self._begin_layer(1)
 
     def _begin_layer(self, direction):
         self.direction = direction
-        self.deg = self.ref_deg if direction < 0 else 0.0
+        self.deg = self.ref_deg if direction > 0 else self.ref_deg + self.sweep
         self._travelled = 0.0
         sign = "+" if direction > 0 else "-"
         self._on_line(f"[SCAN_LAYER] {self.layer}/{self.layers} z={self.z:.2f} mm "
@@ -221,8 +221,8 @@ class SimulatedBoard:
         """Alternates direction, and re-references whenever a layer ends on
         the switch -- which is what the board does, and why angle error
         cannot accumulate over a tall scan."""
-        if self.direction > 0:
-            self.ref_deg = self.sweep        # the switch is where the switch is
+        if self.direction < 0:
+            self.ref_deg = 0.0               # the switch is where the switch is
             self._on_line(f"[SCAN_REF] RM back on its switch at "
                           f"{self.ref_deg:.2f} deg")
         if self.layer >= self.layers:
@@ -291,7 +291,7 @@ class SimulatedBoard:
             # is the whole point of turning back to it, and it is why the
             # start angle cannot drift over a tall scan. An outward leg has
             # nothing to stop it but the count.
-            if self.direction > 0 and self.deg >= self.sweep:
+            if self.direction < 0 and self.deg <= self.ref_deg:
                 self._next_layer()
             elif self._travelled > self.sweep:
                 self._next_layer()

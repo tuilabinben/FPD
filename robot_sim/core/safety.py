@@ -89,8 +89,7 @@ class SafetyMixin:
             self.log(f"RESET COORDINATES — {axis} only, zeroed at its current "
                      f"position. The other three axes are unchanged."
                      + ("" if self.is_homed else
-                        " The machine is still UNREFERENCED overall, so soft limits "
-                        "stay suspended."))
+                        " The machine is still UNREFERENCED overall."))
             return
 
         # Mirror it locally so readouts, simulation and soft limits all
@@ -246,6 +245,7 @@ class SafetyMixin:
         # Board already cancels the scan on ESTOP; this catches the GUI up
         # without logging a second abort.
         self.cancel_scan_locally("EMERGENCY STOP")
+        self.motion_test_running = False
         self.is_running = False
         self.is_homing = False
         self._cancel_jobs("anim_job", "_home_sim_job", "_reset_position_sim_job")
@@ -300,8 +300,9 @@ class SafetyMixin:
         self.send("BYE", log_tx=False)
         self._rx_generation += 1
         self._cancel_jobs("_ping_timeout_job", "_heartbeat_job", "_hb_blink_job",
-                          "anim_job", "_jog_sim_job", "_home_sim_job",
-                          "_reset_position_sim_job", "_disconnect_job")
+                          "anim_job", "_jog_sim_job", "_jog_hb_job", "_home_sim_job",
+                          "_reset_position_sim_job", "_disconnect_job",
+                          "_scan_redraw_job")
         self.root.after(120, self._finish_close)
 
     _on_close = on_close

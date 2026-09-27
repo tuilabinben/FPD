@@ -21,7 +21,6 @@ from ..theme import (
     BORDER,
     BORDER_SOFT,
     ENTRY_BG,
-    INK_DARK,
     LED_BG,
     PANEL_BG,
     RADIUS_CARD,
@@ -169,14 +168,3 @@ def set_entry_border(wrap, color):
         wrap.config(highlightbackground=color, highlightcolor=color)
 
 
-def make_chip(parent, text, color, bg=PANEL_BG):
-    """Small rounded pill used for inline status words."""
-    chip = RoundedFrame(parent, bg=mix(bg, color, 0.16), radius=RADIUS_SM,
-                        border=mix(bg, color, 0.30), border_w=1)
-    tk.Label(chip.body, text=text, bg=mix(bg, color, 0.16), fg=color,
-             font=FONT_CAPTION,
-             padx=px(6), pady=px(1)).pack()
-    return chip
-
-
-ACTIVE_INK = INK_DARK

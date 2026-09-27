@@ -18,10 +18,6 @@ Style deliberately FLAT: solid fills, one hairline border, no shadow
 stacks. Depth cue = fill colour change on hover/press — free, no banding.
 """
 
-import tkinter as tk
-
-from ..theme import mix, shade
-
 try:                                        # pragma: no cover - env dependent
     from PIL import Image, ImageDraw, ImageTk
     # Pillow moved resampling consts under Image.Resampling in 10, old
@@ -42,11 +38,6 @@ SUPERSAMPLE = 4
 #: cache is load-bearing, not just optimisation.
 _IMAGE_CACHE = {}
 _CACHE_LIMIT = 512
-
-
-def has_antialiasing():
-    """True if Pillow available, corners will be smooth."""
-    return _HAVE_PIL
 
 
 def _cache(key, build):
@@ -192,54 +183,3 @@ def clear(canvas):
     canvas.delete("all")
     if hasattr(canvas, "_img_refs"):
         canvas._img_refs = []
-
-
-# legacy shims, kept so old imports don't break
-def rounded_rect_points(x1, y1, x2, y2, r):
-    return [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
-            x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
-            x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
-
-
-def draw_rounded_rect(canvas, x1, y1, x2, y2, r, **kwargs):
-    fill = kwargs.get("fill") or ""
-    outline = kwargs.get("outline") or None
-    width = kwargs.get("width", 0)
-    if fill:
-        _rounded_arcs(canvas, x1, y1, x2, y2, r, fill, outline, width)
-    return None
-
-
-def draw_bevel_rect(canvas, x1, y1, x2, y2, r, color):
-    paint_rounded(canvas, x1, y1, x2 - x1, y2 - y1, r, color, color)
-
-
-def draw_neumorph_raised(canvas, x1, y1, x2, y2, r, surface, spread=1.0,
-                         tint=None):
-    face = tint if tint is not None else shade(surface, 1.14)
-    paint_rounded(canvas, x1, y1, x2 - x1, y2 - y1, r, face, surface,
-                  border=mix(face, "#ffffff", 0.06), border_w=1)
-    return face
-
-
-def draw_neumorph_inset(canvas, x1, y1, x2, y2, r, surface, spread=1.0,
-                        fill=None):
-    face = fill if fill is not None else shade(surface, 0.82)
-    paint_rounded(canvas, x1, y1, x2 - x1, y2 - y1, r, face, surface,
-                  border=mix(face, "#000000", 0.25), border_w=1)
-    return face
-
-
-def draw_neumorph_circle_raised(canvas, x1, y1, x2, y2, surface, tint=None):
-    face = tint if tint is not None else shade(surface, 1.14)
-    paint_circle(canvas, x1, y1, x2 - x1, face, surface)
-    return face
-
-
-def draw_neumorph_circle_inset(canvas, x1, y1, x2, y2, surface, fill=None):
-    face = fill if fill is not None else shade(surface, 0.82)
-    paint_circle(canvas, x1, y1, x2 - x1, face, surface)
-    return face
-
-
-_TK = tk  # keeps import meaningful for type checkers

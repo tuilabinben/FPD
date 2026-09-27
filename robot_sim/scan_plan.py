@@ -113,7 +113,7 @@ def plan(sample_hz, points_per_slice, slices, gap_mm, sweep_deg,
     if lift > max_z:
         warnings.append(
             f"{slices} slices {gap_mm:g} mm apart move ZM {lift:.1f} mm, past "
-            f"the {max_z:g} mm ceiling set in Settings → Scan. Lower the "
+            f"the {max_z:g} mm ceiling set in Settings → Boundaries. Lower the "
             f"spacing or the slice count, or raise the ceiling.")
     top_z = start_z_mm + lift
     if top_z > C.D1_MAX_MM:
