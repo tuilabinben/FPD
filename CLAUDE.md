@@ -19,14 +19,26 @@ pieces, which must agree with each other:
 | **Simulation** | `../MATLAB_v4_final` | Simscape model + `mophong_init.m`. **Historical reference only** — see the geometry note below. |
 
 `v8` and `clearcore/` are older firmware, kept for reference. **v9 is the
-live one.** MATLAB is read-only by request, and is no longer the source of
+live one — and it ANNOUNCES ITSELF AS v10** (`[BOOT] … controller v10`,
+`[STATUS] fw=v10`; retitled on request). The folder and the `.ino` are still
+named `RobotMotionController_v9_ClearCore`: every test and build path points
+there, and the Arduino IDE needs the two names to match. The GUI's window
+title says **(v2)**, also on request. Nothing parses either string.
+
+**The firmware's comments were PURGED on request** — 745 comment lines to
+244. What is left says what a thing IS, a wire format, or an ordering rule
+the code cannot show ("must run BEFORE…"). The history and the reasons live
+HERE and in the README, not in the `.ino`; do not write them back in.
+
+MATLAB is read-only by request, and is no longer the source of
 the geometry — the arm was measured on the bench and the .m disagrees.
 
 Four axes: **RM** turntable, **A1M** / **A2M** the two elbows (separate
 motors), **ZM** lift.
 
 **Three control modes**, section 2 of the window: **POINT TO POINT**,
-**JOYSTICK**, **SCAN**. Section 3 shows one panel at a time.
+**JOYSTICK**, **SCAN**. Section 3 shows one panel at a time. JOYSTICK has
+two layouts, JOINT and XYZ — see its section below.
 
 ---
 
@@ -382,7 +394,18 @@ nothing.
 COORDINATES.** It DRIVES the machine to (0,0,0,0) under the board's own
 motor control — no PLC handshake, and it skips the M30..M32 block a P2P leg
 respects, though taught soft limits still apply. It never sets `isHomed`,
-because it re-anchors nothing. Confirmed before it runs.
+because it re-anchors nothing. **It is NOT confirmed any more** — the
+pop-up was removed on request, so one press (or its key) and it goes, like
+HOME; E-STOP is what takes it back.
+
+**RESET POS is a ROUND button beside HOME, on every panel** — asked for —
+not the last button of the RESET COORDINATES row, where it used to sit.
+That row's five only DECLARE a position; this one drives the machine. It
+is `HomeButton` with another glyph, caption and accent (red), built by
+`_build_reset_pos_button()` in `ui/coord_reset.py` and placed by each
+panel: beside LOAD PARAMETERS in P2P (over HOME, the same 56 px), in the
+free corner of the pad cross in BOTH jog layouts, and in SCAN's
+button row (SCAN has no HOME button). In `motion_lock_widgets`, like HOME.
 
 `RESET_COORD:<Z|ROT|A1|A2>` zeroes one axis. It deliberately does **not**
 set `isHomed` — claiming a full reference from one axis would enforce
@@ -794,7 +817,28 @@ the whole mechanism -- `plcServiceLimitLatch()` on the board records it,
 and only that direction is refused. The opposite stays available, always,
 or the arm would be pinned on its own switch with no way off.
 
-Four consequences, each paid for:
+**WITH A REFERENCE, POSITION DECIDES INSTEAD — asked for.** Once the
+machine is homed (`isHomed`), `plcLimitEndFor()` does not consult the
+direction at all: `plcLimitEndByPosition()` reads A2M's base angle, and a
+trip at or above `PLC_A2_FAR_END_BASE_DEG` (+30, half way between the home
+switch at base −30 and the far one near +90) is the FAR switch. That is
+better evidence than a direction, and it is immune to everything the latch
+is fragile to: switch chatter with the arm parked, a late read after a
+link gap, a board that woke up with the bit on. The direction latch below
+is what is left for a machine with NO reference, where the counter means
+nothing yet. One thing it cannot know: RESET COORDINATES pressed with the
+arm extended declares that pose base −30, and the far switch will then
+read as the home one — the operator's reference is the operator's.
+
+**The latch runs BEFORE the status is pushed** (`plcOnGoodRead()` calls
+`plcServiceLimitLatch()` first). `[PLC_STATE]` carries `end Z/R/A2=` and
+goes out the moment a bit changes — which for M30 is the moment its end
+has to be worked out. Pushed first, it told the GUI the HOME end for a
+switch that had just been driven into going forward, and nothing corrected
+it until the host's next `PLC_STATUS` three seconds later: the lamp read
+COVERED MIN on a fully extended arm, "sometimes", for up to 3 s.
+
+Four consequences of the direction latch, each paid for:
 
 * **The latch runs BEFORE `plcServiceLimitStops()`**, which is what zeroes
   the direction the latch reads. Swap them and the end is always 0.
@@ -832,8 +876,9 @@ switch. The board reports it in `PLC_STATUS` as `end Z/R/A2=-+-`;
 leaves the home-side end in place -- which is what that firmware enforced
 anyway.
 
-**Known gap, deliberate:** a board that BOOTS with the bit already on has
-no edge to latch from and assumes the home end. Powering up parked at home
+**Known gap, deliberate, and only without a reference:** a board that
+BOOTS with the bit already on has no edge to latch from and assumes the
+home end. Powering up parked at home
 is the normal case and the assumption is right there. The alternatives are
 worse: refusing to guess either pins the axis or blocks HOME forever, and
 HOME is what would produce the edge.
@@ -958,6 +1003,23 @@ Consequences that will bite:
 * Mode switch and E-STOP both end a scan — the mode switch sends
   `SCAN_STOP` first, E-STOP does not, because the board's own `ESTOP`
   handler already calls `cancelScan()`.
+* **A finished scan GOES BACK TO WHERE IT STARTED** — asked for. After the
+  last layer the board enters `SCAN_RETURN`: ZM down to the height START
+  was pressed at, and (an odd layer count ends at the far end of the
+  sweep) RM back to its switch, both at once, through the same jog
+  primitives a sweep and a lift use — so soft limits, PLC switches and
+  E-STOP stop the return exactly as they stop the scan. Nothing is sampled
+  on the way.
+* **`[SCAN_DONE]` is sent when the return ENDS, not when the data does.**
+  `[SCAN_RETURN]` marks the data complete; until DONE the machine is still
+  moving, and a host that unlocked on the last point would be free to
+  start something under it. Both apps show "returning to the start" in
+  between and keep the scan running, so STOP is still what stops it.
+* **Stopped on the way back, the scan is still DONE**, with a `[WARN]`
+  saying where the axes are — never `[SCAN_ABORT]`. Every layer is in; an
+  abort would tell the host its complete data is not. `cancelScan()`
+  carries that branch, and `serviceScanReturn()` the "stopped short" one
+  for a limit or a switch that zeroed a direction on the way.
 
 ---
 
@@ -1196,21 +1258,68 @@ now eases under those two profiles; the on-screen preview does not. Same
 category as the P2P soft-limit mirroring in `_axis_bounds()` — if this is
 ever closed, that is the precedent to follow, not a second one-off.
 
-### The Oxy board draws a CHORD, not the tool path
+### The P2P board is 3D, and it draws a CHORD, not the tool path
 
-`ui/xy_board.py` plots the reachable annulus, the unreachable RM wedge, the
-taught RM band, HOME, A, B and the live pose. Two things are deliberate:
+`ui/xy_board.py` was a top-down Oxy plot. It is the **3D view** now — asked
+for, because Z is a third of every point and was not on the plot at all.
+The file and the `_xy_*` names are the old ones on purpose: every caller
+still reaches the board through them.
 
-* The **scale is fixed** to the outer reach. A plot that rescales itself
-  cannot be compared between runs by eye.
+**One view, two panels.** `ui/view3d.py` holds the projection
+(`xyz_project()`) and the scene (`draw_scene()`: the floor at HOME height
+with the reach ring, distance rings, the unreachable wedge and the taught
+RM band; the axes; HOME) plus `draw_marker()` / `draw_tool()`. The P2P
+board and the XYZ jog's view both draw through it, so the machine looks
+the same way round in both. On top of the scene the P2P board draws A and
+B **at their heights** (drop line and floor shadow each), the A->B chord,
+the real joint-space path, and the live tool.
+
+Three things are deliberate:
+
+* The **scale depends on the canvas and the camera alone**, never on what
+  is plotted. A picture that reframes itself as a point moves cannot be
+  compared between runs by eye.
+* **THE CAMERA MOVES — asked for — but only when the operator moves it.**
+  Drag turns the view (azimuth free, tilt 5..90°: straight down is the old
+  Oxy plot), the wheel zooms about the pointer, and **RESET VIEW** — a
+  button in the canvas's corner, not a double-click, on request — puts the
+  standard view back. `View` and `attach_view_controls()` in `view3d.py`,
+  one helper for both panels. Each canvas has its OWN `View`, made new on
+  every build and never saved, so a fresh window is still the comparable
+  picture. Three things that are not accidents:
+  * **RESET VIEW is LIT while the view is not standard.** The XYZ jog's
+    pads are laid out to match the standard picture; turned half round,
+    the `X +` pad moves the tool LEFT on screen. The lit button is what
+    says the picture no longer matches the pads.
+  * **The wheel handler returns `"break"`.** The page scrolls on the wheel
+    through a `bind_all`, and without it one notch would zoom and scroll.
+  * **The scale follows the TILT** (`_frame()`), so the whole reach ring
+    fits at zoom 1 from any angle — from above it is as tall as it is wide.
 * The A->B line is **straight because that is the operator's intent**. The
-  machine's real path is a joint-space move that bows away from it, and the
-  caption says so — somebody checking clearance needs the swept arc, not
-  the chord.
+  machine's real path is a joint-space move that bows away from it — drawn
+  too, **solid white** (it was dim and dashed; changed on request) — and
+  the caption says which is which: somebody checking clearance needs the
+  swept arc, not the chord.
+* **It fills its column.** The canvas takes the width the panel gives it
+  and sets its height from the view's aspect, between `BOARD_MIN_H` and
+  `BOARD_MAX_H` (`_on_xy_board_resize()`). It used to be a fixed 560 px
+  square — unscaled pixels, so on a scaled display a small picture in a
+  wide empty column. The caption re-wraps to the board's width for the
+  same reason the left column's labels are wrapped: an unwrapped line was
+  the widest thing in the panel.
 
-It reads the entry boxes on every keystroke, so it must never raise on
-half-typed input (`-`, `1e`, empty). `_xy_points()` returns None instead,
-and the tests feed it exactly those strings.
+**The P2P layout moved with it.** The board is taller than the two point
+boxes, so ARM SELECT and the action buttons (LOAD + RESET POS, RUN + HOME, EMERGENCY
+STOP — `_build_p2p_actions()`) are stacked in the LEFT column under the
+points instead of in rows of their own below everything. That fills the
+height beside the board, and puts LOAD / RUN next to the numbers they act
+on instead of a scroll away.
+
+It reads the entry boxes on every keystroke — Z included now — so it must
+never raise on half-typed input (`-`, `1e`, empty). `_xy_points()` returns
+None instead, and a Z that is half-typed or out of the stroke draws on the
+floor (`_xy_heights()`): the point's X/Y is still worth seeing. The tests
+feed it exactly those strings.
 
 ### ZM lead and the arm ratio are BOTH settled now
 
@@ -1231,6 +1340,170 @@ If Z ever travels **3x** the commanded distance the true lead is 3 x 20 = 60
 mm/rev. A non-power-of-2 error points at the mechanics; the driver's
 microstep switches can only ever err by powers of two. Measure over 100 mm,
 not 10 — a wrong ZM lead moves where every ZM soft limit physically is.
+
+### JOYSTICK has TWO LAYOUTS: JOINT, and XYZ (the tool point)
+
+Asked for as "a secondary jog mode controlled by the coordinate". It is a
+second LAYOUT of the JOYSTICK panel, not a fourth mode: the switch at the
+top of the panel (`set_jog_frame()`) swaps the pads, and everything under
+them — readout, status, E-STOP, switch lamps, reset row — is shared.
+
+**PADS LEFT, ONE 3D VIEW RIGHT, for both layouts — asked for.** The view
+was the XYZ layout's alone and the JOINT pads sat centred with nothing
+beside them. `_build_jog_panel()` grids the slot — column 0, weight 0, is
+whichever pads are showing; column 1 takes the rest and holds the one
+canvas `_build_jog_view()` builds. It fills that width and sets its height
+from it (`_on_xyz_view_resize()`), like the P2P board.
+
+* **JOINT's RM and ZM share ONE cross** (`_build_rot_card()`): RM across,
+  ZM up and down, HOME in the middle, RESET POS in the corner — the shape
+  of the XYZ layout's X/Y pad. ZM's own card is gone; that width is the
+  view's. Do not put it back to "tidy" the axes into a card each.
+* **What the view draws follows the layout, because what a key moves
+  does.** XYZ: the one tool the keys drive, red, with its offset from HOME.
+  JOINT: BOTH arms' tools, each in its pads' colour and named — every arm
+  has its own keys there, and drawing only `xjog_arm` meant jogging A2M
+  moved nothing on screen. The second label hangs BELOW its marker, or with
+  both arms at HOME the two print over each other.
+* **`_xyz_trail` is a dict, `{arm: [points]}`** — a trail per tool. It was
+  one list; with two tools that is two paths joined end to end.
+* **It no longer skips the repaint on JOINT**, and is not gated on the
+  mode either: a redraw is ~1 ms, and a hidden view that stopped following
+  would show a stale pose the moment it was shown again.
+
+| | JOINT | XYZ |
+| :--- | :--- | :--- |
+| a key drives | one motor | the TOOL along one Cartesian axis |
+| default keys | `A/D` RM · `I/K` A1M · `O/L` A2M · `W/S` ZM | `A/D` X · `W/S` Y · `R/F` Z |
+| board command | `ROT_CW`, `A1_FWD`, … one per axis | `XJOG:<arm>,<sx>,<sy>,<sz>,<mm/s>`, all three signs at once |
+| how the board moves it | `MoveVelocity()` on that motor | a Cartesian SETPOINT walked through IK, `Move(ABSOLUTE)` |
+
+**The frame is the P2P one** (section 3b): X, Y from the turntable axis, Z
+above HOME. So HOME is not the origin — it is the tool's own position
+there, `(133.2, 0, 0)` — and the 3D view marks it and reads the offset
+from it. From HOME, `+Y` and `+X` are open; `−Y` is RM's CCW stop and
+`−X` shortens the reach below the elbow's taught floor, so both are
+refused at once. That is the machine, not a bug.
+
+**Z is the lift ALONE.** Z from HOME is carriage travel, so `+Z` is exactly
+ZM and the XY half (RM + the selected elbow) and the Z half are stepped,
+and refused, independently. A refused half drops its own keys and the
+other carries on.
+
+**Firmware (`XJOG`, `serviceXjog()`), and what will bite:**
+
+* **It is a POSITION setpoint, re-commanded every `XJOG_TICK_MS`**, so
+  nothing can stop it the way a joint jog or a scan is stopped — by
+  zeroing a direction and calling `MoveVelocity(0)`. Every check therefore
+  runs BEFORE the step: physical travel (the IK's own refusals), the
+  taught bands with the jog's **escape rule** (`xjogBandRefuses()` — only a
+  step going FURTHER out is refused) and a covered PLC switch
+  (`xjogSwitchRefuses()`). The scan section says a scan must never be
+  position-driven for this reason; this is the same problem solved from the
+  other side.
+* **`cancelJog()` calls `xjogClear()` BEFORE its `MoveVelocity(0)`s.** Left
+  armed, the next tick re-commands the setpoint straight over the stop.
+  ESTOP, STOP, RUN, HOME, the watchdog and a joint jog key all get there.
+* **`applyJogVelocities()` returns at once while an XYZ jog is active.**
+  With every joint direction at 0 it would `MoveVelocity(0)` over the
+  setpoint — and `SET_SPEED` / `SET_BOOST` call it mid-jog. Those two test
+  `jointJogActive()` now; `anyJogActive()` includes the XYZ jog (telemetry,
+  the refuse-while-moving checks).
+* **The watchdog wants a keep-alive only while a key is HELD**
+  (`xjogHeld()`). A release eases out over up to `XJOG_EASE_MAX_S` with
+  no key down and no `JOG_HB`; tripping the watchdog there turned every
+  release into a hard stop and a `[WATCHDOG]` line.
+* **The setpoint's speed is RAMPED, and the two directions are different
+  ramps.** Speeding up is `XJOG_ACCEL_MM_S2`, gentle. Slowing down is
+  latched when it starts, hard enough to stop inside **`XJOG_EASE_MAX_S`
+  (0.5 s)** from the speed the tool really has. The Motion tab's ramp
+  SHAPE does not apply to either.
+* **THERE IS NO SPEED CEILING — asked for — and that half-second is what
+  makes it safe.** It used to be clamped at 200 mm/s. With the clamp gone
+  and one ramp rate, 500 mm/s carried on for 1.7 s and ~400 mm after the
+  key came up, on a dead-man control. Two things close that, and both are
+  load-bearing: the time-bounded slow-down above, and **`xjogVel` is set
+  back to the speed the tool HAS whenever a step is shortened**
+  (`xjogStepXY()` / `xjogStepZ()`). Left at the asked figure, a release
+  would ease down from a speed it never reached and keep moving at full
+  joint speed the whole time that took. The panel warns past
+  `XYZ_JOG_WARN_MM_S` (200) and still sends the number.
+* **Each step is shortened until no joint is asked past
+  `XJOG_JOINT_HEADROOM` of its `VelMax`.** Near the turntable axis a few mm
+  of tool travel is a lot of RM; a setpoint the axis cannot follow is a
+  path it leaves. So the speed box is a request, not a promise — the
+  motors' own `VelMax` is the real ceiling — and BOOST does not apply.
+* **`plcAxisTravelDirNow()` reads `xjogJointDir[]`** — A2M's both-ends
+  switch latches on the direction of travel, and an XYZ jog has no
+  `a2Dir`.
+* **A pose the frame cannot express must never become a jump.** IK returns
+  RM in 0..340 and the elbow on one branch of the reach curve, so a counter
+  outside that (RM coasted past its stop, or anywhere at all before a
+  reference) solves to a DIFFERENT joint pose than the machine is in — and
+  the first step would drive there, up to a full turn away. Two guards:
+  `handleXjog()` round-trips the start pose through IK and **refuses to
+  start** if it does not come back (RM within `XJOG_START_SNAP_DEG` of an
+  end is snapped, because a jog coasts); and a step that still asks a joint
+  for `XJOG_JUMP_RATIO` times its speed AFTER being shortened is refused.
+  The simulation carries the second one too.
+* **The lift's stroke refuses only a step going FURTHER out**, like every
+  band here, and an out-of-stroke Z counter does not refuse X/Y — the XY
+  solve is handed a clamped Z.
+* The idle arm is never commanded.
+* RESET POS sits in the free corner of the cross (`xjog_reset_btn`).
+* HOME sits in the middle of the X/Y pad cross (`xjog_home_btn`), the
+  place the JOINT layout has it, in the middle of its RM/ZM cross.
+
+**GUI (`core/jog_control.py`, `ui/xyz_jog.py`):**
+
+* **The six XYZ keys are in `JOG_STOP_COMMAND`, mapped to `XJOG_STOP`.**
+  Not tidiness: the blind release paths fall back to the board's `STOP`,
+  which is an emergency stop.
+* The same `jog_active` set and heartbeat as a joint jog. A press or a
+  release re-sends the whole vector; the last key up sends `XJOG_STOP`.
+* **A refused key stays refused until it comes up** (`_xjog_blocked`). Key
+  auto-repeat would otherwise re-send it, and be refused again, thirty
+  times a second.
+* **Its own keymap** (`keybinds.XYZ_ACTIONS`, `DEFAULT_XYZ_KEYMAP`), set in
+  Settings → Controls under the joint one. The two layouts SHARE keys by
+  default, which is fine because only one is bound at a time —
+  `_bind_keys()` binds the live layout and `set_jog_frame()` calls it. A
+  swap in the Controls tab stays inside its own layout. `keybinds.json`
+  holds both flat, and each falls back to its default SEPARATELY: a file
+  from before this existed keeps its joint layout.
+* **The offline simulation steps by the board's rules** (`_xjog_sim_step()`)
+  — IK, refuse before stepping, the escape rule, the joint headroom — and
+  then hands the joint clamps "previous = current" so they cannot latch a
+  joint-jog limit nobody is holding. It does not ramp, like the rest of the
+  offline jog.
+* **TOOL picks the arm** (`xjog_arm`, A1M / A2M — no BOTH), and the speed
+  box is read when a key goes down. ENTER, or a click on any pad, hands
+  the keyboard back: jog keys are ignored while a text field has focus.
+* A board flashed before this answers `Unknown command: XJOG`; the parser
+  releases the keys and says to re-flash.
+
+**The 3D view is an axonometric projection** (`ui/view3d.py`, shared
+with the P2P board), no perspective, and it never rescales to fit what is
+plotted: a picture that reframes itself cannot be compared between two
+looks. The operator can turn and zoom it — see the P2P board section; a
+jog of a few mm is a few pixels at the scale that fits the workspace. It
+repaints from the shared pose on every telemetry line
+(`_update_jog_readout()`), so it must never raise. The trails are cleared
+when the layout or the arm changes, and by **CLEAR PATH**, the button
+beside RESET VIEW.
+
+**The tests run on the DEFAULT colour scheme, whatever the app is set to.**
+`theme.py` binds its colours on import from `appearance.json`, and
+`python_check.py` read the operator's real one: switching the app to
+"mint" — where the +X axis and the A->B chord share a colour — turned two
+board checks red with no code change. The file is redirected to
+`tests/_tmp` before anything imports the theme, and an assert guards that
+order.
+
+**Known gaps:** the speed box is not persisted; the board's PLC switches
+are not mirrored in the offline simulation (jog only ever warned about
+them there); a straight line through the turntable axis is not possible
+and is not attempted — the rate limit simply stalls it.
 
 ### All three modes share ONE live pose
 
@@ -1421,7 +1694,7 @@ ladder.
 | File | Holds |
 | :--- | :--- |
 | `robot_sim/machine_settings.json` | Speeds, accel, boundaries + enforcement, PID gains + locks, the scan ZM ceiling, the motion profile |
-| `robot_sim/keybinds.json` | Jog key layout |
+| `robot_sim/keybinds.json` | Both jog layouts and the two shortcut keys |
 | `robot_sim/limit_presets.json` | Named boundary sets |
 | `robot_sim/appearance.json` | Colour scheme |
 
@@ -1455,24 +1728,40 @@ defaults is far harder to notice than a clean revert.
 
 ## Reserved keys
 
-HOME is **BackSpace**, from `keybinds.HOME_KEY` — `core/keyboard.py` binds
-that constant rather than a literal, so the key that is reserved and the key
-that homes are the same one by construction. They had drifted:
-`RESERVED_KEYS` said backspace while the binder still listened for `h`/`H`,
-so homing fired on a letter that was no longer protected and could also be
-taken by a jog axis. `H` sits mid-keyboard and was too easy to hit.
+**BACKSPACE is RESET POS and HOME is the `Home` key — both REBINDABLE**
+(Settings → Controls, the KEYS group). Asked for: BackSpace was HOME's,
+reserved; it was wanted for RESET POS and changeable, so HOME had to move
+and both became `keybinds.SHORTCUT_ACTIONS` / `DEFAULT_SHORTCUTS`. There is
+no `HOME_KEY` constant any more — `core/keyboard.py` binds
+`keybinds.active_shortcuts()`, never a literal, so the key Settings shows
+and the key that fires are the same one by construction. They had drifted
+once: `RESERVED_KEYS` said backspace while the binder still listened for
+`h`/`H`.
+
+* **A shortcut may share a key with NEITHER jog layout**
+  (`validate_shortcuts()`). The two jog layouts share keys because only one
+  is bound at a time; a shortcut is bound in both. In the Controls tab that
+  clash is an ERROR, not a swap — a swap would move an axis nobody touched.
+* **RESET POS fires in every mode, HOME in JOYSTICK only.** With the pop-up
+  gone, `_reset_key_pressed()`'s gates are the whole protection: not while
+  a text field has focus (BackSpace is how a typed number is corrected),
+  not under Settings (rebinding listens to the same press), not while
+  moving — silently, or a held key logs a refusal per repeat.
+* The binder binds the shortcuts BEFORE the jog keys, so in a hand-edited
+  file that holds a clash the axis keeps its key.
 
 Reserved keys must be spelled as **Tk keysyms** (`BackSpace`, capital S).
 A lowercase `"backspace"` never matches a captured keypress, so the key
 looks reserved in Settings while an axis can still take it.
 
-`SPACE` (e-stop), `ESC` (settings), `BACKSPACE` (home) and `ENTER` (RUN
-PROGRAM, P2P) cannot be rebound —
+`SPACE` (e-stop), `ESC` (settings) and `ENTER` (RUN PROGRAM, P2P) cannot be
+rebound —
 the live list is `keybinds.RESERVED_KEYS`, and `python_check.py` now derives
 its assertions from it rather than naming keys. It used to hard-code `h`,
 which meant that when HOME moved to `backspace` the test carried on passing
 while checking an ordinary letter. Jog defaults: `A/D` = RM, `I/K` = A1M,
-`O/L` = A2M, `W/S` = ZM.
+`O/L` = A2M, `W/S` = ZM — and, in the XYZ layout, `A/D` = X, `W/S` = Y,
+`R/F` = Z. The reserved keys are refused in every layout.
 
 `ESC` is bound with `bind_all`, which is application-wide. The dialog must
 **not** also bind `<Escape>` or it opens and closes in the same keypress —

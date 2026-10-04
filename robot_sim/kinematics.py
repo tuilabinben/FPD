@@ -421,9 +421,10 @@ def forward_kinematics(d1, theta2, theta_a1m, theta_a2m, arm=None):
     return r * math.cos(rad), r * math.sin(rad), d1 + z_offset
 
 
-def sample_joint_path(start_j, target_j, arm=None, n=30):
+def sample_joint_path(start_j, target_j, arm=None, n=30, with_z=False):
     """(x, y) mm polyline for linear joint-space move start_j -> target_j,
-    both (d1, rot, a1_motor_deg, a2_motor_deg).
+    both (d1, rot, a1_motor_deg, a2_motor_deg). `with_z=True` gives
+    (x, y, z) with Z above HOME — the lift's own travel — for the 3D board.
 
     Uses SAME per-joint linear interpolation real machine driven with
     (p2p_control._animate_leg: `s + (e - s) * t`) — actual swept path,
@@ -436,6 +437,6 @@ def sample_joint_path(start_j, target_j, arm=None, n=30):
         d1, rot, a1, a2 = (s + (e - s) * t for s, e in zip(start_j, target_j))
         x, y, _z = forward_kinematics(d1, rot, fold_angle_from_motor_deg(a1),
                                       fold_angle_from_motor_deg(a2), arm=arm)
-        pts.append((x, y))
+        pts.append((x, y, d1) if with_z else (x, y))
     return pts
 

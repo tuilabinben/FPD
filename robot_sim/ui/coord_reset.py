@@ -19,7 +19,6 @@ import tkinter as tk
 from ..theme import (
     ACCENT_ORANGE,
     ACCENT_RED,
-    BORDER_SOFT,
     FONT_CAPTION,
     INK_DARK,
     PANEL_BG,
@@ -27,7 +26,7 @@ from ..theme import (
     TEXT_LIGHT,
     TEXT_MUTED,
 )
-from ..widgets import RoundedButton
+from ..widgets import HomeButton, RoundedButton
 
 # "Z"/"ROT"/"A1"/"A2" = wire names in RESET_COORD:<axis>; second element =
 # operator-facing label.
@@ -59,18 +58,9 @@ class CoordResetRowMixin:
             btn.pack(side="left", padx=(0, 5))
             buttons.append(btn)
 
-        # Break before RESET POSITION: unlike the five buttons above, it
-        # actually MOVES the machine (see reset_position() in safety.py) —
-        # others are declare-only, never drive a motor. Red accent + own
-        # gap keep that distinction visible, not blended into a no-move row.
-        tk.Frame(row, width=1, bg=BORDER_SOFT).pack(side="left", fill="y",
-                                                     padx=(8, 8), pady=4)
-        reset_pos_btn = RoundedButton(row, text="RESET POS", icon="⟲",
-                                      bg_color=ACCENT_RED, fg_color=INK_DARK,
-                                      width=118, height=34, radius=10,
-                                      font=FONT_CAPTION, command=self.reset_position)
-        reset_pos_btn.pack(side="left", padx=(0, 5))
-        buttons.append(reset_pos_btn)
+        # RESET POS is NOT in this row any more. Every button here only
+        # DECLARES a position; that one drives the machine, so it sits
+        # beside HOME instead — _build_reset_pos_button() below.
 
         # Extend, never reassign: other panel's row already in here.
         if not hasattr(self, "coord_reset_buttons"):
@@ -79,3 +69,18 @@ class CoordResetRowMixin:
         # Zeroing counter mid-move would record a position already left.
         self.motion_lock_widgets += buttons
         return row
+
+    def _build_reset_pos_button(self, parent, size=56):
+        """RESET POS as a round button, HOME's twin. Returned unplaced: each
+        panel puts it beside its own HOME.
+
+        Red where HOME is mint, because it is the other way to a reference:
+        it drives the machine to 0,0,0,0 under the board's own control
+        (reset_position() in safety.py), no switches consulted. One builder
+        for all four places, for the same reason the row above has one.
+        """
+        btn = HomeButton(parent, command=self.reset_position, size=size,
+                         glyph="⟲", label="RESET\nPOS", accent=ACCENT_RED)
+        # Locked while the machine moves, like HOME.
+        self.motion_lock_widgets.append(btn)
+        return btn

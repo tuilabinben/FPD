@@ -17,6 +17,7 @@ from ..config import (
     SCAN_REDRAW_MS,
     SCAN_TAG_ABORT,
     SCAN_TAG_DONE,
+    SCAN_TAG_RETURN,
     SCAN_TAG_SEEK,
     cmd_scan_sensor,
     cmd_scan_start,
@@ -224,6 +225,11 @@ class ScanControlMixin:
             # RM moving, nothing measured yet. Say so, or it reads as a
             # scan that started and produced nothing.
             self.scan_progress_v.set("Finding the RM switch…")
+        elif text.startswith(SCAN_TAG_RETURN):
+            # The data is complete and the machine is STILL MOVING. Without
+            # this the panel sits on "Layer N/N" looking stuck, and the
+            # scan stays running so STOP is still what stops it.
+            self.scan_progress_v.set("All layers in — returning to the start…")
         elif text.startswith(SCAN_TAG_DONE):
             self._scan_ended("Finished")
             self.status_var.set("READY — scan finished.")

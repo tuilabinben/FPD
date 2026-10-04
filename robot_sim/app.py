@@ -47,7 +47,7 @@ from .core import (
 from .theme import BG
 from .ui import (CoordResetRowMixin, SensorPanelMixin, XYBoardMixin,
                  JogPanelMixin, LayoutMixin, P2PPanelMixin,
-                 ScanPanelMixin, SettingsDialogMixin)
+                 ScanPanelMixin, SettingsDialogMixin, XYZJogMixin)
 
 
 class RobotControlApp(
@@ -67,6 +67,7 @@ class RobotControlApp(
     XYBoardMixin,
     P2PPanelMixin,
     JogPanelMixin,
+    XYZJogMixin,
     ScanPanelMixin,
     SettingsDialogMixin,
 ):
@@ -333,6 +334,12 @@ class RobotControlApp(
         # Jog
         self.jog_active = set()
         self.jog_pads = {}
+        # The jog panel's second layout: keys move the TOOL POINT along
+        # X / Y / Z instead of one motor each. See set_jog_frame().
+        self.jog_frame_mode = "JOINT"
+        self.xjog_arm = "A1M"            # whose tool the XYZ jog moves
+        self._xjog_blocked = set()       # refused keys, until they come up
+        self._xyz_trail = {}             # {arm: where its tool has been}, for the 3D view
         self.arms_linked = False         # LINK toggle, see toggle_arm_link()
         self.boost_index = 0
         self.rot_limit = {"ROT_CW": False, "ROT_CCW": False}

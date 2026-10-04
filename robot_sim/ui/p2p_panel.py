@@ -32,8 +32,9 @@ from ..widgets import HomeButton, RoundedButton, make_coord_card, make_led_card
 
 class P2PPanelMixin:
     def _build_p2p_panel(self, parent):
-        # Left column: Point A stacked above Point B (+ HOME-frame caption /
-        # workspace-hint). Right column: Oxy board, wide open. Used to be a
+        # Left column: Point A stacked above Point B, the arm selector and
+        # the HOME-frame caption. Right column: the 3D board, which takes
+        # ALL the width that is left and sets its own height from it. Used to be a
         # side column squeezed beside two side-by-side point blocks, which
         # clipped the right edge of the workspace circle — annulus must be
         # fully visible or plot is worse than no plot. Stacking A/B left
@@ -53,19 +54,22 @@ class P2PPanelMixin:
         left_col = tk.Frame(split, bg=PANEL_BG)
         left_col.grid(row=0, column=0, sticky="ns")
         right_col = tk.Frame(split, bg=PANEL_BG)
-        # sticky="n", NOT "nsew": column 1 weight=1 so its CELL absorbs all
-        # leftover width (varies with window's own width on resize).
-        # right_col stays exactly board-width, CENTRED in that cell — fixed
-        # padding looked right at one window size, lopsided at another;
-        # centring uses whatever space exists, both sides, any width.
-        right_col.grid(row=0, column=1, sticky="n")
+        # sticky="new": column 1 has weight=1, so its cell absorbs all the
+        # leftover width, and the board FILLS it. It used to sit at a fixed
+        # 560 px, centred — a small picture in a wide empty column on any
+        # scaled display.
+        right_col.grid(row=0, column=1, sticky="new", padx=(16, 0))
 
         # Inputs FIRST: board reads x0_v..y1_v on first paint; building it
         # before they exist draws empty plot.
         self._build_coordinate_inputs(left_col)
-        self._build_xy_board(right_col).pack(side="top", anchor="nw")
+        # The actions sit under the points, beside the board: the board is
+        # taller than the point boxes, and with the buttons in a row of
+        # their own below everything that height was empty — and LOAD / RUN
+        # were a scroll away from the numbers they act on.
+        self._build_p2p_actions(left_col)
+        self._build_xy_board(right_col).pack(side="top", fill="x")
 
-        self._build_arm_selector(parent)
         self._build_computed_targets(parent)
         self._build_telemetry(parent)
         self._build_progress(parent)
@@ -129,8 +133,9 @@ class P2PPanelMixin:
         self.z0_v.trace_add("write", self._refresh_real_heights)
         self.z1_v.trace_add("write", self._refresh_real_heights)
         # Board follows boxes every keystroke, so typed target visible
-        # before LOAD accepts or refuses it.
-        for _v in (self.x0_v, self.y0_v, self.x1_v, self.y1_v):
+        # before LOAD accepts or refuses it. Z too: the board is 3D, and a
+        # point's height is half of where it is.
+        for _v in (self.x0_v, self.y0_v, self.z0_v, self.x1_v, self.y1_v, self.z1_v):
             _v.trace_add("write", lambda *_a: self._refresh_xy_board())
         self._refresh_real_heights()
 
@@ -152,11 +157,16 @@ class P2PPanelMixin:
                  wraplength=_caption_width, justify="left",
                  font=FONT_HINT).pack(anchor="w", pady=(6, 0))
 
-    def _build_arm_selector(self, parent):
+        # In this column, under the points it applies to: the board beside
+        # it is taller than the two point blocks, and a full-width row of
+        # its own left that height empty.
+        self._build_arm_selector(parent, wraplength=_caption_width)
+
+    def _build_arm_selector(self, parent, wraplength=0):
+        tk.Label(parent, text="ARM SELECT", bg=PANEL_BG, fg=TEXT_MUTED,
+                 font=FONT_CAPTION).pack(anchor="w", pady=(14, 4))
         row = tk.Frame(parent, bg=PANEL_BG)
-        row.pack(fill="x", pady=(14, 0))
-        tk.Label(row, text="ARM SELECT:", bg=PANEL_BG, fg=TEXT_MUTED,
-                 font=FONT_CAPTION).pack(side="left", padx=(0, 10))
+        row.pack(anchor="w")
 
         for cfg in ARM_CONFIGS:
             active = cfg == self.arm_config
@@ -165,13 +175,13 @@ class P2PPanelMixin:
                               fg_color=INK_DARK if active else TEXT_LIGHT,
                               width=90, height=32,
                               command=lambda c=cfg: self.set_arm_config(c))
-            b.pack(side="left", padx=4)
+            b.pack(side="left", padx=(0, 8))
             self.arm_buttons[cfg] = b
 
-        tk.Label(row, text="  (A1M / A2M = one arm · BOTH = both at once — the two "
-                           "points must share a bearing and differ only in radius)",
-                 bg=PANEL_BG, fg=TEXT_MUTED,
-                 font=FONT_HINT).pack(side="left")
+        tk.Label(parent, text="A1M / A2M = one arm · BOTH = both at once — the two "
+                              "points must share a bearing and differ only in radius",
+                 bg=PANEL_BG, fg=TEXT_MUTED, wraplength=wraplength, justify="left",
+                 font=FONT_HINT).pack(anchor="w", pady=(4, 0))
 
     def _build_computed_targets(self, parent):
         tk.Label(parent, text="COMPUTED JOINT TARGETS (d1 mm / RM ° / A1M base ° / A2M base °  —  base 0° = retracted, 90° = straight out)",
@@ -242,35 +252,61 @@ class P2PPanelMixin:
         tk.Label(bar_row, textvariable=self.progress_pct_var, bg=PANEL_BG, fg=ACCENT_MINT,
                  font=FONT_MONO, width=5).pack(side="left", padx=(8, 0))
 
-    def _build_p2p_buttons(self, parent):
-        row1 = tk.Frame(parent, bg=PANEL_BG)
-        row1.pack(pady=(18, 6))
-        self.btn_p2p_load = RoundedButton(row1, text="LOAD PARAMETERS", icon="⇩",
-                                          bg_color=SURFACE, fg_color=TEXT_LIGHT,
-                                          width=210, height=44,
-                                          command=self.p2p_load_parameters)
-        self.btn_p2p_load.pack(side="left", padx=6)
-        self.btn_p2p_run = RoundedButton(row1, text="RUN PROGRAM", icon="▶",
-                                         bg_color=ACCENT_GREEN, fg_color=INK_DARK,
-                                         width=190, height=44,
-                                         command=self.p2p_run_program)
-        self.btn_p2p_run.pack(side="left", padx=6)
-        self.p2p_home_btn = HomeButton(row1, command=self.home, size=56)
-        self.p2p_home_btn.pack(side="left", padx=6)
+    #: Width of the stacked action buttons, before DPI scaling: one row of
+    #: three compact coordinate cards, so the column they share stays as
+    #: narrow as the points made it.
+    P2P_ACTION_W = 300
 
-        tk.Label(parent, text="ENTER = RUN PROGRAM · SPACE = E-STOP  "
-                             "(not while a coordinate box has focus)",
-                 bg=PANEL_BG, fg=TEXT_MUTED, font=FONT_HINT).pack()
+    def _build_p2p_actions(self, parent):
+        """LOAD + RESET POS, RUN + HOME and EMERGENCY STOP, stacked in the
+        left column."""
+        box = tk.Frame(parent, bg=PANEL_BG)
+        box.pack(anchor="w", pady=(18, 0))
+        # Two rows of one shape: a wide button and a round one beside it.
+        # RESET POS sits over HOME, so the two that drive the machine to a
+        # reference are together.
+        row = tk.Frame(box, bg=PANEL_BG)
+        row.pack(anchor="w")
+        self.btn_p2p_load = RoundedButton(row, text="LOAD PARAMETERS", icon="⇩",
+                                          bg_color=SURFACE, fg_color=TEXT_LIGHT,
+                                          width=self.P2P_ACTION_W - 64, height=44,
+                                          command=self.p2p_load_parameters)
+        self.btn_p2p_load.pack(side="left")
+        self.p2p_reset_btn = self._build_reset_pos_button(row, size=56)
+        self.p2p_reset_btn.pack(side="left", padx=(8, 0))
+
+        row = tk.Frame(box, bg=PANEL_BG)
+        row.pack(anchor="w", pady=(8, 0))
+        self.btn_p2p_run = RoundedButton(row, text="RUN PROGRAM", icon="▶",
+                                         bg_color=ACCENT_GREEN, fg_color=INK_DARK,
+                                         width=self.P2P_ACTION_W - 64, height=56,
+                                         command=self.p2p_run_program)
+        self.btn_p2p_run.pack(side="left")
+        self.p2p_home_btn = HomeButton(row, command=self.home, size=56)
+        self.p2p_home_btn.pack(side="left", padx=(8, 0))
 
         # Plain STOP button gone by request. EMERGENCY STOP remains: single
         # audited stop path (emergency_stop_all) SPACE also fires — removing
         # STOP lost a duplicate, not ability to halt a running program.
-        row2 = tk.Frame(parent, bg=PANEL_BG)
-        row2.pack(pady=(0, 4))
-        RoundedButton(row2, text="EMERGENCY STOP", icon="⬛", bg_color=ACCENT_RED,
-                      fg_color=INK_DARK, width=240, height=44,
-                      command=self.emergency_stop_all).pack(side="left", padx=6)
+        RoundedButton(box, text="EMERGENCY STOP", icon="⬛", bg_color=ACCENT_RED,
+                      fg_color=INK_DARK, width=self.P2P_ACTION_W, height=44,
+                      command=self.emergency_stop_all).pack(anchor="w", pady=(8, 0))
 
+        # A StringVar: RESET POS's key can be rebound, and this line must
+        # not go on naming the old one. refresh_jog_keycaps() repaints it.
+        self.p2p_hint_v = tk.StringVar(value=self._p2p_hint_text())
+        tk.Label(parent, textvariable=self.p2p_hint_v,
+                 bg=PANEL_BG, fg=TEXT_MUTED, font=FONT_HINT, justify="left",
+                 wraplength=3 * 150).pack(anchor="w", pady=(6, 0))
+
+    @staticmethod
+    def _p2p_hint_text():
+        from .. import keybinds
+        key = keybinds.display_key(keybinds.active_shortcuts()["RESET_POS"])
+        return (f"ENTER = RUN PROGRAM · {key} = RESET POS · SPACE = E-STOP  "
+                "(not while a coordinate box has focus)")
+
+    def _build_p2p_buttons(self, parent):
         # RESET COORDINATES lives here, not Settings: machine action used
         # while jogging to reference; a dialog meant leaving the controls
         # you were using. Each button still confirms before acting. JOG

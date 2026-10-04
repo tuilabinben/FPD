@@ -163,13 +163,8 @@ class SafetyMixin:
             self.log("RESET POSITION ignored — a motion is already running.",
                      tag="warn")
             return
-        if not messagebox.askyesno(
-                "Reset position",
-                "Drive the machine to (0,0,0,0) under its own motor control?\n\n"
-                "This is NOT the PLC HOME cycle — it does not wait for the PLC, "
-                "and it skips the M30..M32 limit block a normal P2P leg respects. "
-                "Taught soft limits still apply.\n\nContinue?"):
-            return
+        # NO CONFIRMATION, removed on request: one press and it goes, like
+        # HOME. What takes it back is E-STOP (SPACE), which is not locked.
 
         self._release_all_jog_axes()
         self._cancel_job("anim_job")

@@ -6,8 +6,9 @@ comfort depends on the hands using it.
 Still enforced, only things that'd leave app broken rather than merely unusual:
   * every jog action must be bound, or axis unreachable from keyboard w/ no indication why
   * no key drives two actions, same reason
-  * SPACE, ESC, BackSpace, Return reserved — losing e-stop/settings/HOME/RUN PROGRAM to a
-    rebind not a trade worth offering
+  * SPACE, ESC, Return reserved — losing e-stop/settings/RUN PROGRAM to a rebind not a
+    trade worth offering
+  * RESET POS and HOME have a key each, rebindable, that no jog layout may also hold
 
 Everything else allowed.
 
@@ -37,25 +38,42 @@ JOG_ACTIONS = (
     ("Z_DOWN",  "ZM — lift down",  "ZM"),
 )
 ACTION_ORDER = tuple(a[0] for a in JOG_ACTIONS)
-ACTION_LABEL = {a[0]: a[1] for a in JOG_ACTIONS}
+
+#: The XYZ jog's OWN layout: the tool point along Cartesian axes instead of one motor each.
+#: A separate map, not six more rows in the one above — only one of the two jog layouts is
+#: live at a time (the JOINT / XYZ switch on the jog panel), so they may share keys, and by
+#: default they do: W/S/A/D mean one thing on a motor and another on the tool.
+XYZ_ACTIONS = (
+    ("X_NEG", "XYZ — X −", "X"),
+    ("X_POS", "XYZ — X +", "X"),
+    ("Y_POS", "XYZ — Y +", "Y"),
+    ("Y_NEG", "XYZ — Y −", "Y"),
+    ("Z_POS", "XYZ — Z + (up)", "Z"),
+    ("Z_NEG", "XYZ — Z − (down)", "Z"),
+)
+XYZ_ORDER = tuple(a[0] for a in XYZ_ACTIONS)
+
+#: Two keys that are not jog axes: one press, one action. Rebindable — asked for. Unlike the
+#: two jog layouts they are live whichever layout is, so they may share a key with NEITHER.
+SHORTCUT_ACTIONS = (
+    ("RESET_POS", "RESET POS — drive to 0,0,0,0", "KEYS"),
+    ("HOME", "HOME", "KEYS"),
+)
+SHORTCUT_ORDER = tuple(a[0] for a in SHORTCUT_ACTIONS)
+
+ACTION_LABEL = {a[0]: a[1] for a in JOG_ACTIONS + XYZ_ACTIONS + SHORTCUT_ACTIONS}
 
 #: Reserved — do something else, may not be taken by jog axis.
 #: KEYS MUST BE TK KEYSYMS, spelled exactly as Tk reports them — that's what captured keypress
 #: compared against. Tk backspace keysym is "BackSpace" capital S; "backspace" matches nothing,
 #: key looks reserved in settings list while jog axis can still bind to it.
-#: HOME is BackSpace, not H — H is a letter operator may want for jog axis; homing shouldn't
-#: trigger by leaning on a letter key.
+#: HOME is NOT in here any more. It was reserved on BackSpace; BackSpace was asked for as
+#: RESET POS, rebindable, so both became shortcuts (DEFAULT_SHORTCUTS) and HOME moved.
 RESERVED_KEYS = {
     "space": "Emergency stop",
     "Escape": "Open / close Settings",
-    "BackSpace": "HOME",
     "Return": "RUN PROGRAM (P2P)",
 }
-
-#: Single source of truth for key that starts homing cycle. Reservation above and binding in
-#: core/keyboard.py both read it so they can't drift apart — they had: RESERVED_KEYS said
-#: backspace while binder still listened for "h".
-HOME_KEY = "BackSpace"
 
 #: How a key is shown on screen.
 KEY_DISPLAY = {
@@ -82,21 +100,33 @@ DEFAULT_KEYMAP = {
     "Z_UP":    "w", "Z_DOWN":  "s",
 }
 
+#: W/S = Y · A/D = X · R/F = Z, as asked for.
+DEFAULT_XYZ_KEYMAP = {
+    "Y_POS": "w", "Y_NEG": "s",
+    "X_NEG": "a", "X_POS": "d",
+    "Z_POS": "r", "Z_NEG": "f",
+}
 
-def validate(keymap):
+#: BackSpace = RESET POS, as asked for. HOME had BackSpace and went to the Home key: not H,
+#: a letter an axis may want and one too easy to lean on.
+DEFAULT_SHORTCUTS = {"RESET_POS": "BackSpace", "HOME": "Home"}
+
+
+def validate(keymap, order=ACTION_ORDER):
     """Returns list of errors. Empty means layout usable.
 
     Only conditions leaving axis unreachable or stealing reserved key count. Nothing stylistic
-    — merely-unusual layout is just applied.
+    — merely-unusual layout is just applied. `order` is the layout being checked: the joint
+    one by default, XYZ_ORDER for the XYZ jog's.
     """
     errors = []
 
-    missing = [ACTION_LABEL[a] for a in ACTION_ORDER if not keymap.get(a)]
+    missing = [ACTION_LABEL[a] for a in order if not keymap.get(a)]
     if missing:
         errors.append("Not bound: " + ", ".join(missing))
 
     seen = {}
-    for action in ACTION_ORDER:
+    for action in order:
         key = keymap.get(action)
         if not key:
             continue
@@ -108,6 +138,19 @@ def validate(keymap):
                           f"{ACTION_LABEL[seen[key]]} and {ACTION_LABEL[action]}.")
         else:
             seen[key] = action
+    return errors
+
+
+def validate_shortcuts(shortcuts, *jog_layouts):
+    """validate(), plus: a shortcut may not sit on a key ANY jog layout holds. The two jog
+    layouts share keys because only one is bound at a time; a shortcut is bound in both."""
+    errors = validate(shortcuts, SHORTCUT_ORDER)
+    for layout in jog_layouts:
+        for action, key in layout.items():
+            for mine in SHORTCUT_ORDER:
+                if key and shortcuts.get(mine) == key:
+                    errors.append(f"{display_key(key)} is bound to both "
+                                  f"{ACTION_LABEL[mine]} and {ACTION_LABEL[action]}.")
     return errors
 
 
@@ -128,44 +171,79 @@ def to_hint(keymap):
     return (f"{pair('ROT_CCW', 'ROT_CW')} = RM · "
             f"{pair('A1_FWD', 'A1_BACK')} = A1M · "
             f"{pair('A2_FWD', 'A2_BACK')} = A2M · "
-            f"{pair('Z_UP', 'Z_DOWN')} = ZM · {display_key(HOME_KEY)} = HOME")
+            f"{pair('Z_UP', 'Z_DOWN')} = ZM")
+
+
+def to_xyz_hint(keymap):
+    """The same line for the XYZ jog's layout."""
+    def pair(a, b):
+        return f"{display_key(keymap.get(a, '?'))}/{display_key(keymap.get(b, '?'))}"
+    return (f"{pair('X_NEG', 'X_POS')} = X · {pair('Y_POS', 'Y_NEG')} = Y · "
+            f"{pair('Z_POS', 'Z_NEG')} = Z")
+
+
+def to_shortcut_hint(shortcuts):
+    """The two one-press keys, for the end of either line above."""
+    return (f"{display_key(shortcuts.get('RESET_POS', '?'))} = RESET POS · "
+            f"{display_key(shortcuts.get('HOME', '?'))} = HOME")
 
 
 _active = None
+_active_xyz = None
+_active_shortcuts = None
 
 
-def load():
-    """Saved layout, or default.
+def _layout(data, order, default):
+    """One layout out of the file, or its default WHOLE."""
+    candidate = {a: str(data[a]) for a in order if data.get(a)}
+    if len(candidate) == len(order) and not validate(candidate, order):
+        return candidate
+    return dict(default)
 
-    Never raises. Corrupt/incomplete file discarded whole, default used instead — merging
+
+def _load_both():
+    """Saved layouts, or defaults.
+
+    Never raises. Corrupt/incomplete layout discarded whole, default used instead — merging
     partial file puts some axes on your keys, others on defaults, harder to spot than clean
-    revert.
+    revert. The layouts fall back SEPARATELY: a file written before the XYZ jog (or the
+    shortcuts) existed has none of those keys, and that must not cost the operator their
+    joint layout.
     """
-    global _active
-    if _active is not None:
-        return dict(_active)
+    global _active, _active_xyz, _active_shortcuts
+    if None not in (_active, _active_xyz, _active_shortcuts):
+        return
     try:
         with open(KEYBINDS_FILE, "r", encoding="utf-8") as fh:
             data = json.load(fh)
-        candidate = {a: str(data[a]) for a in ACTION_ORDER if data.get(a)}
-        if len(candidate) == len(ACTION_ORDER) and not validate(candidate):
-            _active = candidate
-        else:
-            _active = dict(DEFAULT_KEYMAP)
+        if not isinstance(data, dict):
+            data = {}
     except Exception:
-        _active = dict(DEFAULT_KEYMAP)
+        data = {}
+    _active = _layout(data, ACTION_ORDER, DEFAULT_KEYMAP)
+    _active_xyz = _layout(data, XYZ_ORDER, DEFAULT_XYZ_KEYMAP)
+    _active_shortcuts = _layout(data, SHORTCUT_ORDER, DEFAULT_SHORTCUTS)
+
+
+def load():
+    _load_both()
     return dict(_active)
 
 
-def save(keymap):
-    """Persists a layout. Returns False (and writes nothing) if invalid."""
-    global _active
-    if validate(keymap):
+def save(keymap, xyz_keymap=None, shortcuts=None):
+    """Persists the joint layout, and the XYZ one and the shortcuts with it when given (else
+    the ones in use stay). One file holds all three. Returns False (and writes nothing) if
+    any is invalid — including a shortcut on a key a jog layout holds."""
+    global _active, _active_xyz, _active_shortcuts
+    _load_both()
+    xyz = _active_xyz if xyz_keymap is None else xyz_keymap
+    keys = _active_shortcuts if shortcuts is None else shortcuts
+    if validate(keymap) or validate(xyz, XYZ_ORDER) or validate_shortcuts(keys, keymap, xyz):
         return False
-    _active = dict(keymap)
+    _active, _active_xyz, _active_shortcuts = dict(keymap), dict(xyz), dict(keys)
     try:
         with open(KEYBINDS_FILE, "w", encoding="utf-8") as fh:
-            json.dump(_active, fh, indent=2)
+            json.dump({**_active, **_active_xyz, **_active_shortcuts}, fh, indent=2)
     except OSError:
         return False
     return True
@@ -173,3 +251,13 @@ def save(keymap):
 
 def active_map():
     return load()
+
+
+def active_xyz_map():
+    _load_both()
+    return dict(_active_xyz)
+
+
+def active_shortcuts():
+    _load_both()
+    return dict(_active_shortcuts)

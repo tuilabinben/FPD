@@ -32,6 +32,17 @@ os.makedirs(TMP, exist_ok=True)
 C.SETTINGS_FILE = os.path.join(TMP, "settings.json")
 C.LIMIT_PRESETS_FILE = os.path.join(TMP, "presets.json")
 
+# THE OPERATOR'S COLOUR SCHEME MUST NOT DECIDE A TEST. theme.py binds its
+# colours on import, from appearance.json -- the REAL one, until this. Switching
+# the app to "mint" turned two board checks red: there the +X axis and the A->B
+# chord are the same colour, and the checks find the chord by colour. So the
+# file points at TMP, and is removed, BEFORE anything imports the theme.
+import robot_sim.palettes as PAL
+assert "robot_sim.theme" not in sys.modules, "theme imported before the palette redirect"
+PAL.PALETTE_FILE = os.path.join(TMP, "appearance.json")
+if os.path.exists(PAL.PALETTE_FILE):
+    os.remove(PAL.PALETTE_FILE)
+
 import tkinter as tk
 from tkinter import messagebox
 import robot_sim.ui.settings_dialog as SD
@@ -394,7 +405,9 @@ check(_sent[-1] == f"SET_SPEED:{C.MASTER_RPM:g},{C.MASTER_ACC_RPM_S:g},75,125,50
       "SET_SPEED appends the 3 accel percentages after the original 5, in order")
 check(len(app._limit_vars) == len(C.LIMIT_FIELDS), "the Boundaries tab built all 8")
 check(len(app._pid_vars) == len(C.PID_FIELDS), "the PID tab built all 4 gains")
-check(len(app._kb_draft) == len(KB.ACTION_ORDER), "the Controls tab built all 8 rows")
+check(set(app._kb_rows) == set(KB.ACTION_ORDER) | set(KB.XYZ_ORDER) | set(KB.SHORTCUT_ORDER),
+      "the Controls tab built all 16 rows — 8 joint keys, the XYZ jog's 6, and the "
+      "RESET POS and HOME shortcuts")
 
 print("\n  -- SET HERE captures the live A1M_POS --")
 app.sim_a1 = 37.5
@@ -452,6 +465,65 @@ messagebox.CALLS.clear(); REBOUND[0] = CAPS[0] = 0
 app._apply_keybinds()
 check(not [c for c in messagebox.CALLS if c[0] == "ask"], "APPLY never asks")
 check(REBOUND[0] == 1 and CAPS[0] == 1, "  ...it rebinds and repaints, no restart")
+
+print("\n  -- the XYZ jog has its OWN layout, set in the same tab --")
+check(KB.DEFAULT_XYZ_KEYMAP == {"Y_POS": "w", "Y_NEG": "s", "X_NEG": "a", "X_POS": "d",
+                                "Z_POS": "r", "Z_NEG": "f"},
+      "defaults as asked: W/S = Y, A/D = X, R/F = Z")
+check(not KB.validate(KB.DEFAULT_XYZ_KEYMAP, KB.XYZ_ORDER)
+      and set(KB.DEFAULT_XYZ_KEYMAP.values()) & set(KB.DEFAULT_KEYMAP.values()),
+      "  ...valid, though it SHARES keys with the joint layout — only one is live")
+check(KB.active_map()["Z_UP"] == "p" and KB.active_xyz_map() == KB.DEFAULT_XYZ_KEYMAP,
+      "  ...and applying the joint layout above left it on its defaults")
+_joint_before = dict(app._kb_draft)
+app._begin_capture("Z_POS"); app._on_capture_key(Ev("a"))        # A is X_NEG, and ROT_CCW
+check(app._kb_draft["Z_POS"] == "a" and app._kb_draft["X_NEG"] == "r"
+      and app._kb_draft["ROT_CCW"] == _joint_before["ROT_CCW"],
+      "a swap stays INSIDE the XYZ layout: the joint key on the same letter is untouched")
+app._begin_capture("X_POS"); app._on_capture_key(Ev("space"))
+check(app._kb_capturing == "X_POS", "  ...reserved keys are refused here too")
+app._on_capture_key(Ev("Escape"))
+app._apply_keybinds()
+check(KB.active_xyz_map()["Z_POS"] == "a" and KB.active_map() == app._kb_layouts()[0],
+      "APPLY saves both layouts")
+KB._active = KB._active_xyz = None
+check(KB.active_xyz_map()["Z_POS"] == "a" and KB.active_map()["Z_UP"] == "p",
+      "  ...to keybinds.json, and both come back from it")
+import json as _json
+with open(KB.KEYBINDS_FILE, "w", encoding="utf-8") as _fh:
+    _json.dump(KB.active_map(), _fh)                 # a file from before the XYZ jog
+KB._active = KB._active_xyz = None
+check(KB.active_map()["Z_UP"] == "p" and KB.active_xyz_map() == KB.DEFAULT_XYZ_KEYMAP,
+      "a keybinds.json with no XYZ keys keeps its joint layout and defaults the rest")
+app._default_keybinds()
+check(app._kb_layouts() == (KB.DEFAULT_KEYMAP, KB.DEFAULT_XYZ_KEYMAP, KB.DEFAULT_SHORTCUTS),
+      "DEFAULTS resets every layout")
+app._apply_keybinds()
+
+print("\n  -- RESET POS and HOME: a key each, rebindable, shared with no jog axis --")
+app._begin_capture("RESET_POS"); app._on_capture_key(Ev("Delete"))
+check(app._kb_draft["RESET_POS"] == "Delete" and not app._kb_errors(),
+      "RESET POS takes a new key like any row")
+app._begin_capture("RESET_POS"); app._on_capture_key(Ev("Home"))
+check(app._kb_draft["RESET_POS"] == "Home" and app._kb_draft["HOME"] == "Delete",
+      "  ...and taking HOME's key SWAPS the two")
+_draft = dict(app._kb_draft)
+app._begin_capture("HOME"); app._on_capture_key(Ev("w"))          # W is Z_UP and Y_POS
+check(app._kb_draft["Z_UP"] == "w" and app._kb_draft["Y_POS"] == "w"
+      and any("bound to both" in e for e in app._kb_errors()),
+      "a shortcut on a jog key is an ERROR, not a swap — no axis is moved off its key")
+_showerror = SD.messagebox.showerror
+SD.messagebox.showerror = lambda *a, **k: None
+app._apply_keybinds()
+SD.messagebox.showerror = _showerror
+check(KB.active_shortcuts() == KB.DEFAULT_SHORTCUTS, "  ...and APPLY refuses it")
+app._kb_draft = _draft
+app._apply_keybinds()
+KB._active = None
+check(KB.active_shortcuts() == {"RESET_POS": "Home", "HOME": "Delete"},
+      "a valid pair is saved to keybinds.json and comes back from it")
+app._default_keybinds()
+app._apply_keybinds()
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1080,11 +1152,12 @@ check(abs(fold_angle_to_reach(0.0) - C.ARM_MIN_REACH_MM) < 0.05
 
 
 # ══════════════════════════════════════════════════════════════════════
-print("\n=== 16. HOME is on BACKSPACE, and the binding matches the reservation ===")
-check(KB.HOME_KEY == "BackSpace", "HOME_KEY is the Tk keysym BackSpace")
-check(KB.HOME_KEY in KB.RESERVED_KEYS,
-      "  ...and that exact keysym is the one that is RESERVED")
-check(KB.RESERVED_KEYS[KB.HOME_KEY] == "HOME", "  ...reserved AS home")
+print("\n=== 16. RESET POS is on BACKSPACE, HOME on the Home key, and the binding matches ===")
+check(KB.DEFAULT_SHORTCUTS == {"RESET_POS": "BackSpace", "HOME": "Home"},
+      "BACKSPACE is RESET POS as asked for; HOME moved to the Home key")
+check(not hasattr(KB, "HOME_KEY") and "BackSpace" not in KB.RESERVED_KEYS
+      and "Home" not in KB.RESERVED_KEYS,
+      "  ...and neither is reserved: both are rebindable shortcuts now")
 check("h" not in KB.RESERVED_KEYS and "H" not in KB.RESERVED_KEYS,
       "H is no longer reserved, so a jog axis may use it")
 # The bug this pins: RESERVED_KEYS said backspace while core/keyboard.py
@@ -1092,16 +1165,30 @@ check("h" not in KB.RESERVED_KEYS and "H" not in KB.RESERVED_KEYS,
 # one keypress could jog an axis AND start a homing cycle.
 src_kbd = open(os.path.join(os.path.dirname(HERE), "robot_sim", "core",
                             "keyboard.py"), encoding="utf-8").read()
-check('bind_all(f"<KeyPress-{keybinds.HOME_KEY}>"' in src_kbd,
-      "the binder reads HOME_KEY instead of a literal")
+check("keybinds.active_shortcuts()" in src_kbd and "BackSpace>" not in src_kbd,
+      "the binder reads the live shortcuts instead of a literal")
 check('for k in ("h", "H"):' not in src_kbd, "  ...and no longer binds h/H")
 check(KB.display_key("BackSpace") == "BKSP", "it draws as BKSP on the pads")
-check("BKSP = HOME" in KB.to_hint(KB.DEFAULT_KEYMAP),
-      "  ...and the hint line under the pads says BKSP, not H")
-# Binding a jog axis to backspace must be refused.
+check(KB.to_shortcut_hint(KB.DEFAULT_SHORTCUTS) == "BKSP = RESET POS · Home = HOME",
+      "  ...and the hint lines name both keys")
+check(not KB.validate_shortcuts(KB.DEFAULT_SHORTCUTS, KB.DEFAULT_KEYMAP,
+                                KB.DEFAULT_XYZ_KEYMAP),
+      "the defaults clash with neither jog layout")
+# A shortcut is live in BOTH jog layouts, so no axis of either may hold its key.
 res = dict(KB.DEFAULT_KEYMAP); res["Z_UP"] = "BackSpace"
-check(any("reserved" in x for x in KB.validate(res)),
-      "a jog axis cannot take BackSpace")
+check(any("bound to both" in x for x in KB.validate_shortcuts(
+          KB.DEFAULT_SHORTCUTS, res, KB.DEFAULT_XYZ_KEYMAP)) and not KB.save(res),
+      "a jog axis cannot take the RESET POS key, and such a layout is not saved")
+xres = dict(KB.DEFAULT_XYZ_KEYMAP); xres["Z_POS"] = "Home"
+check(any("bound to both" in x for x in KB.validate_shortcuts(
+          KB.DEFAULT_SHORTCUTS, KB.DEFAULT_KEYMAP, xres)),
+      "  ...nor an XYZ axis the HOME key")
+check(any("reserved" in x for x in KB.validate_shortcuts(
+          {"RESET_POS": "space", "HOME": "Home"})),
+      "  ...and a shortcut cannot take SPACE, ESC or ENTER either")
+check(any("bound to both" in x for x in KB.validate_shortcuts(
+          {"RESET_POS": "Home", "HOME": "Home"})),
+      "  ...or the other shortcut's key")
 # Sanity: every reserved key is spelled as a real Tk keysym, i.e. it is
 # either a known display name or a plain single character.
 odd = [k for k in KB.RESERVED_KEYS
@@ -1212,8 +1299,10 @@ class RP(SF.SafetyMixin, PR2.ProtocolMixin):
 
 import unittest.mock as _mock
 rp = RP()
-with _mock.patch.object(messagebox, "askyesno", return_value=True):
+# The pop-up was removed on request. A "No" here would stop it if it were asked.
+with _mock.patch.object(messagebox, "askyesno", return_value=False) as _ask:
     rp.reset_position()
+check(not _ask.called, "reset_position() asks nothing — the confirmation pop-up is gone")
 check("RESET_POSITION" in rp.sent, "reset_position() sends RESET_POSITION on the wire")
 check(rp.motion_locked, "  ...and locks motion like home() does")
 check(not hasattr(rp, "is_homing") or not getattr(rp, "is_homing", False),
@@ -1275,15 +1364,25 @@ check("command=self.reset_coordinates" not in src_sd,
       "  ...nothing in the dialog still calls reset_coordinates")
 check("moved to section 3" in src_sd, "  ...with a note saying where they went")
 
-print("\n  -- RESET POSITION rides the same shared row --")
-check("command=self.reset_position" in src_cr,
-      "the row also builds a RESET POSITION button")
-check("reset_pos_btn" in src_cr and "buttons.append(reset_pos_btn)" in src_cr,
-      "  ...tracked in the same buttons list, so it locks and is counted too")
-# Visually distinct: it MOVES the machine, unlike the other five buttons
-# in this row, which only declare a position.
-check("ACCENT_RED" in src_cr.split('text="RESET POS"')[1][:200],
-      "  ...styled distinctly (red), not blended into the no-move buttons")
+print("\n  -- RESET POS is a round button beside HOME, on every panel --")
+check('text="RESET POS"' not in src_cr,
+      "it is out of the RESET COORDINATES row: those only declare, this one moves")
+_rp_src = src_cr.split("def _build_reset_pos_button")[1]
+check("HomeButton(" in _rp_src and "command=self.reset_position" in _rp_src,
+      "one shared builder makes it, as HOME's round twin")
+check("self.motion_lock_widgets.append(btn)" in _rp_src,
+      "  ...locked during a move, like HOME")
+# Visually distinct: red where HOME is mint.
+check("accent=ACCENT_RED" in _rp_src, "  ...styled distinctly (red)")
+for _name, _file in (("P2P", "p2p_panel.py"), ("JOYSTICK / JOINT", "jog_panel.py"),
+                     ("JOYSTICK / XYZ", "xyz_jog.py"), ("SCAN", "scan_panel.py")):
+    check("self._build_reset_pos_button(" in open(os.path.join(_uidir, _file),
+                                                  encoding="utf-8").read(),
+          "  ...and %s builds it from that builder" % _name)
+_load_row = src_p2p.split("def _build_p2p_actions")[1].split("row = tk.Frame")[1]
+check("LOAD PARAMETERS" in _load_row and "_build_reset_pos_button(row, size=56)" in _load_row
+      and "HomeButton(row, command=self.home, size=56)" in src_p2p,
+      "in P2P it shares LOAD PARAMETERS' row, the same 56 px as HOME under it")
 
 
 
@@ -1808,8 +1907,9 @@ check("SET_ROT_RATIO" in fw,
 
 
 # ══════════════════════════════════════════════════════════════════════
-print("\n=== 22. the Oxy workspace board ===")
+print("\n=== 22. the P2P workspace board, in 3D ===")
 import robot_sim.ui.xy_board as XB
+import robot_sim.ui.view3d as V3
 
 class Board(XB.XYBoardMixin):
     """Only what the board reads: the entry vars, the shared pose and the
@@ -1819,6 +1919,8 @@ class Board(XB.XYBoardMixin):
         self.y0_v = tk.StringVar(value="0")
         self.x1_v = tk.StringVar(value="250")
         self.y1_v = tk.StringVar(value="250")
+        self.z0_v = tk.StringVar(value="45")
+        self.z1_v = tk.StringVar(value="135")
         self.current_joints = [0.0, 0.0, 0.0, 0.0]
         self.arm_config = "A1M"
         self.xy_hint_v = tk.StringVar()
@@ -1829,38 +1931,89 @@ class Board(XB.XYBoardMixin):
 
 b = Board(); b._refresh_xy_board()
 kinds = [i[0] for i in b.xy_canvas.items]
-check(kinds.count("oval") >= 4,
-      "the annulus, HOME and the live dot are drawn")
-check(XB.BOARD_PX >= 360,
-      "the board is big enough to read (%d px)" % XB.BOARD_PX)
+check(kinds.count("oval") >= 6,
+      "HOME, A, B, their floor shadows and the live tool are drawn")
 _rings = [t for t in [i[2].get("text") for i in b.xy_canvas.items if i[0] == "text"]
           if t in ("200", "300", "400", "500", "600")]
-check(len(_rings) >= 4, "radius rings are drawn and labelled in mm")
+check(len(_rings) >= 4, "floor rings are drawn and labelled in mm")
 check(all(C.ARM_MIN_REACH_MM < float(t) < C.ARM_MAX_REACH_MM for t in _rings),
       "  ...and only rings inside the reachable annulus")
-check("arc" in kinds, "the unreachable RM wedge is drawn")
+from robot_sim.theme import ACCENT_CYAN, ACCENT_RED as _RED
+check(any(i[0] == "line" and i[2].get("fill") == _RED and i[2].get("width") == 2
+          and len(i[1]) > 8 for i in b.xy_canvas.items),
+      "the unreachable RM wedge is drawn")
 texts = [i[2].get("text") for i in b.xy_canvas.items if i[0] == "text"]
 check("A" in texts and "B" in texts, "A and B are labelled")
 check("HOME" in texts, "  ...and so is HOME")
-check("RM 0°" in texts, "  ...and RM 0 is marked, since the whole frame hangs off it")
-from robot_sim.theme import ACCENT_CYAN
+check(any(t.startswith("+X") for t in texts) and any(t.startswith("+Z") for t in texts),
+      "  ...and the axes, Z included — the board is 3D")
 check(any(i[0] == "line" and i[2].get("fill") == ACCENT_CYAN
           for i in b.xy_canvas.items),
       "the A→B chord is drawn")
 
-print("\n  -- the scale is FIXED, so two runs can be compared by eye --")
-_cx, _cy, _k = b._xy_scale()
-b.x0_v.set("600"); b._refresh_xy_board()
-check(b._xy_scale() == (_cx, _cy, _k),
-      "moving a point does not rescale the plot")
-check(abs(_k * C.ARM_MAX_REACH_MM - (XB.BOARD_PX / 2.0 - XB.BOARD_PAD)) < 1e-9,
-      "  ...and the full outer reach always fits")
+print("\n  -- Z is ON the board now: a point stands at its height --")
+check(b._xy_heights() == (45.0, 135.0), "the heights come from the Z boxes")
+_w, _h = b._xy_size()
+_chord = next(i[1] for i in b.xy_canvas.items
+              if i[0] == "line" and i[2].get("fill") == ACCENT_CYAN)
+_want = (V3.xyz_project(300, 0, 45, _w, _h, XB.px(XB.BOARD_PAD))
+         + V3.xyz_project(250, 250, 135, _w, _h, XB.px(XB.BOARD_PAD)))
+check(all(abs(a - e) < 1e-6 for a, e in zip(_chord, _want)),
+      "the chord runs between A and B AT THEIR HEIGHTS, not across the floor")
+b.z1_v.set("0"); b._refresh_xy_board()
+_chord0 = next(i[1] for i in b.xy_canvas.items
+               if i[0] == "line" and i[2].get("fill") == ACCENT_CYAN)
+check(_chord0[3] > _chord[3], "  ...lowering B's Z moves B down the screen")
+for bad, want in (("", C.D1_MIN_MM), ("-", C.D1_MIN_MM), ("9999", C.D1_MAX_MM)):
+    b.z1_v.set(bad)
+    try:
+        b._refresh_xy_board(); _ok = True
+    except Exception:
+        _ok = False
+    check(_ok and b._xy_heights()[1] == want,
+          "a Z of %r draws at %g — the point's X/Y is still worth seeing" % (bad, want))
+b.z1_v.set("135")
 
-print("\n  -- screen Y is inverted, and RM 0 is +X --")
-_px, _py = b._xy_to_px(100.0, 0.0)
-check(_px > _cx and abs(_py - _cy) < 1e-9, "+X plots to the right")
-_px2, _py2 = b._xy_to_px(0.0, 100.0)
-check(_py2 < _cy, "  ...and +Y plots UP, not down")
+print("\n  -- the scale follows the CANVAS, never the points --")
+_o = V3.xyz_project(0, 0, 0, _w, _h, XB.px(XB.BOARD_PAD))
+b.x0_v.set("600"); b._refresh_xy_board()
+check(b._xy_size() == (_w, _h)
+      and V3.xyz_project(0, 0, 0, *b._xy_size(), XB.px(XB.BOARD_PAD)) == _o,
+      "moving a point does not reframe the picture")
+_ring = [V3.xyz_project(C.ARM_MAX_REACH_MM * math.cos(math.radians(a)),
+                        C.ARM_MAX_REACH_MM * math.sin(math.radians(a)), z, _w, _h, 20)
+         for a in range(0, 360, 5) for z in (0.0, C.D1_MAX_MM)]
+check(all(20 - 1e-6 <= x <= _w - 20 + 1e-6 and 20 - 1e-6 <= y <= _h - 20 + 1e-6
+          for x, y in _ring),
+      "  ...and the whole reach ring at every lift height always fits")
+
+print("\n  -- it FILLS its column instead of sitting at a fixed size --")
+class _Ev:
+    def __init__(self, w): self.width = w
+b._xy_board_h = XB.px(XB.BOARD_MIN_H)
+_cfg = []
+b.xy_canvas.configure = lambda **kw: _cfg.append(kw)
+b._on_xy_board_resize(_Ev(680))
+check(_cfg == [{"height": int(680 / V3.VIEW_ASPECT)}]
+      and XB.px(XB.BOARD_MIN_H) < _cfg[0]["height"] < XB.px(XB.BOARD_MAX_H),
+      "a wider column gives the board the height that suits it")
+b.xy_canvas.items = []
+b._on_xy_board_resize(_Ev(680))
+check(len(_cfg) == 1 and b.xy_canvas.items,
+      "  ...and the repeat <Configure> at that height redraws, it does not loop")
+b._on_xy_board_resize(_Ev(5000))
+check(_cfg[-1] == {"height": XB.px(XB.BOARD_MAX_H)},
+      "  ...capped, so a very wide window does not push the rest off screen")
+b._on_xy_board_resize(_Ev(10))
+check(_cfg[-1] == {"height": XB.px(XB.BOARD_MIN_H)}, "  ...and floored")
+
+print("\n  -- +X runs right, +Y away, +Z up --")
+_px, _py = V3.xyz_project(100.0, 0.0, 0.0, _w, _h, 20)
+_o = V3.xyz_project(0.0, 0.0, 0.0, _w, _h, 20)
+check(_px > _o[0], "+X plots to the right")
+check(V3.xyz_project(0.0, 100.0, 0.0, _w, _h, 20)[1] < _o[1],
+      "  ...+Y plots up the screen (away), not down")
+check(V3.xyz_project(0.0, 0.0, 100.0, _w, _h, 20)[1] < _o[1], "  ...and +Z straight up")
 
 print("\n  -- it never raises on input the operator is still typing --")
 for bad in ("", "-", "abc", "1e", ",", "-."):
@@ -1878,9 +2031,93 @@ b2 = Board()
 b2.current_joints[1] = 90.0                      # RM 90 -> straight along +Y
 b2.current_joints[2] = C.ARM_GEAR_RATIO * 60.0   # fold 60
 _r60 = K.fold_angle_to_reach(60.0)
-lx, ly = b2._xy_live_point()
-check(abs(lx) < 1e-6 and abs(ly - _r60) < 0.1,
-      "the dot follows current_joints (RM 90°, R %.2f mm)" % _r60)
+b2.current_joints[0] = 70.0                      # lift 70 mm above HOME
+lx, ly, lz = b2._xy_live_point()
+check(abs(lx) < 1e-6 and abs(ly - _r60) < 0.1 and lz == 70.0,
+      "the dot follows current_joints (RM 90°, R %.2f mm, Z 70)" % _r60)
+
+print("\n  -- the view MOVES: drag turns it, the wheel zooms, RESET VIEW goes back --")
+_v = V3.View()
+_proj = lambda *p: V3.xyz_project(*p, 800, 600, 26, _v)
+check(_v.standard and _proj(300, 0, 45) == V3.xyz_project(300, 0, 45, 800, 600, 26),
+      "a fresh View is the standard one, to the pixel")
+_o0 = _proj(0, 0, 0)
+_v.orbit(100, 0)
+check(abs(_v.az - (V3.VIEW_AZ_DEG + 100 * V3.VIEW_DRAG_DEG_PER_PX)) < 1e-9
+      and _v.el == V3.VIEW_EL_DEG and not _v.standard,
+      "a drag ACROSS turns the view about Z and leaves the tilt alone")
+check(_proj(0, 0, 0) == _o0 and _proj(300, 0, 45) != V3.xyz_project(300, 0, 45, 800, 600, 26),
+      "  ...about the turntable axis, which stays where it was")
+_v.orbit(0, 10000)
+_ring90 = [_proj(C.ARM_MAX_REACH_MM * math.cos(math.radians(a)),
+                 C.ARM_MAX_REACH_MM * math.sin(math.radians(a)), z)
+           for a in range(0, 360, 5) for z in (0.0, C.D1_MAX_MM)]
+_o90 = _proj(0, 0, 0)
+check(_v.el == V3.VIEW_EL_MAX_DEG == 90.0
+      and all(abs(a - e) < 1e-6 for a, e in zip(_proj(0, 0, C.D1_MAX_MM), _o90))
+      and abs(math.dist(_proj(300, 0, 0), _o90) - math.dist(_proj(0, 300, 0), _o90)) < 1e-6,
+      "a drag DOWN tips it to straight overhead and stops: the old Oxy plot, Z end-on")
+check(all(26 - 1e-6 <= x <= 800 - 26 + 1e-6 and 26 - 1e-6 <= y <= 600 - 26 + 1e-6
+          for x, y in _ring90),
+      "  ...where the whole reach ring still fits -- the scale follows the tilt")
+_v.orbit(0, -10000)
+check(_v.el == V3.VIEW_EL_MIN_DEG > 0, "a drag UP stops short of side-on")
+_v.orbit(1e6, 0)
+check(-180.0 <= _v.az < 180.0, "the azimuth wraps instead of growing")
+_v.reset()
+_pin, _other = _proj(250, 250, 135), _proj(300, 0, 45)
+_v.zoom_at(2.0, *_pin, 800, 600, 26)
+check(_v.zoom == 2.0 and all(abs(a - e) < 1e-9 for a, e in zip(_proj(250, 250, 135), _pin)),
+      "the wheel zooms about the POINTER: what is under it stays under it")
+check(abs(math.dist(_proj(300, 0, 45), _pin) - 2.0 * math.dist(_other, _pin)) < 1e-9,
+      "  ...and everything else is twice as far from it")
+_v.zoom_at(1e9, 0, 0, 800, 600, 26)
+_zmax = _v.zoom
+_v.zoom_at(1e-12, 0, 0, 800, 600, 26)
+check(_zmax == V3.VIEW_ZOOM_MAX and _v.zoom == V3.VIEW_ZOOM_MIN, "the zoom is bounded both ways")
+_v.reset()
+check(_v.standard, "reset() is the standard view again")
+
+from robot_sim.theme import ACCENT_ORANGE as _LIT, SURFACE as _UNLIT
+_ev = lambda **k: types.SimpleNamespace(**k)
+bv = Board(); bv._build_xy_board(tk.Frame())
+_c = bv.xy_canvas
+check({"<ButtonPress-1>", "<B1-Motion>", "<MouseWheel>", "<Configure>"} <= set(_c.bindings),
+      "the board's canvas takes the drag and the wheel, and still follows its column")
+check(bv.xy_view_reset_btn._geo[0] == "place" and bv.xy_view_reset_btn.master is _c
+      and bv.xy_view_reset_btn.text_str == "RESET VIEW"
+      and bv.xy_view_reset_btn.base_color == _UNLIT,
+      "RESET VIEW sits in the canvas's corner -- a BUTTON, not a double-click -- unlit")
+_std = [i[1] for i in _c.items if i[0] == "line"]
+_c.bindings["<ButtonPress-1>"](_ev(x=100, y=100))
+_c.bindings["<B1-Motion>"](_ev(x=150, y=120))
+check(abs(bv._xy_view.az - (V3.VIEW_AZ_DEG + 20.0)) < 1e-9
+      and abs(bv._xy_view.el - (V3.VIEW_EL_DEG + 8.0)) < 1e-9
+      and [i[1] for i in _c.items if i[0] == "line"] != _std,
+      "dragging 50 px across and 20 down turns it 20 deg and tips it 8, and REDRAWS")
+check(bv.xy_view_reset_btn.base_color == _LIT,
+      "  ...and RESET VIEW lights up: the picture no longer matches the jog pads")
+check(_c.bindings["<MouseWheel>"](_ev(x=400, y=300, delta=120)) == "break"
+      and abs(bv._xy_view.zoom - V3.VIEW_ZOOM_STEP) < 1e-9,
+      "one wheel notch zooms one step, and does NOT scroll the page under it")
+_c.bindings["<MouseWheel>"](_ev(x=400, y=300, delta=-240))
+check(abs(bv._xy_view.zoom - 1.0 / V3.VIEW_ZOOM_STEP) < 1e-9, "  ...and back out the other way")
+_ok = True
+for _bad in ("", "-", "1e"):               # half-typed, with the view turned and zoomed
+    bv.x0_v.set(_bad)
+    try:
+        bv._refresh_xy_board()
+    except Exception:
+        _ok = False
+bv.x0_v.set("300")
+check(_ok, "a half-typed box still does not break the board while the view is turned")
+bw = Board(); bw._build_xy_board(tk.Frame())
+check(bw._xy_view.standard and bw._xy_view is not bv._xy_view and not bv._xy_view.standard,
+      "every build starts a NEW view on the standard picture: the camera is not kept or saved")
+bv.xy_view_reset_btn.command()
+check(bv._xy_view.standard and bv.xy_view_reset_btn.base_color == _UNLIT
+      and [i[1] for i in _c.items if i[0] == "line"] == _std,
+      "RESET VIEW puts back exactly the picture it opened on, and goes dark")
 
 print("\n  -- and it says the chord is not the tool path --")
 b3 = Board(); b3._refresh_xy_board()
@@ -1943,11 +2180,17 @@ print("\n  -- the real joint-space orbit is drawn, not just the chord --")
 from robot_sim.kinematics import sample_joint_path as _sjp
 _orbit_pts = _sjp((0, 0, 0, 0), (100, 90, 120, 0), n=10)
 check(len(_orbit_pts) == 11, "sample_joint_path returns n+1 points")
+_orbit3 = _sjp((0, 0, 0, 0), (100, 90, 120, 0), n=10, with_z=True)
+check([p[:2] for p in _orbit3] == _orbit_pts and _orbit3[0][2] == 0 and _orbit3[-1][2] == 100,
+      "  ...and with_z adds the lift's travel, for the 3D board")
 check(_orbit_pts[0] != _orbit_pts[-1], "the endpoints differ for a real move")
 b5 = Board(); b5._refresh_xy_board()
-check(any(i[0] == "line" and i[2].get("dash") == (4, 2)
-          for i in b5.xy_canvas.items),
-      "an orbit polyline is drawn, distinct (dashed) from the solid chord")
+from robot_sim.theme import TEXT_LIGHT as _WHITE
+_path = [i for i in b5.xy_canvas.items
+         if i[0] == "line" and i[2].get("fill") == _WHITE and len(i[1]) > 8]
+check(len(_path) == 1 and "dash" not in _path[0][2] and _path[0][2].get("width") == 1,
+      "the real path is drawn as ONE SOLID WHITE line -- not dashed -- thinner than "
+      "the chord")
 # Must never raise on half-typed input, same contract as _xy_points.
 for _bad in ("", "-", "abc"):
     b5.x1_v.set(_bad)
@@ -1959,6 +2202,10 @@ for _bad in ("", "-", "abc"):
 b5.x1_v.set(f"{C.DEFAULT_POINT_B[0]:g}")
 check(b5._xy_orbit_points() is not None,
       "  ...and a valid A/B does produce an orbit again")
+check(b5._xy_orbit_points()[-1][2] == 135.0 and b5._xy_orbit_points()[0][2] == 0.0,
+      "  ...which climbs from HOME's height to B's — the path is 3D too")
+check(all(v in src_p2p2 for v in ("self.z0_v, self.x1_v", "self.z1_v):")),
+      "the board repaints when a Z box changes, not only X and Y")
 
 
 
@@ -2416,9 +2663,11 @@ class RunKeyApp(KBM.KeyboardMixin):
         self._bound_jog_keys = ()
         self.ran = 0
         self.homed = 0
+        self.resets = 0
 
     def p2p_run_program(self): self.ran += 1
     def home(self): self.homed += 1
+    def reset_position(self): self.resets += 1
     def jog_start(self, c): pass
     def jog_stop(self, c, s=None): pass
     def emergency_stop_all(self): pass
@@ -2443,14 +2692,42 @@ app.root._focus = None
 app.root.bindings["<KeyPress-Return>"](None)
 check(app.ran == 2, "  ...and fires again once focus clears")
 
-# BackSpace/HOME is unaffected by this change — still gated on JOG mode,
-# not P2P, the opposite of ENTER/RUN.
+# HOME is still gated on JOG mode, not P2P, the opposite of ENTER/RUN -- on
+# the Home key now, since BackSpace went to RESET POS.
 app.mode = "JOG"
-app.root.bindings["<KeyPress-BackSpace>"](None)
+app.root.bindings["<KeyPress-Home>"](None)
 check(app.homed == 1, "HOME still fires from JOYSTICK mode")
 app.mode = "P2P"
-app.root.bindings["<KeyPress-BackSpace>"](None)
+app.root.bindings["<KeyPress-Home>"](None)
 check(app.homed == 1, "  ...and still refuses from P2P")
+
+print("\n  -- BACKSPACE is RESET POS, in every mode --")
+for _mode in ("P2P", "JOG", "SCAN"):
+    app.mode = _mode
+    app.root.bindings["<KeyPress-BackSpace>"](None)
+check(app.resets == 3 and app.homed == 1,
+      "BACKSPACE fires reset_position() from P2P, JOYSTICK and SCAN, and no longer homes")
+# No confirmation any more, so these three gates are the whole protection.
+app.root._focus = tk.Entry(app.root)
+app.root.bindings["<KeyPress-BackSpace>"](None)
+check(app.resets == 3, "  ...not while a text box has focus: there BACKSPACE deletes a digit")
+app.root._focus = None
+app.motion_locked = True
+app.root.bindings["<KeyPress-BackSpace>"](None)
+check(app.resets == 3, "  ...not while the machine is moving")
+app.motion_locked = False
+app._settings_dlg = types.SimpleNamespace(winfo_exists=lambda: True)
+app.root.bindings["<KeyPress-BackSpace>"](None)
+check(app.resets == 3, "  ...and not under Settings, where the same press rebinds a key")
+app._settings_dlg = None
+check(KB.save(KB.active_map(), None, {"RESET_POS": "Delete", "HOME": "Home"}),
+      "the shortcut can be moved")
+app._bind_keys()
+check("<KeyPress-BackSpace>" not in app.root.bindings, "  ...the old key is UNBOUND")
+app.root.bindings["<KeyPress-Delete>"](None)
+check(app.resets == 4, "  ...and the new one fires")
+KB.save(KB.active_map(), None, KB.DEFAULT_SHORTCUTS)
+app._bind_keys()
 
 
 print("\n=== 29. the Xbox controller is GONE, not merely unwired ===")
@@ -2681,6 +2958,11 @@ _state, _head, _detail = sa.scan_sensor_health()
 check(_head == "NO ECHO", "the lamp reports the LAST reading, miss included")
 check("1 of the last 2" in _detail, "  ...beside how many recent ones missed")
 
+sa._on_scan_line("[SCAN_RETURN] 10 layers in (500 points) - going back to the start: "
+                 "RM 0.00 deg, ZM 0.00 mm")
+check(sa.scan_running and "returning" in sa.scan_progress_v.get().lower(),
+      "[SCAN_RETURN] says the machine is going back to the start — the scan is "
+      "still running, so STOP still stops it")
 sa._on_scan_line("[SCAN_DONE] 10 layers, 500 points")
 check(not sa.scan_running and not sa.motion_locked,
       "[SCAN_DONE] ends the run and unlocks the machine")
@@ -2746,14 +3028,13 @@ check("sw = max(sw, strip_w)" in _dlg_src,
 
 
 print("\n=== 32. the SCAN panel layout ===")
-import robot_sim.ui.xy_board as XYB
 import robot_sim.ui.scan_plot as SP
 
 # The two plots sit in the same slot of the same section and the operator
 # switches between them. At 360 against 560 the scan read as the lesser view,
 # and the same 200 mm of wall got half the pixels.
-check(C.SCAN_PLOT_SIZE == XYB.BOARD_PX,
-      "the scan plot is drawn at the same size as the P2P board")
+check(C.SCAN_PLOT_SIZE == 560,
+      "the scan plot is drawn at 560, the size it was grown to")
 # The margin carries the degree labels ringing the plot, so it has to scale
 # with it -- a fixed 28 px was right at 360 and crowded them at 560.
 _small, _big = SP.ScanPolarPlot.__new__(SP.ScanPolarPlot), SP.ScanPolarPlot.__new__(SP.ScanPolarPlot)
@@ -3135,9 +3416,378 @@ _late = _late_types_in_signatures(fw)
 check(not _late, "every type a function signature names is declared above the "
                  "first function%s" % ("" if not _late else " -- NOT: %s" % _late))
 
-check("BKSP" in SD.CONTROLS_HELP and "ENTER" in SD.CONTROLS_HELP
+check("ENTER" in SD.CONTROLS_HELP and "BKSP  —" not in SD.CONTROLS_HELP
+      and "BKSP = RESET POS · Home = HOME" in SD.CONTROLS_HELP
       and "H (home)" not in SD.CONTROLS_HELP,
-      "the Controls help names the keys that really are reserved")
+      "the Controls help names the keys that really are reserved, and BKSP is not one")
+
+
+# ══════════════════════════════════════════════════════════════════════
+print("\n=== XYZ JOG: the tool point along X / Y / Z, and its 3D view ===")
+import robot_sim.ui.xyz_jog as XZ
+import robot_sim.ui.coord_reset as CRR
+import robot_sim.ui.jog_panel as JP
+
+check(all(C.JOG_STOP_COMMAND[c] == "XJOG_STOP" for c in C.XYZ_JOG_AXES),
+      "every XYZ key has a stop command — the fallback is STOP, an emergency stop")
+check(float(re.search(r"XJOG_JOINT_HEADROOM\s*=\s*([\d.]+);", fw).group(1))
+      == C.XYZ_JOG_JOINT_HEADROOM,
+      "the joint headroom is the firmware's own")
+check("XJOG_SPEED_MAX" not in fw and not hasattr(C, "XYZ_JOG_MAX_MM_S")
+      and "XJOG_EASE_MAX_S" in fw,
+      "there is NO speed ceiling on either side — a release is bounded in time instead")
+
+
+class XJ(JC.JogControlMixin, XZ.XYZJogMixin, JP.JogPanelMixin, KBM.KeyboardMixin,
+         CRR.CoordResetRowMixin):
+    """The jog panel's XYZ layout, with the real logic and the real view."""
+    sim_z = property(lambda s: s.current_joints[0],
+                     lambda s, v: s.current_joints.__setitem__(0, v))
+    sim_rot = property(lambda s: s.current_joints[1],
+                       lambda s, v: s.current_joints.__setitem__(1, v))
+    sim_a1 = property(lambda s: s.current_joints[2],
+                      lambda s, v: s.current_joints.__setitem__(2, v))
+    sim_a2 = property(lambda s: s.current_joints[3],
+                      lambda s, v: s.current_joints.__setitem__(3, v))
+
+    def __init__(self):
+        self.root = tk.Tk()
+        self.settings = {k: spec[6] for k, spec in C.LIMIT_FIELDS.items()}
+        for ek in C.LIMIT_ENFORCE_KEYS:
+            self.settings[ek] = True
+        self.settings[C.LIMITS_ENABLED_KEY] = True
+        for k, spec in C.SPEED_FIELDS.items():
+            self.settings[k] = spec[2]
+        self.current_joints = [C.Z_HOME_MM, C.ROT_HOME_DEG, C.ARM_HOME_DEG, C.ARM_HOME_DEG]
+        self.mode = "JOG"
+        self.jog_frame_mode = "JOINT"
+        self.xjog_arm = "A1M"
+        self._xjog_blocked = set()
+        self._xyz_trail = {}
+        self.jog_active, self.jog_pads = set(), {}
+        self.arms_linked = False
+        self.boost_index = 0
+        self.rot_limit = {"ROT_CW": False, "ROT_CCW": False}
+        self.z_limit = {"Z_UP": False, "Z_DOWN": False}
+        self.motion_locked = False
+        self.is_homed = True
+        self.is_connected = self.hw_confirmed = False
+        self.motion_lock_widgets = []
+        self._jog_sim_job = self._jog_hb_job = None
+        self.sent, self.logged, self.rebinds = [], [], 0
+        self.jog_status_var = tk.StringVar(value="")
+        self.jog_hint_v = tk.StringVar(value="")
+        self.jog_dot = types.SimpleNamespace(itemconfig=lambda *a, **k: None)
+        self._jog_dot_id = 1
+        self._build_jog_frame_switch(self.root)
+        self.jog_joint_frame = tk.Frame(self.root)
+        self.jog_xyz_frame = tk.Frame(self.root)
+        self._build_xyz_jog_frame(self.jog_xyz_frame)
+        self._build_jog_view(tk.Frame(self.root))
+        self._show_jog_frame()
+
+    def send(self, m, log_tx=True): self.sent.append(m)
+    def log(self, m, tag="default"): self.logged.append((m, tag))
+    def _schedule(self, name, ms, fn, *a): setattr(self, name, "job")
+    def _cancel_jobs(self, *names):
+        for n in names: setattr(self, n, None)
+    def warn_if_jogging_into_sensor(self, command): pass
+    def _update_jog_readout(self): self._refresh_xyz_view()
+    def home(self): pass
+    def reset_position(self): pass
+    def emergency_stop_all(self): pass
+    def _bind_keys(self):
+        self.rebinds += 1
+        KBM.KeyboardMixin._bind_keys(self)
+
+    def tick(self, n=1):
+        for _ in range(n):
+            self._jog_sim_tick()
+
+
+KB._active = KB._active_xyz = None
+xj = XJ()
+print("\n  -- the JOINT | XYZ switch --")
+check(xj.jog_frame_mode == "JOINT" and xj.jog_xyz_frame._mapped is False,
+      "the panel opens on the JOINT layout, the XYZ one unpacked")
+check(xj.xjog_home_btn._geo == ("grid", {"row": 1, "column": 1, "padx": 4, "pady": 4})
+      and xj.xjog_home_btn in xj.motion_lock_widgets
+      and [xj.jog_pads[c]._geo[1]["row"] for c in ("Y_POS", "X_NEG", "X_POS", "Y_NEG")]
+          == [0, 1, 1, 2],
+      "HOME sits in the middle of the X/Y cross, and locks while the machine moves")
+check(xj.xjog_reset_btn._geo == ("grid", {"row": 2, "column": 2, "padx": 4, "pady": 4})
+      and xj.xjog_reset_btn in xj.motion_lock_widgets
+      and xj.xjog_reset_btn.size == xj.xjog_home_btn.size
+      and xj.xjog_reset_btn.label == "RESET\nPOS" and xj.xjog_home_btn.label == "HOME",
+      "RESET POS sits in the corner of the cross beside it: the same round button, "
+      "the same size, locked the same way")
+check("BKSP = RESET POS" in xj._jog_hint_text() and "Home = HOME" in xj._jog_hint_text(),
+      "the hint line names both shortcut keys")
+check(set(C.XYZ_JOG_AXES) <= set(xj.jog_pads) and xj._caps()["Y_POS"] == "W"
+      and xj._caps()["Z_UP"] == "W",
+      "the XYZ pads exist, and the keycaps cover BOTH layouts")
+xj.jog_active.add("ROT_CW")
+xj.set_jog_frame("XYZ")
+check(xj.jog_frame_mode == "XYZ" and not xj.jog_active and "ROT_STOP" in xj.sent,
+      "switching layout releases every held axis first")
+check(xj.jog_joint_frame._mapped is False and xj.rebinds == 1,
+      "  ...swaps the frames, and REBINDS the keys — the layouts share W/S/A/D")
+check("= X" in xj.jog_hint_v.get() and "RM" not in xj.jog_hint_v.get(),
+      "  ...and the hint names the keys of the layout that is live")
+check(xj.root.bindings.get("<KeyPress-r>") is not None
+      and xj.root.bindings.get("<KeyPress-i>") is None,
+      "  ...R (Z+) is bound now and I (A1M) is not")
+xj.motion_locked = True
+xj.set_jog_frame("JOINT")
+check(xj.jog_frame_mode == "XYZ", "the switch is refused while a program runs")
+xj.motion_locked = False
+
+print("\n  -- one command carries all three signs --")
+xj.sent.clear()
+xj.root.bindings["<KeyPress-w>"](None)
+check(xj.sent[:1] == ["XJOG:1,0,1,0,50"] and "JOG_HB" in xj.sent,
+      "W in the XYZ layout is +Y on the tool: XJOG:1,0,1,0,50, with the keep-alive")
+xj.root.bindings["<KeyPress-d>"](None)
+check(xj.sent[-1] == "XJOG:1,1,1,0,50", "a second key re-sends the whole vector")
+xj.root.bindings["<KeyRelease-w>"](None)
+check(xj.sent[-1] == "XJOG:1,1,0,0,50", "  ...and so does a release")
+xj.root.bindings["<KeyRelease-d>"](None)
+check(xj.sent[-1] == "XJOG_STOP" and not xj.jog_active,
+      "the last key up eases it out with XJOG_STOP")
+xj.jog_start("X_POS"); xj.jog_start("X_NEG")
+check(xj._xjog_vector() == [0, 0, 0], "opposite keys cancel")
+xj.sent.clear()
+xj._release_all_jog_axes()
+check(xj.sent and set(xj.sent) == {"XJOG_STOP"},
+      "the blind release paths send XJOG_STOP, never the board's STOP")
+for typed, want in (("120", 120.0), ("abc", C.DEFAULT_XYZ_JOG_MM_S), ("", C.DEFAULT_XYZ_JOG_MM_S),
+                    ("-5", C.DEFAULT_XYZ_JOG_MM_S), ("999", 999.0), ("5000", 5000.0),
+                    ("inf", C.DEFAULT_XYZ_JOG_MM_S)):
+    xj.xjog_speed_v.set(typed)
+    check(xj._xjog_speed() == want, "  speed box %r -> %g mm/s, never an exception" % (typed, want))
+xj.xjog_speed_v.set("500")
+xj.jog_start("X_POS")
+check("XJOG:1,1,0,0,500" in xj.sent, "a speed past 200 is SENT as typed — no limit was asked for")
+check("200" in xj.xjog_speed_warn_v.get() and "⚠" in xj.xjog_speed_warn_v.get(),
+      "  ...with a warning line under the box")
+xj._release_all_jog_axes()
+xj.xjog_speed_v.set("200")
+check(xj.xjog_speed_warn_v.get() == "", "  ...which is empty at 200 and below")
+xj.xjog_speed_v.set("abc")
+check("Not a speed" in xj.xjog_speed_warn_v.get() and "50" in xj.xjog_speed_warn_v.get(),
+      "  ...and says so when the box is not a number, and what will be used")
+check(not any("Up to" in str(w.opts.get("text", "")) for w in _walk(xj.jog_xyz_frame)),
+      "the explanatory note under the speed box is gone")
+xj.xjog_speed_v.set("50")
+xj.toggle_xjog_arm()
+xj.jog_start("Z_POS")
+check(xj.xjog_arm == "A2M" and "XJOG:2,0,0,1,50" in xj.sent,
+      "TOOL switches the arm, and the command says which")
+xj._release_all_jog_axes(); xj.toggle_xjog_arm()
+
+print("\n  -- a refusal from the board drops only that half, until the key is up --")
+xj.jog_start("Y_POS"); xj.jog_start("Z_POS")
+xj._on_xjog_line("[XJOG] XY stopped - RM would leave its taught band 0.00..10.00 deg.")
+check(xj.jog_active == {"Z_POS"}, "[XJOG] XY stopped releases X/Y and leaves Z held")
+xj.sent.clear()
+xj.jog_start("Y_POS")
+check(not xj.sent and "Y_POS" not in xj.jog_active,
+      "  ...and key auto-repeat cannot re-send the refused key")
+xj.jog_stop("Y_POS"); xj.jog_start("Y_POS")
+check("Y_POS" in xj.jog_active, "  ...until it has come up")
+xj._on_xjog_line("[XJOG] Z stopped - ZM is on its travel switch (M32).")
+check(xj.jog_active == {"Y_POS"}, "[XJOG] Z stopped releases Z alone")
+xj._release_all_jog_axes()
+
+print("\n  -- offline, the simulation steps by the board's rules --")
+xj.sent.clear(); xj.logged.clear()
+xj.jog_start("Y_POS")
+xj.tick(20)                                             # one second
+_x, _y, _z = xj.tool_xyz()
+check(abs(_x - C.ARM_MIN_REACH_MM) < 1e-6 and 45.0 < _y <= 50.0 + 1e-6 and _z == 0.0,
+      "+Y from HOME travels a STRAIGHT line: X stays 133.2, Y ~50 mm after 1 s at 50 mm/s")
+check(xj.sim_rot > 0 and xj.sim_a1 > 0 and xj.sim_a2 == C.ARM_HOME_DEG,
+      "  ...which turned RM and extended A1M, and left the idle arm alone")
+check(not any(xj.rot_limit.values()), "  ...without latching a joint-jog limit")
+xj._release_all_jog_axes()
+xj.current_joints = [C.Z_HOME_MM, C.ROT_HOME_DEG, C.ARM_HOME_DEG, C.ARM_HOME_DEG]
+xj.jog_start("Y_NEG"); xj.tick(2)
+check(not xj.jog_active and xj.tool_xyz()[1] == 0.0
+      and any("X/Y stopped" in m for m, _t in xj.logged),
+      "-Y from HOME is RM's CCW stop: refused, released, and said so ONCE")
+check(sum("X/Y stopped" in m for m, _t in xj.logged) == 1, "  ...not once a tick")
+xj.jog_stop("Y_NEG")
+xj.settings["lim_rot_max"] = 10.0
+xj.jog_start("Y_POS"); xj.tick(60)
+check(9.0 < xj.sim_rot <= 10.0 + 1e-9 and not xj.jog_active,
+      "a taught RM boundary stops the XYZ jog on the line")
+xj.jog_stop("Y_POS")
+xj.settings["lim_rot_max"] = C.LIMIT_FIELDS["lim_rot_max"][6]
+xj.current_joints = [C.Z_HOME_MM, C.ROT_HOME_DEG, C.ARM_HOME_DEG, C.ARM_HOME_DEG]
+xj.jog_start("Z_POS"); xj.tick(10)
+check(xj.sim_z > 10.0 and xj.sim_rot == 0.0, "+Z is the lift alone")
+xj._release_all_jog_axes()
+xj.current_joints = [C.Z_HOME_MM, C.ROT_HOME_DEG, C.ARM_HOME_DEG, C.ARM_HOME_DEG]
+xj.logged.clear()
+xj.jog_start("Z_NEG"); xj.tick(2)
+check(xj.sim_z == 0.0 and any("stroke" in m for m, _t in xj.logged),
+      "-Z at HOME is the bottom of the stroke")
+xj._release_all_jog_axes()
+xj.xjog_speed_v.set("200")
+xj.jog_start("Y_POS"); xj.tick(1)
+_rot_cap = xj._axis_speeds()[0] * C.XYZ_JOG_JOINT_HEADROOM * C.JOG_SIM_TICK_MS / 1000.0
+check(0 < xj.sim_rot <= _rot_cap * 1.01,
+      "200 mm/s beside the axis is more RM than RM has: the step is shortened")
+xj._release_all_jog_axes(); xj.xjog_speed_v.set("50")
+check(float(re.search(r"XJOG_JUMP_RATIO\s*=\s*([\d.]+);", fw).group(1)) == C.XYZ_JOG_JUMP_RATIO,
+      "the jump guard's ratio is the firmware's")
+xj.current_joints = [C.Z_HOME_MM, -30.0, C.ARM_HOME_DEG, C.ARM_HOME_DEG]
+xj.logged.clear()
+xj.jog_start("X_POS"); xj.tick(2)                       # the IK answers 330, not -30
+check(xj.sim_rot == -30.0 and not xj.jog_active
+      and any("jump" in m for m, _t in xj.logged),
+      "RM's counter outside its travel: the step would be a 360° jump, and is refused")
+xj.jog_stop("X_POS")
+xj.current_joints = [-5.0, C.ROT_HOME_DEG, C.ARM_HOME_DEG, C.ARM_HOME_DEG]
+xj.jog_start("Z_POS"); xj.jog_start("Y_POS"); xj.tick(4)
+check(xj.sim_z > -5.0 and xj.sim_rot > 0.0 and xj.jog_active == {"Z_POS", "Y_POS"},
+      "a lift counter below the stroke may come back up, and does not refuse X/Y")
+xj._release_all_jog_axes()
+xj.current_joints = [C.Z_HOME_MM, C.ROT_HOME_DEG, C.ARM_HOME_DEG, C.ARM_HOME_DEG]
+
+print("\n  -- the 3D view --")
+_W, _H, _PAD = XZ.XYZ_VIEW_W, XZ.XYZ_VIEW_H, XZ.XYZ_VIEW_PAD
+_o = V3.xyz_project(0, 0, 0, _W, _H, _PAD)
+_px = V3.xyz_project(100, 0, 0, _W, _H, _PAD)
+_py = V3.xyz_project(0, 100, 0, _W, _H, _PAD)
+_pz = V3.xyz_project(0, 0, 100, _W, _H, _PAD)
+check(_px[0] > _o[0] and _py[1] < _o[1] and abs(_pz[0] - _o[0]) < 1e-9 and _pz[1] < _o[1],
+      "+X runs right, +Y runs away (up the screen), +Z straight up")
+_corners = [V3.xyz_project(C.ARM_MAX_REACH_MM * math.cos(math.radians(a)),
+                           C.ARM_MAX_REACH_MM * math.sin(math.radians(a)), z, _W, _H, _PAD)
+            for a in range(0, 360, 5) for z in (0.0, C.D1_MAX_MM)]
+check(all(_PAD - 1e-6 <= x <= _W - _PAD + 1e-6 and _PAD - 1e-6 <= y <= _H - _PAD + 1e-6
+          for x, y in _corners),
+      "the whole reach ring at every lift height fits inside the canvas, at a fixed scale")
+xj.current_joints = [C.Z_HOME_MM, C.ROT_HOME_DEG, C.ARM_HOME_DEG, C.ARM_HOME_DEG]
+xj._xyz_trail = {}
+xj._refresh_xyz_view()
+check(len(xj.xyz_canvas.items) > 10 and "HOME" in str(xj.xyz_canvas.items),
+      "it draws the floor, the axes, HOME and the tool")
+check(XZ.draw_scene is V3.draw_scene and XB.draw_scene is V3.draw_scene,
+      "  ...with the SAME scene the P2P board draws — one view, two panels")
+check("X   133.2" in xj.xyz_readout_v.get() and "ΔX    +0.0" in xj.xyz_readout_v.get(),
+      "at HOME the tool reads X 133.2 and is 0 from HOME — HOME is the reference")
+xj.current_joints = [40.0, 30.0, 200.0, C.ARM_HOME_DEG]
+xj._update_jog_readout()
+check(len(xj._xyz_trail[xj.xjog_arm]) == 2 and list(xj._xyz_trail) == [xj.xjog_arm]
+      and "Z   40.0" in xj.xyz_readout_v.get()
+      and "ΔZ  +40.0" in xj.xyz_readout_v.get(),
+      "it follows the shared pose, and leaves a trail")
+check(xj.xyz_clear_btn.text_str == "CLEAR PATH" and xj.xyz_clear_btn.master is xj.xyz_canvas
+      and xj.xyz_view_reset_btn.master is xj.xyz_canvas
+      and xj.xyz_clear_btn._geo[1]["y"] == xj.xyz_view_reset_btn._geo[1]["y"]
+      and xj.xyz_clear_btn._geo[1]["x"] < xj.xyz_view_reset_btn._geo[1]["x"] < 0,
+      "CLEAR PATH sits beside RESET VIEW in the view's corner")
+xj.xyz_clear_btn.command()
+check(xj._xyz_trail == {xj.xjog_arm: [xj.tool_xyz()]}
+      and not any(i[0] == "line" and i[2].get("fill") == XZ.ACCENT_CYAN
+                  for i in xj.xyz_canvas.items),
+      "  ...and wipes the path lines: the trail starts again from where the tool is")
+xj.xyz_canvas.bindings["<ButtonPress-1>"](types.SimpleNamespace(x=0, y=0))
+xj.xyz_canvas.bindings["<B1-Motion>"](types.SimpleNamespace(x=450, y=0))
+check(not xj._xyz_view.standard and xj.xyz_view_reset_btn.base_color == XZ.ACCENT_ORANGE,
+      "the jog's view turns with a drag too, and its RESET VIEW lights up")
+xj.xyz_view_reset_btn.command()
+check(xj._xyz_view.standard and xj._xyz_view is not getattr(xj, "_xy_view", None),
+      "  ...its own camera, put back by its own button")
+xj.current_joints = None
+try:
+    xj._refresh_xyz_view(); _ok = True
+except Exception:
+    _ok = False
+check(_ok, "a pose it cannot read is skipped, never an exception")
+xj.current_joints = [C.Z_HOME_MM, C.ROT_HOME_DEG, C.ARM_HOME_DEG, C.ARM_HOME_DEG]
+xj.set_jog_frame("JOINT")
+check("= RM" in xj.jog_hint_v.get() and xj.root.bindings.get("<KeyPress-i>") is not None,
+      "back on JOINT the joint keys are bound again")
+
+print("\n  -- the JOINT layout has the view too, and it shows BOTH arms --")
+xj.current_joints = [40.0, 30.0, 200.0, 500.0]        # the two arms at different reaches
+xj._update_jog_readout()
+_texts = [i[2].get("text", "") for i in xj.xyz_canvas.items if i[0] == "text"]
+check(any(t.startswith("A1M  ") for t in _texts) and any(t.startswith("A2M  ") for t in _texts),
+      "on JOINT the SAME canvas keeps repainting, with A1M's tool and A2M's, each named")
+_fills = [i[2].get("fill") for i in xj.xyz_canvas.items if i[0] == "oval" and i[2].get("fill")]
+check(XZ.ARM_COLOR in _fills and XZ.ARM2_COLOR in _fills and XZ.ACCENT_RED not in _fills,
+      "  ...each in its own pads' colour — the red marker is the XYZ layout's one tool")
+check(xj.xyz_readout_v.get().splitlines()[0].startswith("A1M")
+      and xj.xyz_readout_v.get().splitlines()[1].startswith("A2M")
+      and "from HOME" not in xj.xyz_readout_v.get(),
+      "  ...and the readout gives a line to each arm")
+check(xj.tool_xyz("A1M") != xj.tool_xyz("A2M") and xj.tool_xyz("A1M")[2] == xj.tool_xyz("A2M")[2],
+      "  ...the two tools differ in reach and share the lift's height")
+_before = {a: len(t) for a, t in xj._xyz_trail.items()}
+xj.current_joints = [60.0, 50.0, 300.0, 600.0]
+xj._update_jog_readout()
+check(sorted(xj._xyz_trail) == ["A1M", "A2M"]
+      and all(len(t) == _before[a] + 1 for a, t in xj._xyz_trail.items())
+      and xj._xyz_trail["A1M"][-1] != xj._xyz_trail["A2M"][-1],
+      "  ...and each arm leaves its OWN trail")
+xj.xyz_clear_btn.command()
+check(all(len(t) == 1 for t in xj._xyz_trail.values()), "  ...which CLEAR PATH wipes, both")
+_same = [C.Z_HOME_MM, C.ROT_HOME_DEG, C.ARM_HOME_DEG, C.ARM_HOME_DEG]
+xj.current_joints = _same
+xj._update_jog_readout()
+_labels = [i for i in xj.xyz_canvas.items
+           if i[0] == "text" and i[2].get("text", "")[:3] in ("A1M", "A2M")]
+check(len(_labels) == 2 and _labels[0][1][1] < _labels[1][1][1],
+      "with both arms on one spot (HOME) the second label hangs BELOW, not over the first")
+
+print("\n  -- RM and ZM share one cross, like the XYZ layout's X/Y pad --")
+xj._build_rot_card(tk.Frame(xj.root))
+check([(xj.jog_pads[c]._geo[1]["row"], xj.jog_pads[c]._geo[1]["column"])
+       for c in ("Z_UP", "ROT_CCW", "ROT_CW", "Z_DOWN")] == [(0, 1), (1, 0), (1, 2), (2, 1)],
+      "ZM is the vertical of RM's cross: Z UP over, Z DOWN under, RM either side")
+check((xj.home_btn._geo[1]["row"], xj.home_btn._geo[1]["column"]) == (1, 1)
+      and (xj.reset_pos_btn._geo[1]["row"], xj.reset_pos_btn._geo[1]["column"]) == (2, 2),
+      "  ...HOME in the middle, RESET POS in the corner — where the XYZ layout has them")
+check("ZM" in xj.z_title_v.get() and "RM" in xj.rot_title_v.get(),
+      "  ...and the card's heading still names both axes' keys")
+_src_jp = open(os.path.join(os.path.dirname(HERE), "robot_sim", "ui", "jog_panel.py"),
+               encoding="utf-8").read()
+check("_build_z_card" not in _src_jp and "self._build_jog_view(view)" in _src_jp
+      and "slot.grid_columnconfigure(1, weight=1)" in _src_jp,
+      "ZM's own card is gone, and the width it took is the view's: pads left, view right")
+check(xj.xyz_canvas._geo == ("pack", {"fill": "x"}) and "<Configure>" in xj.xyz_canvas.bindings,
+      "the view fills the room the pads leave, and follows it")
+_cfg = []
+xj.xyz_canvas.configure = lambda **kw: _cfg.append(kw)
+xj._xyz_view_h = XZ.px(XZ.XYZ_VIEW_H)
+xj._on_xyz_view_resize(types.SimpleNamespace(width=XZ.px(640)))
+xj._on_xyz_view_resize(types.SimpleNamespace(width=XZ.px(4000)))
+xj._on_xyz_view_resize(types.SimpleNamespace(width=XZ.px(100)))
+check([k["height"] for k in _cfg] == [int(XZ.px(640) / V3.VIEW_ASPECT), XZ.px(XZ.XYZ_VIEW_MAX_H),
+                                      XZ.px(XZ.XYZ_VIEW_H)],
+      "  ...its height follows its width, capped above and floored below")
+del xj.xyz_canvas.configure
+class _XJOld(PR2.ProtocolMixin):
+    """Only the parser, in front of an XJ's state."""
+    def __init__(self, inner): self.__dict__ = inner.__dict__
+    _xjog_release = XJ._xjog_release
+    _refresh_jog_status = XJ._refresh_jog_status
+    log = XJ.log
+xj.set_jog_frame("XYZ"); xj.logged.clear()
+xj.jog_start("X_POS")
+_XJOld(xj)._parse_hardware_response("[ERROR] Unknown command: XJOG:1,1,0,0,50")
+check(not xj.jog_active and any("Re-flash" in m for m, _t in xj.logged),
+      "a board with no XYZ jog releases the keys and says to re-flash")
+xj.jog_stop("X_POS"); xj.set_jog_frame("JOINT")
+check(xj.jog_pads["X_POS"].on_press.__name__ == "press",
+      "a pad press takes keyboard focus back from the speed box")
+check("_refresh_xyz_view" in _inspect.getsource(JC.JogControlMixin._update_jog_readout)
+      and "_on_xjog_line" in _inspect.getsource(PR2.ProtocolMixin._parse_hardware_response),
+      "the real readout repaints the view, and the real parser routes [XJOG]")
 
 
 print("\n" + ("ALL PYTHON CHECKS PASSED" if not FAIL else "FAILURES: %s" % FAIL))

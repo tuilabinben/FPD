@@ -649,12 +649,35 @@ LIMIT_OPPOSITE = {
     "Z_DOWN": "Z_UP",
 }
 
+# XYZ JOG — the tool point along Cartesian axes, the jog panel's second layout. Six keys ->
+# (axis 0/1/2, sign). The board takes all three signs in ONE command, XJOG:<arm>,<sx>,<sy>,
+# <sz>,<mm/s>, so a key coming up re-sends the vector rather than a per-axis stop; XJOG_STOP
+# is the "every axis off" the blind release paths send. In JOG_STOP_COMMAND for that reason:
+# its fallback is the board's STOP, which is an emergency stop.
+XYZ_JOG_AXES = {
+    "X_NEG": (0, -1), "X_POS": (0, +1),
+    "Y_NEG": (1, -1), "Y_POS": (1, +1),
+    "Z_NEG": (2, -1), "Z_POS": (2, +1),
+}
+XYZ_JOG_STOP = "XJOG_STOP"
+JOG_STOP_COMMAND.update({cmd: XYZ_JOG_STOP for cmd in XYZ_JOG_AXES})
+XYZ_JOG_ARMS = ("A1M", "A2M")
+DEFAULT_XYZ_JOG_MM_S = 50.0
+# NO SPEED CEILING, on request -- the board holds each motor to its own top speed, so the
+# number is what is ASKED for. Past this one the panel warns, and still sends it.
+XYZ_JOG_WARN_MM_S = 200.0
+# The firmware's XJOG_JOINT_HEADROOM; python_check asserts they agree, because the offline
+# simulation steps with the same rule.
+XYZ_JOG_JOINT_HEADROOM = 0.8
+XYZ_JOG_JUMP_RATIO = 1.5
+JOG_FRAMES = ("JOINT", "XYZ")
+
 # Keyboard bindings live in keybinds.py (Settings -> Controls, keybinds.json); anything
 # showing a key reads keybinds.active_map() live, so a rebind is never shown stale.
 
 LOG_MAX_LINES = 800
 
-WINDOW_TITLE = "Robot Motion Controller — P2P · Joystick · Scan (v5)"
+WINDOW_TITLE = "Robot Motion Controller — P2P · Joystick · Scan (v2)"
 WINDOW_GEOMETRY = "1400x900"
 WINDOW_MIN_SIZE = (900, 500)
 
@@ -732,10 +755,9 @@ SCAN_MISS_WARN_FRACTION = 0.25
 # cannot be compared with the layer above it by eye.
 SCAN_PLOT_MIN_RANGE_MM = 200.0
 SCAN_PLOT_RINGS = 4
-# Same as the P2P board's BOARD_PX, deliberately. The two plots sit in the
-# same slot of the same section and the operator switches between them --
-# at 360 against 560 the scan looked like the lesser view of the two, and
-# a wall 200 mm out was drawn in half the pixels P2P gave the same 200 mm.
+# 560, not the 360 it started at: a wall 200 mm out was drawn in too few
+# pixels to read. (It used to be tied to the P2P board's size; that board
+# is 3D now and sizes itself to its column.)
 SCAN_PLOT_SIZE = 560
 # Repaint on a timer, not per point: 341 points a layer.
 SCAN_REDRAW_MS = 250
@@ -762,3 +784,6 @@ def cmd_scan_sensor(kind):
 SCAN_TAG_DONE = "[SCAN_DONE]"
 SCAN_TAG_ABORT = "[SCAN_ABORT]"
 SCAN_TAG_SEEK = "[SCAN_SEEK]"
+# Every layer is in and the board is driving back to where the scan
+# started. [SCAN_DONE] follows once it is there.
+SCAN_TAG_RETURN = "[SCAN_RETURN]"

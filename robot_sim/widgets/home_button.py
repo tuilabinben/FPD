@@ -1,4 +1,4 @@
-"""Circular HOME button, used by both the Jog and the P2P panels."""
+"""Circular HOME button, used by the Jog and P2P panels — and RESET POS, its twin."""
 
 import tkinter as tk
 
@@ -21,9 +21,15 @@ from .draw import clear, paint_circle
 
 class HomeButton(tk.Canvas):
     """Circular button in the same flat language as the jog pads.
-    Pressing it in either panel sends the same HOME command."""
+    Pressing it in either panel sends the same HOME command.
 
-    def __init__(self, parent, command, size=78):
+    RESET POS is this widget with another glyph, caption and accent (see
+    _build_reset_pos_button in ui/coord_reset.py) — one round button, not two.
+    `accent` defaults to None, not ACCENT_MINT: a default argument is bound
+    once, and would keep the old colour through a theme switch."""
+
+    def __init__(self, parent, command, size=78, glyph="⌂", label="HOME",
+                 accent=None):
         try:
             surface = parent["bg"]
         except Exception:
@@ -34,6 +40,8 @@ class HomeButton(tk.Canvas):
         self.size = size
         self.surface = surface
         self.command = command
+        self.glyph, self.label = glyph, label
+        self.accent = accent or ACCENT_MINT
         self.state = "idle"
         self.enabled = True
         self._pressed = False
@@ -53,13 +61,13 @@ class HomeButton(tk.Canvas):
             fill, border = mix(self.surface, TEXT_DIM, 0.08), None
             glyph_fill = text_fill = TEXT_DIM
         elif active:
-            fill = ACCENT_MINT
-            border = mix(ACCENT_MINT, "#ffffff", 0.18)
+            fill = self.accent
+            border = mix(self.accent, "#ffffff", 0.18)
             glyph_fill = text_fill = INK_DARK
         elif self.state == "hover":
             fill = SURFACE_HI
-            border = mix(SURFACE_HI, ACCENT_MINT, 0.55)
-            glyph_fill, text_fill = ACCENT_MINT, TEXT_LIGHT
+            border = mix(SURFACE_HI, self.accent, 0.55)
+            glyph_fill, text_fill = self.accent, TEXT_LIGHT
         else:
             fill = SURFACE
             border = mix(SURFACE, "#ffffff", 0.06)
@@ -69,10 +77,12 @@ class HomeButton(tk.Canvas):
                      border=border, border_w=1)
 
         cx = s / 2
-        self.create_text(cx, s * 0.42, text="⌂",
+        # A two-line caption takes the room under the glyph, so both move up.
+        two = "\n" in self.label
+        self.create_text(cx, s * (0.31 if two else 0.42), text=self.glyph,
                          font=FONT_GLYPH, fill=glyph_fill)
-        self.create_text(cx, s * 0.68, text="HOME",
-                         font=FONT_CAPTION, fill=text_fill)
+        self.create_text(cx, s * (0.67 if two else 0.68), text=self.label,
+                         font=FONT_CAPTION, fill=text_fill, justify="center")
 
     def set_enabled(self, enabled):
         self.enabled = enabled

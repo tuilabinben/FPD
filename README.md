@@ -52,7 +52,8 @@ grid instead of being bitmap-stretched by Windows. See [`robot_sim/hidpi.py`](ro
 One operator console, two ways to drive the machine, sharing a single serial connection:
 
 - **P2P** — absolute X/Y/Z targets, full inverse kinematics, four-leg programs
-- **Joystick** — held-key jog on RM / A1M / A2M / ZM
+- **Joystick** — held-key jog, in two layouts: **JOINT** (RM / A1M / A2M / ZM, one motor
+  per key) and **XYZ** (the tool point along X / Y / Z, with a 3D view)
 
 Both modes share the live pose, the connection, the boundaries and the event log. Switching
 mode auto-stops any motion, and the firmware refuses conflicting commands on its own as a
@@ -135,12 +136,24 @@ limits: a total ZM travel past the ceiling in **Settings → Boundaries** (defau
 speed past RM's. The hard refusals stay on the board — the 285 mm stroke, and no PLC device
 data.
 
+When the last layer is in, the machine **goes back to where the scan started** — RM to its
+switch, ZM down to the start height — and only then reports the scan finished. STOP still
+works during the return, and the data is kept either way.
+
 `SAVE CSV…` writes `layer,z_mm,angle_deg,distance_mm,x_mm,y_mm,hit`; a miss is written
 marked, never dropped, and never drawn at radius 0.
 
-The **Oxy board** in P2P plots the reachable annulus, the unreachable RM wedge, the taught RM
-band, HOME, A, B and the live pose. The A→B line is drawn straight because that is the
-operator's *intent*; the machine's real path bows away from it, and the caption says so.
+The **3D board** in P2P shows the floor at HOME height (the reach ring, the unreachable RM
+wedge, the taught RM band), the three axes, HOME, A and B **at their heights** and the live
+tool. The A→B line is drawn straight because that is the operator's *intent*; the machine's
+real path bows away from it and is drawn as a solid white line. The board fills the width of
+its column, and the same view is the XYZ jog's.
+
+**The view moves.** Drag on it to turn it (straight down is a plain X/Y plot), roll the wheel
+to zoom on whatever is under the pointer, and press **RESET VIEW** in its corner to go back.
+The button is lit while the view is turned or zoomed — in the XYZ jog the pads match the
+standard view only. Nothing about the view is saved. The jog's view also has **CLEAR PATH**,
+which wipes the trail.
 
 ---
 
@@ -235,6 +248,10 @@ that you jogged to the reference. It confirms first and is refused while anythin
 buttons live in the motion panels, in **both** modes, because declaring a reference is a
 jogging job.
 
+**RESET POS** is the round red button beside **HOME** on every panel (beside LOAD PARAMETERS
+in P2P). Unlike the row above it MOVES the machine — to 0,0,0,0 under the board's own control,
+no switches consulted — and it does not ask first.
+
 > **Teach after homing, not before.** HOME re-zeroes the counters, and a boundary taught
 > beforehand keeps its number while losing its meaning. This is deliberately not auto-corrected:
 > after a PLC home the offset is genuinely unknown to the board, and inventing one would move a
@@ -300,10 +317,46 @@ Rebind any of them in **Settings → Controls**: click a box, press the key. If 
 taken the two rows **swap**, so no axis is ever left unbound. Saved to `keybinds.json`; a
 corrupt file is discarded whole rather than half-merged.
 
-**Reserved, cannot be rebound:** `SPACE` E-STOP · `ESC` Settings · `BACKSPACE` HOME.
+`BACKSPACE` — **RESET POS** (drives the machine to 0,0,0,0; every mode)  ·  `Home` — **HOME**
+(JOYSTICK mode). Both are rebindable in the same tab, under KEYS; neither may share a key with
+a jog axis, and neither fires while a text box has focus. RESET POS no longer asks first —
+`SPACE` stops it.
+
+**Reserved, cannot be rebound:** `SPACE` E-STOP · `ESC` Settings · `ENTER` RUN PROGRAM (P2P).
 
 Jog is keyboard and the on-screen pads. There is no controller support — it was removed on
 request.
+
+The Joystick panel has the pads on the left and a **3D view** on the right, in both layouts.
+In the JOINT layout RM and ZM share one cross — RM left and right, ZM up and down, HOME in the
+middle, RESET POS in the corner — with the two arms beside it, and the view shows **both
+arms' tools**, each named and in its pads' colour, each with its own trail.
+
+### XYZ jog
+
+The **JOG LAYOUT** switch at the top of the Joystick panel changes what the keys mean.
+
+| Key (default) | Moves the tool |
+| :--- | :--- |
+| `A` / `D` | X − / X + |
+| `W` / `S` | Y + / Y − |
+| `R` / `F` | Z + (up) / Z − (down) |
+
+- The frame is the P2P one: X, Y from the turntable axis, Z above HOME. HOME is the point
+  **(133.2, 0, 0)**; the 3D view marks it and the readout gives the offset from it.
+- A straight line in X or Y takes RM and the selected elbow together — the board works out the
+  ratio every few milliseconds. **TOOL** picks which arm (A1M / A2M); the other holds still.
+- **Speed (mm/s)** has no upper limit. The board still holds each motor to its own top speed,
+  so the tool may not reach a big number, and a line under the box warns above 200 mm/s.
+  However fast it is going, it stops within half a second of a key coming up. Press ENTER
+  after typing.
+- It stops X/Y or Z — separately — at the end of travel, at a taught boundary, or at a covered
+  PLC switch, and says which. From HOME, −Y (RM's CCW stop) and −X (shorter than the retracted
+  arm) are refused straight away.
+- The keys are set in **Settings → Controls**, under the joint ones. The two layouts may share
+  keys; only the one showing is live.
+- Needs the firmware in this repo. An older board answers `Unknown command` and the app says
+  to re-flash.
 
 ---
 
@@ -375,6 +428,7 @@ USB serial, **115200 baud** by default, two-way ASCII lines.
 | `A2_FWD` `A2_BACK` `A2_STOP` | arm 2 |
 | `ARM_FWD` `ARM_BACK` `ARM_STOP` | both elbows |
 | `Z_UP` `Z_DOWN` `Z_STOP` | lift |
+| `XJOG:<arm>,<sx>,<sy>,<sz>,<mm/s>` · `XJOG_STOP` | XYZ jog — signs −1/0/+1 for the tool's X, Y, Z · ease out |
 | `JOG_HB` | dead-man keep-alive, ~150 ms |
 | `MOVE_A1:<deg>` · `MOVE_R1:<mm>` | absolute elbow angle · radial reach |
 | `SET_BOOST:<×>` | temporary jog multiplier |
@@ -402,6 +456,7 @@ USB serial, **115200 baud** by default, two-way ASCII lines.
 | `[PLC_HOME] …` · `[HOME] …` | homing handshake |
 | `[IK] …` · `[FK] …` · `[SINGULARITY] …` | kinematics results · advisory near straight-arm |
 | `[RUN] TARGET REACHED` · `[ESTOP] EMERGENCY STOP` | move complete · stop acknowledged |
+| `[XJOG] XY stopped - …` · `[XJOG] Z stopped - …` | the XYZ jog refused a step, and why |
 | `[WATCHDOG] …` | jog stopped — no keep-alive from the host |
 | `[WARN] …` · `[ERROR] …` | interlock fired · malformed or out-of-range |
 

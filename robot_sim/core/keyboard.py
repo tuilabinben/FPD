@@ -21,8 +21,27 @@ class KeyboardMixin:
                 self.root.unbind_all(f"<KeyPress-{k}>")
                 self.root.unbind_all(f"<KeyRelease-{k}>")
 
-        keymap = keybinds.to_tk_keymap(keybinds.active_map())
-        self._bound_jog_keys = tuple(keymap)
+        # ONE jog layout is live at a time: JOINT (a motor per key) or XYZ
+        # (the tool along an axis). They share keys by default, so both
+        # cannot be bound together; set_jog_frame() calls back here.
+        layout = (keybinds.active_xyz_map()
+                  if getattr(self, "jog_frame_mode", "JOINT") == "XYZ"
+                  else keybinds.active_map())
+        keymap = keybinds.to_tk_keymap(layout)
+        shortcuts = keybinds.active_shortcuts()
+        self._bound_jog_keys = tuple(keymap) + tuple(shortcuts.values())
+
+        # RESET POS and HOME: one press each, rebindable. Read from the live
+        # layout, never a literal, so the key Settings shows and the key
+        # that fires are the same one by construction (they had drifted
+        # once: HOME reserved on backspace while this bound "h"). Bound
+        # BEFORE the jog keys: Settings refuses a clash, but a hand-edited
+        # file can still hold one, and there the axis keeps its key.
+        fire = {"RESET_POS": self._reset_key_pressed, "HOME": self._home_key_pressed}
+        for action, key in shortcuts.items():
+            for k in ([key, key.upper()] if len(key) == 1 else [key]):
+                self.root.bind_all(f"<KeyPress-{k}>", lambda e, f=fire[action]: f())
+
         for key, start_cmd in keymap.items():
             keys = [key, key.upper()] if len(key) == 1 else [key]
             for k in keys:
@@ -32,13 +51,6 @@ class KeyboardMixin:
                                    lambda e, s=start_cmd: self._key_release(s))
 
         self.root.bind_all("<KeyPress-space>", lambda e: self.emergency_stop_all())
-        # HOME bound from keybinds.HOME_KEY not a literal, so RESERVED key
-        # and key that actually homes are same one by construction. had
-        # drifted: RESERVED_KEYS said backspace while this bound "h"/"H",
-        # so homing fired on unprotected letter that a jog axis could also
-        # take — one keypress would jog and home at same time.
-        self.root.bind_all(f"<KeyPress-{keybinds.HOME_KEY}>",
-                           lambda e: self._home_key_pressed())
 
         # ENTER runs loaded P2P program, keyboard equiv of RUN PROGRAM.
         # gated on mode+focus like HOME: only in P2P, not while text field
@@ -58,15 +70,17 @@ class KeyboardMixin:
         # close then immediately reopen it. "break" stops propagation.
         self.root.bind_all("<KeyPress-Escape>", self._escape_pressed)
 
+    def _typing(self):
+        """A text field has the keyboard, so a key is a character, not a command."""
+        return isinstance(self.root.focus_get(),
+                          (tk.Entry, ttk.Entry, ttk.Combobox, tk.Text, tk.Spinbox))
+
     def _jog_keys_enabled(self):
         if self.mode != "JOG":
             return False
         if self.motion_locked:
             return False
-        focused = self.root.focus_get()
-        if isinstance(focused, (tk.Entry, ttk.Entry, ttk.Combobox, tk.Text, tk.Spinbox)):
-            return False
-        return True
+        return not self._typing()
 
     def _key_press(self, start_cmd):
         if not self._jog_keys_enabled():
@@ -93,13 +107,24 @@ class KeyboardMixin:
             return
         self.home()
 
+    def _reset_key_pressed(self):
+        """RESET POS, from ANY mode — its button is on every panel.
+
+        There is no confirmation any more, so these gates are the whole
+        protection: not while a text field has focus (the default key is
+        BackSpace, which is how a typed number is corrected), not under
+        Settings (rebinding a key listens to this same press), and not
+        while moving — silently, or a held key logs a refusal per repeat.
+        """
+        if self.motion_locked or self._typing():
+            return
+        dlg = getattr(self, "_settings_dlg", None)
+        if dlg is not None and dlg.winfo_exists():
+            return
+        self.reset_position()
+
     def _run_key_enabled(self):
-        if self.mode != "P2P":
-            return False
-        focused = self.root.focus_get()
-        if isinstance(focused, (tk.Entry, ttk.Entry, ttk.Combobox, tk.Text, tk.Spinbox)):
-            return False
-        return True
+        return self.mode == "P2P" and not self._typing()
 
     def _run_key_pressed(self):
         if not self._run_key_enabled():

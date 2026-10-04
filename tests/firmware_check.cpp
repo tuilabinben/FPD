@@ -845,6 +845,10 @@ int main() {
     // only arrives on a poll, so the soft limit zeroed a2Dir first EVERY
     // time and the latch saw a rising edge with nothing moving. It then
     // assumed the home end and reported a far-end trip as COVERED MIN.
+    //
+    // NO REFERENCE in this block: with one, position decides (further down)
+    // and the direction is not consulted at all.
+    isHomed = false;
     a2Dir = 0;
     plcPoll3(0, 0, 0);
     plcServiceLimitLatch();
@@ -883,6 +887,76 @@ int main() {
     run("PLC_STATUS");
     check(saw("end Z/R/A2="),
           "PLC_STATUS carries the live end, which is all the GUI has to go on");
+
+    printf("\n  -- the status pushed on the trip already carries the right end --\n");
+    // THE BUG: [PLC_STATE] goes out the moment a bit changes, and it used to
+    // go out BEFORE the latch ran -- so a far-end trip was pushed as the
+    // home end, and the GUI's lamp read COVERED MIN until the host's next
+    // PLC_STATUS three seconds later.
+    isHomed = false;
+    a2Dir = 0; plcPoll3(0, 0, 0);
+    a2Dir = +1;
+    OUT.clear();
+    plcPoll3(0, BIT(14), 0);                  // M30 alone
+    check(saw("[PLC_STATE]") && saw("limit Z/R/A2=001 end Z/R/A2=--+"),
+          "driving forward into M30, the PUSHED status says '+' at once, not three "
+          "seconds later");
+    a2Dir = 0; plcPoll3(0, 0, 0);
+
+    printf("\n  -- WITH A REFERENCE, the arm's POSITION says which end --\n");
+    auto setA2Base = [](double baseDeg) {
+      ConnectorM3.pos = (int32_t)lround(
+          armMotorFromFold(baseDeg + 90.0 - ARM_ZERO_CAD_DEG) * PULSES_PER_DEG_ARM_MOTOR)
+          * (INVERT_ARM2 ? -1 : 1);
+    };
+    isHomed = true;
+    setA2Base(85.0);                           // out near straight
+    a2Dir = -1; plcRememberTravelDir(); a2Dir = 0;   // last seen going BACKWARD
+    OUT.clear();
+    plcPoll3(0, BIT(14) | BIT(15), BIT(0));    // all three bits on
+    check(plcLimitEndFor(2) == +1,
+          "base +85 with M30 on is the FAR switch, whichever way the arm was last going");
+    check(saw("by position") && saw("FORWARD") && saw("end Z/R/A2=--+"),
+          "  ...the board says it went by position, and the pushed status carries '+'");
+    check(!plcHomeStateActive(),
+          "  ...so an EXTENDED arm cannot pass as the home reference");
+    a2Dir = +1; plcServiceLimitStops();
+    check(a2Dir == 0, "  ...further FORWARD is the refused direction");
+    a2Dir = -1; plcServiceLimitStops();
+    check(a2Dir == -1, "  ...and backward, off the switch, stays open");
+    a2Dir = 0;
+
+    // Chatter: the bit drops out for a poll and comes back with nothing moving.
+    plcPoll3(0, BIT(15), BIT(0));
+    OUT.clear();
+    plcPoll3(0, BIT(14) | BIT(15), BIT(0));
+    check(plcLimitEndFor(2) == +1 && !saw("assumed"),
+          "a switch that chatters with the arm parked there is STILL the far one");
+
+    plcPoll3(0, 0, 0);
+    setA2Base(-30.0);                          // HOME
+    a2Dir = +1; plcRememberTravelDir(); a2Dir = 0;   // last seen going FORWARD
+    isHomed = true;
+    plcPoll3(0, BIT(14), 0);
+    check(plcLimitEndFor(2) == PLC_LIMIT_END_A2,
+          "base -30 with M30 on is the HOME switch, though the arm was last going forward");
+    plcPoll3(0, 0, 0);
+    setA2Base(PLC_A2_FAR_END_BASE_DEG - 1.0);
+    check(plcLimitEndByPosition(2) == PLC_LIMIT_END_A2, "the dividing line is half way: just below it, HOME end");
+    setA2Base(PLC_A2_FAR_END_BASE_DEG + 1.0);
+    check(plcLimitEndByPosition(2) == -PLC_LIMIT_END_A2, "  ...just above it, the far end");
+    check(plcLimitEndByPosition(0) == PLC_LIMIT_END_Z && plcLimitEndByPosition(1) == PLC_LIMIT_END_ROT,
+          "  ...and ZM and RM, single-ended, are not asked");
+
+    isHomed = false;
+    setA2Base(85.0);
+    advance(PLC_TRAVEL_DIR_MEMORY_MS + 10);    // no direction left to go by either
+    plcPoll3(0, BIT(14), 0);
+    check(plcLimitEndFor(2) == PLC_LIMIT_END_A2,
+          "with NO reference the counter means nothing, so it is the direction latch again");
+    plcPoll3(0, 0, 0);
+    ConnectorM3.pos = 0;
+    plcLastTravelDir[2] = 0;                   // the sections below start with no history
 
     a2Dir = rotDir = jzDir = 0;
     plcPoll3(0, 0, 0);
@@ -1284,9 +1358,58 @@ int main() {
     serviceScan();
     check(saw("[SCAN_REF]"),
           "hitting the switch ends the return leg early and re-references");
-    check(saw("[SCAN_DONE]"), "  ...and that was the last layer");
+
+    // ---- every layer in: it goes BACK to where it started ------------
+    check(saw("[SCAN_RETURN]") && !saw("[SCAN_DONE]") && scanPhase == SCAN_RETURN,
+          "the last layer does not end the scan: it heads back to the start first");
+    check(jzDir == -1 && rotDir == 0,
+          "  ...ZM comes down to the start height; RM is already on its switch");
+    setZ(5.0);
+    OUT.clear(); serviceScan();
+    check(scanPhase == SCAN_RETURN && jzDir == -1 && !saw("[SCAN_DONE]"),
+          "  ...still returning half way down");
+    setZ(0.0);
+    OUT.clear(); serviceScan();
+    check(saw("[SCAN_DONE]") && !saw("[WARN]"),
+          "  ...and [SCAN_DONE] is sent once it is back, not before");
     check(scanPhase == SCAN_OFF && rotDir == 0 && jzDir == 0,
           "  ...nothing is left running");
+
+    // An ODD layer count ends at the far end of the sweep: RM returns too.
+    setRot(0.0); setZ(0.0);
+    plcPoll3(0, BIT(15), 0);
+    run("SCAN_START:10,90,1");
+    plcPoll3(0, 0, 0);
+    for (int deg = 1; deg <= 340; deg++) { setRot((double)deg); serviceScan(); }
+    check(scanPhase == SCAN_RETURN && rotDir == PLC_LIMIT_END_ROT && jzDir == 0,
+          "a one-layer scan ends at the far end, so RM turns back toward its switch");
+    setRot(170.0);
+    OUT.clear(); serviceScan();
+    check(scanPhase == SCAN_RETURN && !saw("[SCAN_PT]"),
+          "  ...collecting nothing on the way: the data is already complete");
+    setRot(0.0);
+    plcPoll3(0, BIT(15), 0);
+    OUT.clear(); serviceScan();
+    check(saw("[SCAN_DONE] 1 layers") && scanPhase == SCAN_OFF && rotDir == 0,
+          "  ...and finishes on the switch");
+
+    // Stopped on the way back, the scan is still DONE -- the data is in.
+    run("SCAN_START:10,90,1");
+    plcPoll3(0, 0, 0);
+    for (int deg = 1; deg <= 340; deg++) { setRot((double)deg); serviceScan(); }
+    run("SCAN_STOP");
+    check(saw("[SCAN_DONE]") && saw("[WARN]") && !saw("[SCAN_ABORT]")
+            && scanPhase == SCAN_OFF && rotDir == 0,
+          "SCAN_STOP during the return is a finished scan that did not get home");
+    setRot(0.0);
+    plcPoll3(0, BIT(15), 0);
+    run("SCAN_START:10,90,1");
+    plcPoll3(0, 0, 0);
+    for (int deg = 1; deg <= 340; deg++) { setRot((double)deg); serviceScan(); }
+    setRot(200.0); rotDir = 0;                // a soft limit zeroed it on the way
+    OUT.clear(); serviceScan();
+    check(saw("stopped short") && saw("[SCAN_DONE]") && scanPhase == SCAN_OFF,
+          "  ...and so is one a limit stopped short, which says where it is");
 
     // ---- starting from ON the switch ---------------------------------
     OUT.clear();
@@ -2035,6 +2158,210 @@ int main() {
     run("TEST_MOVE:ROT,180,60,SCURVE,0");
     check(saw("accel must be above 0") && !isMoving, "a zero accel is refused");
     run("SET_MOTION_PROFILE:NONE");
+  }
+
+  printf("\n=== X. XJOG: the TOOL POINT jogged along Cartesian X / Y / Z ===\n");
+  {
+    // `n` service passes, XJOG_TICK_MS apart, with the keep-alive a held
+    // key sends.
+    auto ticks = [](int n) {
+      for (int i = 0; i < n; i++) { advance(XJOG_TICK_MS); serviceXjog(); }
+    };
+    auto atHome = []() {
+      handleCommand(String("ESTOP"));
+      rotDir = a1Dir = a2Dir = jzDir = 0; isMoving = false; isHoming = false;
+      scanPhase = SCAN_OFF; isHomed = false;
+      setRot(0.0); setZ(0.0); ConnectorM2.pos = 0; ConnectorM3.pos = 0;
+      plcPoll3(0, 0, 0);
+    };
+    run("SET_MOTION_PROFILE:NONE");
+    run("SET_LIMITS_ENABLED:1");
+    run("SET_LIMIT_ENFORCE:ROT,1"); run("SET_LIMIT_ENFORCE:Z,1");
+    run("SET_LIMIT_ENFORCE:A1,1");  run("SET_LIMIT_ENFORCE:A2,1");
+    run("SET_LIMIT:ROT,MAX,340");
+    const double rHome = reachFromFoldAngle(FOLD_ANGLE_HOME_DEG);
+
+    // ---- +Y from HOME: a straight line, which takes RM AND the elbow ----
+    atHome();
+    int zCalls = ConnectorM0.moveCalls, a2Calls = ConnectorM3.moveCalls;
+    run("XJOG:1,0,1,0,50");
+    check(xjogActive && saw("[XJOG] arm 1 from X 133.2 Y 0.0 Z 0.0"),
+          "XJOG starts from the tool's own pose: HOME is (133.2, 0, 0)");
+    ticks(1);
+    check(xjogVel[1] > 0.0 && xjogVel[1] < 50.0,
+          "the setpoint's speed is RAMPED, not stepped to 50 mm/s");
+    ticks(199);
+    check(xjogVel[1] > 45.0 && xjogVel[1] <= 50.0 + 1e-9 && xjogPos[1] > 40.0,
+          "  ...and after a second it has travelled +Y at the asked speed, or what "
+          "RM can give of it");
+    check(fabs(xjogPos[0] - rHome) < 1e-9 && fabs(xjogPos[2]) < 1e-9,
+          "  ...in a STRAIGHT line: X and Z have not moved");
+    check(ConnectorM1.lastMoveTarget > 0 && ConnectorM2.lastMoveTarget > 0,
+          "  ...which turned RM and extended A1M together");
+    double fx, fy, fz;
+    forwardKinematics(xjogPos[2], xjogRot,
+                      armFoldFromMotor(xjogMotor) + FOLD_ANGLE_HOME_DEG, 1, fx, fy, fz);
+    check(fabs(fx - xjogPos[0]) < 1e-6 && fabs(fy - xjogPos[1]) < 1e-6,
+          "  ...to joint targets whose FK is exactly the setpoint");
+    check(ConnectorM0.moveCalls == zCalls && ConnectorM3.moveCalls == a2Calls,
+          "  ...leaving ZM and the idle arm alone");
+
+    // ---- a release EASES out, and needs no keep-alive to do it ----
+    const double yHeld = xjogPos[1];
+    run("XJOG_STOP");
+    ticks(1);
+    check(xjogActive && xjogVel[1] > 0.0 && xjogVel[1] < 50.0,
+          "a release eases the setpoint down instead of stopping it dead");
+    advance(JOG_WATCHDOG_MS + 100);
+    OUT.clear(); serviceJogWatchdog(); ticks(60);
+    check(!xjogActive && !saw("[WATCHDOG]") && saw("[JOG POS]") && xjogPos[1] > yHeld,
+          "  ...coasts a little, ends by itself and reports where it stopped");
+    run("XJOG:1,0,0,0,50");
+    check(!xjogActive && OUT.empty(), "an all-zero XJOG on an idle board starts nothing");
+
+    // ---- refusals: every check runs BEFORE the step ----
+    atHome();
+    run("XJOG:1,0,-1,0,50");
+    OUT.clear(); ticks(3);
+    check(saw("[XJOG] XY stopped") && saw("outside RM's travel") && !xjogHeld()
+            && fabs(xjogPos[1]) < 1e-9,
+          "-Y from HOME is RM's CCW stop: refused, and the setpoint never moved");
+
+    atHome();
+    run("SET_LIMIT:ROT,MAX,10");
+    run("XJOG:1,0,1,0,50");
+    OUT.clear(); ticks(400);
+    check(saw("RM would leave its taught band") && xjogRot <= 10.0 + 1e-6 && xjogRot > 9.0,
+          "a taught RM boundary stops the XY jog ON the line");
+    run("SET_LIMIT:ROT,MAX,340");
+
+    atHome();
+    run("XJOG:1,-1,0,0,50");
+    OUT.clear(); ticks(3);
+    check(!saw("[XJOG] XY stopped"),
+          "unreferenced, a factory elbow floor does not pin -X (the jog's own rule)");
+    atHome(); isHomed = true;
+    run("XJOG:1,-1,0,0,50");
+    OUT.clear(); ticks(3);
+    check(saw("A1M would leave its taught band"),
+          "  ...referenced, the elbow's lower boundary refuses it");
+    isHomed = false;
+
+    // ---- Z is the lift alone ----
+    atHome();
+    int rotCalls = ConnectorM1.moveCalls;
+    run("XJOG:2,0,0,1,50");
+    ticks(100);
+    check(ConnectorM0.lastMoveTarget > 0 && xjogPos[2] > 5.0
+            && ConnectorM1.moveCalls == rotCalls,
+          "+Z lifts ZM and commands nothing else");
+    atHome();
+    run("XJOG:1,0,0,-1,50");
+    OUT.clear(); ticks(3);
+    check(saw("[XJOG] Z stopped") && saw("stroke"), "-Z at HOME is the bottom of the stroke");
+    atHome(); setZ(50.0);
+    plcPoll3(0, 0, BIT(0));                    // M32, ZM's switch, covered
+    run("XJOG:1,0,1,-1,50");
+    OUT.clear(); ticks(3);
+    check(saw("[XJOG] Z stopped") && saw("M32") && xjogDir[1] == 1,
+          "a covered ZM switch refuses -Z, and the XY half carries on");
+
+    // ---- a joint cannot be asked past its own speed ----
+    atHome();
+    run("XJOG:1,0,1,0,200");
+    ticks(200);
+    const double rotBefore = xjogRot;
+    ticks(1);
+    check(xjogRot - rotBefore
+            <= rotVelDegS * XJOG_JOINT_HEADROOM * (XJOG_TICK_MS / 1000.0) * 1.01,
+          "200 mm/s beside the axis is more RM than RM has: the step is shortened");
+
+    // ---- NO speed ceiling, and a release still stops in half a second ----
+    atHome();
+    run("XJOG:1,0,1,0,5000");
+    check(xjogActive && xjogSpeed == 5000.0, "5000 mm/s is accepted: there is no ceiling");
+    ticks(400);                                   // two seconds held
+    const double vHeld = xjogVel[1];
+    check(vHeld > 0.0 && vHeld < 5000.0 * 0.5,
+          "  ...but the speed it HAS is what the motors give, not the number typed");
+    const double yRel = xjogPos[1];
+    run("XJOG_STOP");
+    ticks((int)(XJOG_EASE_MAX_S * 1000 / XJOG_TICK_MS) + 2);
+    check(!xjogActive && xjogVel[1] == 0.0,
+          "  ...and a release stops inside XJOG_EASE_MAX_S, however fast it was going");
+    check(xjogPos[1] - yRel <= vHeld * XJOG_EASE_MAX_S * 0.5 + 1.0,
+          "  ...coasting no further than that ramp allows");
+
+    atHome();
+    run("XJOG:1,0,1,0,50"); ticks(100);
+    run("XJOG:1,0,-1,0,50");                       // the opposite key, no release
+    ticks(1);
+    check(xjogVel[1] > 0.0, "a reversal slows down first");
+    ticks(60);
+    check(xjogVel[1] < 0.0, "  ...then goes the other way, never through zero in one step");
+
+    // ---- every stop that must not wait ----
+    atHome();
+    run("XJOG:1,0,1,0,50"); ticks(20);
+    advance(JOG_WATCHDOG_MS + 100);
+    OUT.clear(); serviceJogWatchdog();
+    check(saw("[WATCHDOG]") && !xjogActive, "a HELD XYZ key with no keep-alive is stopped");
+
+    run("XJOG:1,0,1,0,50"); ticks(20);
+    int velCalls = ConnectorM1.velocityCalls;
+    run("SET_BOOST:1.5");
+    check(ConnectorM1.velocityCalls == velCalls,
+          "a speed change mid-jog does not MoveVelocity(0) over the setpoint");
+    run("SET_BOOST:1");
+    run("ESTOP");
+    rotCalls = ConnectorM1.moveCalls;
+    ticks(5);
+    check(!xjogActive && ConnectorM1.moveCalls == rotCalls,
+          "ESTOP ends it, and no later pass re-commands the setpoint");
+
+    run("XJOG:1,0,1,0,50"); ticks(20);
+    run("ROT_CW");
+    check(!xjogActive && rotDir == 1, "a joint jog key takes over from an XYZ jog");
+    run("ROT_STOP");
+    run("A1_FWD");
+    run("XJOG:1,0,1,0,50");
+    check(xjogActive && a1Dir == 0, "  ...and an XYZ jog takes over from a joint jog");
+
+    // ---- a pose the frame cannot express must not become a jump ----
+    atHome(); setRot(-5.0);                    // RM coasted past its CCW stop
+    rotCalls = ConnectorM1.moveCalls;
+    run("XJOG:1,0,1,0,50");
+    ticks(5);
+    check(!xjogActive && saw("refused to start") && ConnectorM1.moveCalls == rotCalls,
+          "RM outside its travel: XJOG refuses to start rather than swing round to 355");
+    atHome(); setRot(-0.2);
+    run("XJOG:1,0,1,0,50");
+    check(xjogActive, "  ...a hair past the stop (a jog coasts) still starts");
+    ticks(20);
+    check(xjogRot > -0.2 && xjogRot < 5.0, "  ...and walks on from where RM really is");
+
+    atHome();
+    run("XJOG:1,0,1,0,50"); ticks(20);
+    xjogRot = 200.0;                           // the IK now answers 200 deg away
+    OUT.clear(); rotCalls = ConnectorM1.moveCalls;
+    ticks(1);
+    check(saw("would have to jump") && ConnectorM1.moveCalls == rotCalls && !xjogHeld(),
+          "a step that is still a jump after being shortened is refused, not taken");
+
+    atHome(); setZ(-5.0);                      // unreferenced: the counter is below 0
+    run("XJOG:1,0,1,1,50");
+    OUT.clear(); ticks(20);
+    check(!saw("stopped") && xjogPos[2] > -5.0 && xjogPos[1] > 0.0,
+          "a lift counter below the stroke may come back UP, and does not refuse X/Y");
+    run("XJOG:1,0,0,-1,50");
+    OUT.clear(); ticks(40);
+    check(saw("[XJOG] Z stopped") && saw("stroke"), "  ...only further OUT is refused");
+
+    run("XJOG:3,0,1,0,50");
+    check(saw("arm must be 1"), "an unknown arm is refused");
+    run("XJOG:1,0,1,0,0");
+    check(saw("speed must be above 0"), "a zero speed is refused");
+    atHome();
   }
 
   printf("\n%s  (%d passed, %d failed)\n",

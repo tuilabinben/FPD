@@ -175,10 +175,18 @@ CONTROLS_HELP = (
     + "".join(f"    {keybinds.display_key(k)}  —  {v}\n"
               for k, v in keybinds.RESERVED_KEYS.items())
     + "\n"
+    "XYZ JOG is a second layout, live only while the jog panel is switched\n"
+    "to XYZ — so it may reuse the joint layout's keys, and a swap stays\n"
+    "inside its own layout.\n"
+    "\n"
+    "RESET POS and HOME are one press each and live in BOTH layouts, so\n"
+    "neither may share a key with a jog axis. RESET POS works in every\n"
+    "mode, HOME in JOYSTICK — and neither while a text box has focus.\n"
+    "\n"
     "APPLY saves the layout to keybinds.json, so it is still here next time\n"
     "you start the app. DEFAULTS goes back to "
-    + keybinds.to_hint(keybinds.DEFAULT_KEYMAP).split(" · " + keybinds.display_key(
-        keybinds.HOME_KEY))[0] + "."
+    + keybinds.to_hint(keybinds.DEFAULT_KEYMAP) + " · "
+    + keybinds.to_shortcut_hint(keybinds.DEFAULT_SHORTCUTS) + "."
 )
 
 APPEARANCE_HELP = (
@@ -2125,7 +2133,10 @@ class SettingsDialogMixin:
                           "key bindings")
         body = self._tab_body(page)
 
-        self._kb_draft = dict(keybinds.active_map())
+        # ONE draft for all three layouts. Their action names never collide,
+        # so a flat dict holds them; _kb_layouts() splits it again.
+        self._kb_draft = {**keybinds.active_map(), **keybinds.active_xyz_map(),
+                          **keybinds.active_shortcuts()}
         self._kb_capturing = None
         self._kb_rows = {}
 
@@ -2137,19 +2148,31 @@ class SettingsDialogMixin:
         grid.grid_columnconfigure(0, weight=1)
         grid.grid_columnconfigure(3, weight=1)
 
-        for i, action in enumerate(keybinds.ACTION_ORDER):
-            col = 0 if i < 4 else 3
-            row = i if i < 4 else i - 4
-            tk.Label(grid, text=keybinds.ACTION_LABEL[action], bg=PANEL_BG,
-                     fg=TEXT_LIGHT, font=FONT_LABEL, anchor="w").grid(
-                row=row, column=col, sticky="w", pady=px(3), padx=(0, px(8)))
-            btn = RoundedButton(
-                grid, text=keybinds.display_key(self._kb_draft.get(action, "")),
-                bg_color=SURFACE, fg_color=TEXT_LIGHT, width=92, height=30,
-                radius=RADIUS_MD, font=FONT_BUTTON,
-                command=lambda a=action: self._begin_capture(a))
-            btn.grid(row=row, column=col + 1, sticky="w", padx=(0, px(18)))
-            self._kb_rows[action] = btn
+        # Two columns per layout, the joint one first. `top` is the grid
+        # row the layout starts on.
+        top = 0
+        for heading, order in (("JOINT JOG — one motor per key", keybinds.ACTION_ORDER),
+                               ("XYZ JOG — the tool point", keybinds.XYZ_ORDER),
+                               ("KEYS — one press each", keybinds.SHORTCUT_ORDER)):
+            tk.Label(grid, text=heading, bg=PANEL_BG, fg=ACCENT_MINT,
+                     font=FONT_BUTTON, anchor="w").grid(
+                row=top, column=0, columnspan=5, sticky="w",
+                pady=(px(10) if top else 0, px(2)))
+            half = (len(order) + 1) // 2
+            for i, action in enumerate(order):
+                col = 0 if i < half else 3
+                row = top + 1 + (i if i < half else i - half)
+                tk.Label(grid, text=keybinds.ACTION_LABEL[action], bg=PANEL_BG,
+                         fg=TEXT_LIGHT, font=FONT_LABEL, anchor="w").grid(
+                    row=row, column=col, sticky="w", pady=px(3), padx=(0, px(8)))
+                btn = RoundedButton(
+                    grid, text=keybinds.display_key(self._kb_draft.get(action, "")),
+                    bg_color=SURFACE, fg_color=TEXT_LIGHT, width=92, height=30,
+                    radius=RADIUS_MD, font=FONT_BUTTON,
+                    command=lambda a=action: self._begin_capture(a))
+                btn.grid(row=row, column=col + 1, sticky="w", padx=(0, px(18)))
+                self._kb_rows[action] = btn
+            top += 1 + half
 
         self._kb_status_v = tk.StringVar(value="")
         tk.Label(body, textvariable=self._kb_status_v, bg=PANEL_BG,
@@ -2166,6 +2189,12 @@ class SettingsDialogMixin:
     def _begin_capture(self, action):
         self._kb_capturing = action
         self._refresh_keybind_ui()
+
+    def _kb_layouts(self):
+        """The draft, split back into (joint layout, XYZ layout, shortcuts)."""
+        return tuple({a: self._kb_draft.get(a, "") for a in order}
+                     for order in (keybinds.ACTION_ORDER, keybinds.XYZ_ORDER,
+                                   keybinds.SHORTCUT_ORDER))
 
     def _on_capture_key(self, event):
         """Grabs next keypress for the row being rebound.
@@ -2194,7 +2223,15 @@ class SettingsDialogMixin:
         # If key already used elsewhere, SWAP the two rather than silently
         # leaving axis unbound. Swap is almost always what's meant when
         # reassigning an already-taken key.
-        for other, key in list(self._kb_draft.items()):
+        #
+        # Within the SAME layout only: the joint and XYZ layouts are never
+        # live together, so W on a motor and W on the tool is not a clash.
+        # A shortcut on a jog key IS one, and is left for _kb_errors() to
+        # say — swapping it would move an axis the operator did not touch.
+        layout = next(o for o in (keybinds.ACTION_ORDER, keybinds.XYZ_ORDER,
+                                  keybinds.SHORTCUT_ORDER) if action in o)
+        for other in layout:
+            key = self._kb_draft.get(other, "")
             if key == keysym and other != action:
                 self._kb_draft[other] = self._kb_draft.get(action, "")
                 self._kb_status_v.set(
@@ -2219,13 +2256,19 @@ class SettingsDialogMixin:
 
         if self._kb_capturing is not None:
             return
-        errors = keybinds.validate(self._kb_draft)
+        errors = self._kb_errors()
         # Errors only. Deliberately no commentary on which keys sit near
         # which — operator's call, controller second-guessing it is noise.
         self._kb_status_v.set("✖  " + "  ".join(errors) if errors else "")
 
+    def _kb_errors(self):
+        joint, xyz, shortcuts = self._kb_layouts()
+        return (keybinds.validate(joint) + keybinds.validate(xyz, keybinds.XYZ_ORDER)
+                + keybinds.validate_shortcuts(shortcuts, joint, xyz))
+
     def _default_keybinds(self):
-        self._kb_draft = dict(keybinds.DEFAULT_KEYMAP)
+        self._kb_draft = {**keybinds.DEFAULT_KEYMAP, **keybinds.DEFAULT_XYZ_KEYMAP,
+                          **keybinds.DEFAULT_SHORTCUTS}
         self._kb_capturing = None
         self._kb_status_v.set("")
         self._refresh_keybind_ui()
@@ -2233,12 +2276,12 @@ class SettingsDialogMixin:
                  "to use them.")
 
     def _apply_keybinds(self):
-        errors = keybinds.validate(self._kb_draft)
+        errors = self._kb_errors()
         if errors:
             messagebox.showerror("Cannot apply these bindings",
                                  "\n\n".join(errors))
             return
-        if not keybinds.save(self._kb_draft):
+        if not keybinds.save(*self._kb_layouts()):
             messagebox.showerror("Error", "Could not save the key bindings.")
             return
 
@@ -2248,7 +2291,11 @@ class SettingsDialogMixin:
         if hasattr(self, "refresh_jog_keycaps"):
             self.refresh_jog_keycaps()
         self.log("Key bindings applied and saved — " +
-                 keybinds.to_hint(keybinds.active_map()))
+                 keybinds.to_hint(keybinds.active_map())
+                 + "   |   XYZ jog: "
+                 + keybinds.to_xyz_hint(keybinds.active_xyz_map())
+                 + "   |   "
+                 + keybinds.to_shortcut_hint(keybinds.active_shortcuts()))
 
     # TAB — APPEARANCE
     def _build_appearance_tab(self, page, dlg):

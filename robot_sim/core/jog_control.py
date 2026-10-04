@@ -1,11 +1,22 @@
 """Joystick/jog motion: dead-man axes, limit-sensor locks, boost, and
 software-only motion simulation used when no hardware confirmed."""
 
+import math
+
 from ..config import (
     ARM_MOTOR_RPM_MAX,
     ARM_SIM_MAX_DEG,
     ARM_SIM_MIN_DEG,
     BOOST_LEVELS,
+    D1_MAX_MM,
+    D1_MIN_MM,
+    DEFAULT_XYZ_JOG_MM_S,
+    JOG_FRAMES,
+    XYZ_JOG_ARMS,
+    XYZ_JOG_AXES,
+    XYZ_JOG_JOINT_HEADROOM,
+    XYZ_JOG_JUMP_RATIO,
+    XYZ_JOG_STOP,
     JOG_ARM_AXES,
     JOG_HEARTBEAT_MS,
     JOG_LINK_PROMOTION,
@@ -25,7 +36,10 @@ from ..config import (
 from ..kinematics import (
     base_angle_from_motor_deg,
     fold_angle_from_motor_deg,
+    motor_deg_from_fold_angle,
     motor_deg_to_reach,
+    solve_ik,
+    z_abs_from_home,
 )
 from ..theme import ACCENT_MINT, ACCENT_ORANGE, SURFACE, INK_DARK, TEXT_LIGHT, TEXT_MUTED
 
@@ -52,6 +66,11 @@ class JogControlMixin:
             return
         if command in self.jog_active:
             return
+        # An XYZ key the board (or the simulation) refused stays refused
+        # until it comes up: key auto-repeat would otherwise re-send it,
+        # and be refused again, thirty times a second.
+        if command in self._xjog_blocked:
+            return
         if self._is_limited(command):
             self.log(f"{command} blocked — that axis is on its soft limit. "
                      f"Jog the opposite way to come off it.", tag="warn")
@@ -68,7 +87,10 @@ class JogControlMixin:
 
         self._clear_limit_if_opposite(command)
         self.jog_active.add(command)
-        self.send(command)
+        if command in XYZ_JOG_AXES:
+            self._send_xjog()           # one command carries all three signs
+        else:
+            self.send(command)
         self._warn_unreferenced_once()
         self._refresh_jog_status()
 
@@ -95,11 +117,116 @@ class JogControlMixin:
     def jog_stop(self, start_cmd, stop_cmd=None):
         # press may've been promoted by LINK, release whichever command
         # actually went out — else linked axis latches on
+        self._xjog_blocked.discard(start_cmd)       # the key is up: it may try again
         for candidate in (start_cmd, self._resolve_jog_command(start_cmd)):
             if candidate in self.jog_active:
                 self.jog_active.discard(candidate)
-                self.send(JOG_STOP_COMMAND.get(candidate, stop_cmd or "STOP"))
+                if candidate in XYZ_JOG_AXES:
+                    self._send_xjog()   # the vector with this key out of it
+                else:
+                    self.send(JOG_STOP_COMMAND.get(candidate, stop_cmd or "STOP"))
         self._refresh_jog_status()
+
+    # ── XYZ JOG: the tool point along Cartesian axes ─────────────────────
+    #
+    # The same dead-man keys, the same jog_active set and the same
+    # heartbeat as a joint jog -- what differs is the command. The board
+    # takes all three signs at once and walks a Cartesian setpoint itself
+    # (see XJOG in the firmware), so every press and release re-sends the
+    # whole vector.
+    def _xjog_vector(self):
+        """[sx, sy, sz] from the keys held. Opposite keys cancel."""
+        v = [0, 0, 0]
+        for cmd in self.jog_active:
+            spec = XYZ_JOG_AXES.get(cmd)
+            if spec:
+                v[spec[0]] += spec[1]
+        return v
+
+    def _xjog_speed(self):
+        """mm/s from the panel's box, with NO upper limit (asked for; the
+        panel warns past XYZ_JOG_WARN_MM_S). Never raises: a half-typed
+        value is the default, not an exception on a key press."""
+        try:
+            speed = float(self.xjog_speed_v.get().strip().replace(",", "."))
+        except (AttributeError, ValueError):
+            return DEFAULT_XYZ_JOG_MM_S
+        if not (speed > 0 and math.isfinite(speed)):
+            return DEFAULT_XYZ_JOG_MM_S
+        return speed
+
+    def _send_xjog(self):
+        sx, sy, sz = self._xjog_vector()
+        if not (sx or sy or sz):
+            self.send(XYZ_JOG_STOP)
+            return
+        arm = 2 if self.xjog_arm == "A2M" else 1
+        self.send(f"XJOG:{arm},{sx},{sy},{sz},{self._xjog_speed():g}")
+
+    def _xjog_release(self, axes, why=None):
+        """Drops the held keys of the given axes (0 X, 1 Y, 2 Z) after a
+        refusal. Sends nothing: the refuser has already stopped them."""
+        dropped = False
+        for cmd, (axis, _sign) in XYZ_JOG_AXES.items():
+            if axis in axes and cmd in self.jog_active:
+                self.jog_active.discard(cmd)
+                self._xjog_blocked.add(cmd)
+                dropped = True
+                if cmd in self.jog_pads:
+                    self.jog_pads[cmd].key_deactivate()
+        if dropped:
+            self._refresh_jog_status()
+            if why:
+                self.log(why, tag="warn")
+
+    def _on_xjog_line(self, text):
+        """[XJOG] from the board. The RX pump already logged the line."""
+        upper = text.upper()
+        if "XY STOPPED" in upper:
+            self._xjog_release((0, 1))
+        elif "Z STOPPED" in upper:
+            self._xjog_release((2,))
+
+    def tool_xyz(self, arm=None):
+        """The selected arm's tool point, (x, y, z) mm: X,Y from the
+        turntable axis, Z above HOME -- the P2P frame."""
+        d1, rot, a1, a2 = self.current_joints
+        r = motor_deg_to_reach(a2 if (arm or self.xjog_arm) == "A2M" else a1)
+        rad = math.radians(rot)
+        return r * math.cos(rad), r * math.sin(rad), d1
+
+    def toggle_xjog_arm(self):
+        """Which arm's tool the XYZ jog moves. The other one holds still."""
+        self._release_all_jog_axes()
+        i = XYZ_JOG_ARMS.index(self.xjog_arm)
+        self.xjog_arm = XYZ_JOG_ARMS[(i + 1) % len(XYZ_JOG_ARMS)]
+        self._style_jog_frame_controls()
+        self._xyz_trail = {}
+        self._refresh_xyz_view()
+        self.log(f"XYZ jog now moves {self.xjog_arm}'s tool point.")
+
+    def set_jog_frame(self, frame):
+        """JOINT (one motor per key) or XYZ (the tool along an axis).
+
+        Never with an axis latched, like LINK: a held key would be
+        released under a different layout than it was pressed in.
+        """
+        if frame not in JOG_FRAMES or frame == self.jog_frame_mode:
+            return
+        if self.motion_locked:
+            self.log("Cannot change the jog layout while a program is running.",
+                     tag="warn")
+            return
+        self._release_all_jog_axes()
+        self.jog_frame_mode = frame
+        self._show_jog_frame()
+        # The two layouts share keys (W/S/A/D by default), so the binder
+        # has to follow the switch.
+        self._bind_keys()
+        self.root.focus_set()
+        self.log("Jog layout: XYZ — keys move the tool point along X / Y / Z."
+                 if frame == "XYZ" else
+                 "Jog layout: JOINT — each key drives one motor.")
 
     def _release_all_jog_axes(self, send_stop=True):
         """Single place clearing every active jog axis — previously
@@ -108,6 +235,7 @@ class JogControlMixin:
             if send_stop:
                 self.send(JOG_STOP_COMMAND.get(cmd, "STOP"))
         self.jog_active.clear()
+        self._xjog_blocked.clear()
         for pad in self.jog_pads.values():
             pad.key_deactivate()
         self._cancel_jobs("_jog_sim_job", "_jog_hb_job")
@@ -168,6 +296,10 @@ class JogControlMixin:
         # mode after jog showed stale numbers P2P last wrote, operator had
         # two different answers on screen for where machine was.
         self._refresh_p2p_pose_readout()
+        # ...and the XYZ layout's 3D view, the same pose again.
+        refresh = getattr(self, "_refresh_xyz_view", None)
+        if refresh is not None:
+            refresh()
 
     def _is_limited(self, direction):
         return bool(self.rot_limit.get(direction) or self.z_limit.get(direction))
@@ -286,6 +418,11 @@ class JogControlMixin:
         if "Z_DOWN" in self.jog_active:
             self.sim_z -= z_v * dt * scale
 
+        xyz = self._xjog_vector()
+        if any(xyz):
+            self._xjog_sim_step(xyz, dt, rot_v, arm_v, z_v)
+            prev_rot, prev_z = self.sim_rot, self.sim_z
+
         rot_lo, rot_hi = self._axis_bounds(*self._limit_pair("rot"), axis="ROT")
         self.sim_rot, hit = self._apply_axis_limit(self.sim_rot, prev_rot,
                                                    rot_lo, rot_hi)
@@ -306,6 +443,80 @@ class JogControlMixin:
 
         if self.jog_active:
             self._schedule("_jog_sim_job", JOG_SIM_TICK_MS, self._jog_sim_tick)
+
+    def _xjog_sim_step(self, vec, dt, rot_v, arm_v, z_v):
+        """One offline tick of the XYZ jog, by the board's own rules: solve
+        the stepped point through IK, refuse it BEFORE taking it (travel,
+        then the taught bands with the escape rule), and shorten the step
+        until no joint is asked past its speed. Z is the lift alone, so
+        the XY half and the Z half stand or fall separately.
+
+        The caller re-reads its "previous" values afterwards: the step has
+        been checked here, and a second opinion from the joint clamps
+        would latch a joint-jog limit nobody is holding.
+
+        Not mirrored: the board RAMPS the setpoint's speed and this snaps
+        to it, like the rest of the offline jog.
+        """
+        arm = self.xjog_arm
+        speed = self._xjog_speed()
+        d1, rot, a1, a2 = self.current_joints
+        motor = a2 if arm == "A2M" else a1
+        x, y, _z = self.tool_xyz(arm)
+
+        if vec[0] or vec[1]:
+            def solve(nx, ny):
+                # Z is the lift's business: an out-of-stroke counter must
+                # not refuse X/Y.
+                z = z_abs_from_home(min(max(d1, D1_MIN_MM), D1_MAX_MM), arm)
+                _d1, n_rot, f1, f2 = solve_ik(nx, ny, z, arm, reference_deg=rot)
+                n_motor = motor_deg_from_fold_angle(f2 if arm == "A2M" else f1)
+                for value, prev, pair, axis, name in (
+                        (n_rot, rot, "rot", "ROT", "RM"),
+                        (n_motor, motor, arm[:2].lower(), arm[:2], arm)):
+                    lo, hi = self._axis_bounds(*self._limit_pair(pair), axis=axis)
+                    if self._apply_axis_limit(value, prev, lo, hi)[1]:
+                        raise ValueError(f"{name} would leave its taught band")
+                return n_rot, n_motor
+
+            nx, ny = x + vec[0] * speed * dt, y + vec[1] * speed * dt
+            try:
+                n_rot, n_motor = solve(nx, ny)
+                def joint_over():
+                    return max(abs(n_rot - rot) / (rot_v * XYZ_JOG_JOINT_HEADROOM * dt),
+                               abs(n_motor - motor) / (arm_v * XYZ_JOG_JOINT_HEADROOM * dt))
+
+                over = joint_over()
+                if over > 1.0:
+                    n_rot, n_motor = solve(x + (nx - x) / over, y + (ny - y) / over)
+                    # Still far past its speed after shortening: the IK
+                    # answered on another branch (RM's counter outside its
+                    # travel, the tool at the axis). A jump, not a step.
+                    if joint_over() > XYZ_JOG_JUMP_RATIO:
+                        raise ValueError("a joint would have to jump to follow — HOME "
+                                         "or reset the coordinates first")
+            except ValueError as e:
+                self._xjog_release(
+                    (0, 1), f"XYZ jog: X/Y stopped — {str(e).split('. ')[0]}.")
+            else:
+                self.sim_rot = n_rot
+                if arm == "A2M":
+                    self.sim_a2 = n_motor
+                else:
+                    self.sim_a1 = n_motor
+                self._prev_arm["A2M" if arm == "A2M" else "A1M"] = n_motor
+
+        if vec[2]:
+            nz = d1 + vec[2] * min(speed, z_v * XYZ_JOG_JOINT_HEADROOM) * dt
+            lo, hi = self._axis_bounds(*self._limit_pair("z"), axis="Z")
+            if (nz < D1_MIN_MM - 1e-6 and vec[2] < 0) or (nz > D1_MAX_MM + 1e-6 and vec[2] > 0):
+                self._xjog_release((2,), f"XYZ jog: Z stopped — the lift's stroke is "
+                                         f"{D1_MIN_MM:g}..{D1_MAX_MM:g} mm above HOME.")
+            elif self._apply_axis_limit(nz, d1, lo, hi)[1]:
+                self._xjog_release((2,), "XYZ jog: Z stopped — ZM would leave its "
+                                         "taught band.")
+            else:
+                self.sim_z = nz
 
     def _limit_pair(self, axis):
         """(lower, upper) working limit for an axis.

@@ -191,6 +191,11 @@ class ScanPanelMixin:
             command=self.save_scan_csv)
         self.btn_scan_save.pack(side="left")
 
+        # RESET POS, the same round button the other panels have. SCAN has
+        # no HOME button to put it beside, so it joins this row.
+        self.scan_reset_btn = self._build_reset_pos_button(group, size=56)
+        self.scan_reset_btn.pack(side="left", padx=(10, 0))
+
         # Same audited path as the other panels: one stop, three buttons.
         #
         # It travels with the group now rather than sitting at the far right,

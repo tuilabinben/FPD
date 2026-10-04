@@ -155,6 +155,12 @@ class ProtocolMixin:
             self._on_limit_triggered(payload.split()[0].upper() if payload else "")
             return
 
+        # The XYZ jog refused a step and dropped those keys. RX pump
+        # already logged the line.
+        if upper.startswith("[XJOG]"):
+            self._on_xjog_line(text)
+            return
+
         # Every [SCAN_*] reply. RX pump already logged the line.
         if upper.startswith("[SCAN"):
             self._on_scan_line(text)
@@ -195,6 +201,16 @@ class ProtocolMixin:
         if upper.startswith("[WARN]") and "NO ETHERNET LINK" in upper:
             self._set_plc_led("unreachable")
             self.log(text, tag="warn")
+            return
+
+        if upper.startswith("[ERROR]") and "UNKNOWN COMMAND: XJOG" in upper:
+            # A board flashed before the XYZ jog existed. Without this the
+            # keys stay "held" on screen while nothing moves and the only
+            # clue is an Unknown command line in the log.
+            self._xjog_release((0, 1, 2),
+                               "This board's firmware has no XYZ jog (it answered "
+                               "'Unknown command'). Re-flash it — the JOINT layout "
+                               "still works meanwhile.")
             return
 
         if upper.startswith("[ERROR]"):
